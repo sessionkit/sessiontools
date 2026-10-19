@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sounds.schema.json",
+  "title": "sounds",
+  "description": "Settings of the sounds a seat plays on what its agent is doing. At any layer: ~/.sessionkit/tools/settings/sounds.json (host), agent front matter settings: {sounds.busy.file: ...} (agent), seats/<seat>/settings/sounds.json (seat), sessions/<sid>/settings/sounds.json or sounds.d/*.json (session). A layer file holds only the keys it sets. Unset or disabled is silent, and does no work. The hooks check every key they read themselves; this schema is for `session settings` and for people. Nothing here is read from the environment (no x-env).",
+  "type": "object",
+  "properties": {
+    "enabled": {
+      "description": "The main switch for every sound. Only the boolean true turns any sound on; a sound's own block then decides that sound.",
+      "type": "boolean"
+    },
+    "busy": {
+      "description": "The busy sound: plays FILE once, on the moment TRIGGER names, and stops when the tool batch returns. In the batch mode (the default) it plays once a tool batch has run for DELAY seconds; a batch that ends sooner makes no sound, and a subagent's batch makes no sound.",
+      "type": "object",
+      "properties": {
+        "trigger": {
+          "description": "ONE mode. batch (unset is batch): a tool batch still running after DELAY (needs auto_arm and delay). landed: the user's line is in the seat's queue, unread (the pager signals it). finished: the ears have closed the user's utterance (the ears signal it). Any other value, wrong case included, is silent in every mode: a typo never falls back to batch.",
+          "type": "string",
+          "enum": ["batch", "landed", "finished"]
+        },
+        "player": {
+          "description": "Who plays it. afplay (unset is afplay): a detached afplay per sound, as before. engine: the resident sound engine (one Swift AVAudioEngine process under launchd, UDP 127.0.0.1:44100); the hooks send it one OSC datagram each, with no python after the session's first arm, and the engine owns the delay, the speech guard and the stop. Not installed or not running is silent. Read by the batch trigger only: landed keeps afplay. Any other value, wrong case included, is silent in every mode.",
+          "type": "string",
+          "enum": ["afplay", "engine"]
+        },
+        "auto_arm": {
+          "description": "The batch trigger's switch: arm on every tool batch. Only the boolean true arms it. false with a file set is silent (room for an explicit arm verb later).",
+          "type": "boolean"
+        },
+        "file": {
+          "description": "The sound file to play (afplay), an absolute path or ~/... . Missing or unreadable is silent.",
+          "type": "string",
+          "minLength": 1
+        },
+        "delay": {
+          "description": "Seconds before the sound starts; may be fractional. batch: seconds the batch runs first, and unset is silent (no default). landed, finished: optional, default 0 (at once).",
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,56 @@
+[project]
+name = "sessiontools"
+version = "0.2.0"
+description = "The harness layer: sessions, status and idle, one driver per harness - a library first"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Mike Bailey", email = "mike@sessionkit.ai" }
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+]
+# >=3.11, not the recipe's >=3.13: sessionmail (the first consumer) declares
+# >=3.11, and uv resolves for EVERY version a project allows, so a stricter
+# floor here made sessionmail's `uv sync` unsatisfiable.
+# Measured: the suite passes on 3.11, 3.12 and 3.13; nothing in
+# the tree needs 3.13. The ceiling, <3.15, makes 3.14 the newest supported
+# version.
+requires-python = ">=3.11,<3.15"
+# TWO runtime dependencies. The FIRST, PyYAML, for agent front matter, which
+# is YAML (the same YAML Claude Code reads itself), and `session start`
+# may pull in the YAML library for itself alone. So PyYAML is declared here and imported by exactly one module,
+# `sessiontools.start.agentfile`; `import sessiontools` (the library
+# sessionmail depends on) still imports nothing outside the standard library.
+# tests/test_cli.py pins both halves.
+# The SECOND: jsonschema, for `session settings` alone - each tool ships a
+# JSON Schema and the reader checks the merged result against it. No
+# configuration library for the layering, by design; imported inside `sessiontools.settings.check_schema`,
+# so `import sessiontools` still reaches nothing outside the standard library.
+dependencies = ["PyYAML>=6", "jsonschema>=4"]
+
+# THE `session` COMMAND - settled at the cutover, when the session repo moved
+# aside: sessiontools provides it, same verbs, ported as package code.
+# Exactly one package owns `session` on the PATH; from here it is this one.
+# argparse and the library; PyYAML for `session start` alone (above).
+[project.urls]
+Homepage = "https://github.com/sessionkit/sessiontools"
+Repository = "https://github.com/sessionkit/sessiontools"
+
+[project.scripts]
+session = "sessiontools.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.9,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"

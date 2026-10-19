@@ -1,0 +1,69 @@
+session start: DRY RUN -- nothing is launched, no secret is resolved
+agent:    scout  (<TMP>/agents/scout.md)
+vendor:   claude
+mode:     direct (exec in place)
+session:  <SESSION-ID>
+  dir:    <TMP>/home/.session/sessions/<SESSION-ID>   (not created: a dry run mints nothing)
+workdir:  <TMP>/work  (cwd)
+record:   <TMP>/home/.session/sessions/<SESSION-ID>/launch/  (env with secrets masked, command, startup-files: written once by the script, before the vendor starts)
+command:
+  claude                                        <- computed: vendor table (claude)
+  --session-id                                  <- computed: session identity (minted by the launcher)
+  <SESSION-ID>          <- computed: session identity (minted by the launcher)
+  --append-system-prompt-file                   <- computed: injected context (system prompt)
+  <TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md  <- computed: injected context (system prompt)
+  --plugin-dir                                  <- computed: the agent's own definition, so --agent resolves from any directory
+  <TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin  <- computed: the agent's own definition, so --agent resolves from any directory
+  --agent                                       <- computed: identity door (the agent named on the command line)
+  scout                                         <- computed: identity door (the agent named on the command line)
+  --effort                                      <- front matter: claude: effort
+  high                                          <- front matter: claude: effort
+  --add-dir                                     <- front matter: claude: add-dir
+  /shared/tools                                 <- front matter: claude: add-dir
+  --                                            <- computed: prompt separator (vendor table)
+  '<!-- source: echo golden briefing -->
+golden briefing
+
+review the auth
+'  <- computed: initial message (words after the agent name + injected context)
+secrets:  (dry run: backends not called, no file written)
+  DEMO_TOKEN  <- pass:demo/token
+launch script:
+  # session start: launch script (generated; do not edit)
+  unset CLAUDE_CODE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_SESSION_AGENT_SOCK CLAUDE_SESSION_AGENT_PID CLAUDE_SESSION_PUB GIT_CONFIG_COUNT ${!GIT_CONFIG_KEY_@} ${!GIT_CONFIG_VALUE_@} CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+  __ss_shred() { rm -f <TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env; }
+  trap __ss_shred EXIT HUP INT TERM
+  # session identity
+  export CLAUDE_SESSION_ID=<SESSION-ID>
+  unset CLAUDE_CODE
+  # vendor env defaults (launcher-owned; an `environment:` declaration overrides)
+  export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
+  cd <TMP>/work || exit 1
+  # --- session start: declared environment -----------------
+  # Runs inside the launched process's own shell, after the cd and
+  # before the exec. Nothing here touches the tmux server, the calling
+  # shell, or a sibling pane.
+  # environment: variables:
+  export DEMO_MODE=on
+  # environment: secrets: and inherit: -- values arrive in a 0600
+  # file (never argv, never this script), sourced once and removed.
+  if [ -r <TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env ]; then set -a; . <TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env; set +a; rm -f <TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env; else
+    printf '%s\n' 'session start: secret file missing: '<TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env >&2
+  fi
+  # --- end declared environment -------------------------------------
+  # schema install: each tool installs its settings schema before the birth reads them; logged in log/settings.jsonl
+  if command -v pager >/dev/null 2>&1; then <PYTHON> -I -c 'import sys; from sessiontools.settings import schema_install_main; sys.exit(schema_install_main())' --dir <TMP>/home/.session/sessions/<SESSION-ID> -- pager settings install </dev/null || :; fi
+  # settings at birth: each schema's x-env variables -> settings/<tool>.d/50-env.json, logged in log/settings.jsonl
+  <PYTHON> -I -c 'import sys; from sessiontools.settings import birth_main; sys.exit(birth_main())' --dir <TMP>/home/.session/sessions/<SESSION-ID> || :
+  # launch record: env (secrets masked), command, startup files
+  # -> <TMP>/home/.session/sessions/<SESSION-ID>/launch/ (written once, 0600, git-ignored)
+  <PYTHON> -I -c 'import sys; from sessiontools.start.record import main; sys.exit(main())' --dir <TMP>/home/.session/sessions/<SESSION-ID> --start-command '<PYTHON> -m sessiontools.cli start --dry-run scout review the auth' --cwd <TMP>/work --file agent-file=<TMP>/agents/scout.md --file system-prompt=<TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md --file plugin=<TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin --file secrets=<TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env --secret DEMO_TOKEN -- claude --session-id <SESSION-ID> --append-system-prompt-file <TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md --plugin-dir <TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin --agent scout --effort high --add-dir /shared/tools -- '<!-- source: echo golden briefing -->
+  golden briefing
+  
+  review the auth
+  ' || :
+  exec claude --session-id <SESSION-ID> --append-system-prompt-file <TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md --plugin-dir <TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin --agent scout --effort high --add-dir /shared/tools -- '<!-- source: echo golden briefing -->
+  golden briefing
+  
+  review the auth
+  '

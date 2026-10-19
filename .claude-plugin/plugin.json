@@ -1,0 +1,11 @@
+{
+  "name": "sessiontools",
+  "version": "0.2.0",
+  "description": "The session command for coding agents: list the live sessions, read a seat's properties and context, start one from an agent file.",
+  "author": {
+    "name": "Mike Bailey",
+    "email": "mike@sessionkit.ai"
+  },
+  "homepage": "https://github.com/sessionkit/sessiontools",
+  "repository": "https://github.com/sessionkit/sessiontools"
+}

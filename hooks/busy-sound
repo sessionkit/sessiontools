@@ -1,0 +1,209 @@
+#!/bin/sh
+# busy-sound - the busy sound's hook: `busy-sound arm|end|stop|clear`,
+# the hook payload on stdin. PreToolUse arms, PostToolBatch ends, Stop stops,
+# UserPromptSubmit and SessionEnd clear (`stop` is `clear` to the sound). Silent
+# unless the `sounds` settings switch it on, and it fails SILENT whatever goes
+# wrong: a hook must never be the reason a turn breaks.
+#
+# It also keeps the TURN-ENDED MARK (contract v1: sessiontools.turn),
+# one hook set for both. DEFAULT OFF: only with SESSIONTOOLS_HOOK_TURN=on (or
+# 1/true/yes); switching it on for a seat is a config change. It runs FIRST,
+# before every one of the sound's fast paths and switches, so a seat with no
+# sound still gets its mark:
+#
+#   stop                      python writes <session dir>/turn-ended (needs the
+#                               payload's background_tasks; once a turn)
+#   arm|clear, no mark        one [ -e ]: nothing more, no python
+#   arm|clear, mark, payload  rm the mark: the parent's PreToolUse,
+#     never names agent_id      UserPromptSubmit or SessionEnd
+#   arm|clear, mark, payload  python decides: a TOP-LEVEL agent_id is a
+#     names agent_id            subagent's event and changes nothing; a parent
+#                               whose tool input merely says agent_id clears
+#
+# With the mark switched on, the shim reads the payload into a variable when it
+# must, and hands the same bytes to the sound's python.
+#
+# PreToolUse fires on EVERY tool, and python costs 30-50 ms. So the shim
+# decides from `stat`s first, and python starts only when it has to. The
+# sound's fast paths:
+#
+#   SESSIONTOOLS_HOOK_BUSY=off       no sound (also 0/false/no; python re-checks);
+#                                    exit 0 at once unless the mark is on
+#   no CLAUDE_CODE_SESSION_ID        exit 0 (claude sets it in every hook)
+#   no session dir                   exit 0 (no identity, nothing to read)
+#   arm, sounds/busy/off present     exit 0, unless a host- or session-layer
+#     and no sounds file newer         sounds.json or sounds.d is newer than it:
+#                                      the batch trigger resolved OFF this
+#                                      session. python back-dates `off` 1 s,
+#                                      because `-nt` compares whole seconds.
+#   arm, sounds/busy/token present   exit 0: this batch is armed already
+#   end|clear, no token and no pgid  exit 0: nothing is armed. EVERY slot is
+#     in any slot                      tested (busy, unread, finished: python's
+#                                      busy.SLOTS), because end and clear stop
+#                                      them all; two [ -e ]
+#                                      builtins a slot, still no python
+#   no python, or older than 3.11    exit 0
+#   python crashes, or anything      exit 0, stderr to /dev/null
+#
+# THE ENGINE (`busy.player: engine`): python writes the engine's
+# record, sounds/busy/engine.<claude pid>, at the session's first arm. Then:
+#
+#   arm, engine.$CLAUDE_PID present  sound-event --hook arm SID, then exit 0: no
+#     and no sounds file newer         python and no token, because the engine
+#                                      owns the delay. The payload goes on its
+#                                      stdin (the turn mark's copy, when the mark
+#                                      read it), so a subagent's arm is not sent.
+#   end|stop|clear, a record         sound-event sends the verb, then the
+#     (engine.$CLAUDE_PID, or any      armed-slot check above runs as before.
+#     engine.* with no CLAUDE_PID)     `end` uses --hook and the payload; stop and
+#                                      clear read no stdin. Stopping is always
+#                                      safe, so a stale record is fine here.
+#
+# The sender is ${SESSIONTOOLS_SOUND_HOME:-~/.local/share/sessiontools/sound}
+# /bin/sound-event. Not executable means not installed, which counts as off: no
+# datagram, exit 0. It sends ONE datagram to 127.0.0.1 ($SESSIONTOOLS_SOUND_PORT
+# for tests, else 44100) and exits 0, silent; an engine that is off is silent
+# by construction. The record is keyed on the claude pid, so `claude --resume`
+# (a new pid) resolves once and writes its own. A seat without the key has no
+# record, and pays one more stat on end, stop and clear.
+#
+# `[ a -nt b ]` is false when `a` is missing, so an absent layer file never
+# forces a resolve. A seat- or agent-layer switch-ON takes effect at the next
+# launch, or at once after `rm <session dir>/sounds/busy/off`.
+#
+# The python, picked only here,
+# after every fast path, so the off path never pays for it. `pick` lives in
+# pick-python.sh beside this file, shared with settle-hook and sourced with
+# `.` (no fork) by `need`, at the first call that needs a python; unreadable,
+# `need` fails and every caller exits 0:
+#   1. $SESSIONTOOLS_PYTHON, when it names an executable (tests, odd hosts);
+#   2. else the interpreter in the shebang of `command -v session`, when that
+#      is a bare path to a python (no space: `#!/usr/bin/env python3` and
+#      wrappers do not count). That venv has PyYAML, so the hook reads the
+#      agent layer with the same YAML reader as `session settings`;
+#   3. else python3 from PATH, as the first version did (the agent layer stays dark).
+# Only PyYAML comes from the CLI's venv: src/ stays first on sys.path.
+#
+# No `exec python`: the `|| exit 0` has to run after python returns (as
+# settle-hook). stdin passes through. The shim's own stderr goes to /dev/null.
+exec 2>/dev/null
+sound=1
+case "${SESSIONTOOLS_HOOK_BUSY:-}" in
+  [Oo][Ff][Ff] | 0 | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo]) sound= ;;
+esac
+turn=
+case "${SESSIONTOOLS_HOOK_TURN:-}" in
+  [Oo][Nn] | 1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss]) turn=1 ;;
+esac
+[ -n "$sound$turn" ] || exit 0
+sid=${CLAUDE_CODE_SESSION_ID:-}
+case "$sid" in '' | */* | . | ..) exit 0 ;; esac   # busy.is_sid
+root=${SESSIONS_DIR:-$HOME/.session/sessions}
+case "$root" in \~/*) root=$HOME/${root#\~/} ;; esac   # a literal ~/, as python expanduser()s it
+dir=$root/$sid
+[ -d "$dir" ] || exit 0
+# This file's dir and python's src/, by builtins: `$(dirname)` forked on
+# EVERY call (+3 ms, measured). A bare `$0` (`sh busy-sound`) is ".", as dirname.
+case "$0" in */*) here=${0%/*} ;; *) here=. ;; esac
+src=$here/../src
+verb=${1:-}
+py=
+need() {   # pick-python.sh's pick, read at the first need: no fast path reads the file
+  [ -n "$py" ] && return 0
+  # shellcheck disable=SC1091 # linted on its own; `.` of a missing file exits 1
+  [ -r "$here/pick-python.sh" ] && . "$here/pick-python.sh" && pick
+}
+got=
+payload=
+if [ -n "$turn" ]; then
+  t=$dir/turn-ended
+  tv=
+  case "$verb" in
+    stop) payload=$(cat); got=1; tv="set" ;;
+    arm | clear)
+      if [ -e "$t" ]; then
+        payload=$(cat); got=1
+        case "$payload" in *agent_id*) tv="clear" ;; *) rm -f "$t" ;; esac
+      fi
+      ;;
+  esac
+  if [ -n "$tv" ] && need; then
+    printf '%s' "$payload" | "$py" -I -c 'import sys
+if sys.version_info < (3, 11):
+    sys.exit(0)
+sys.path.insert(0, sys.argv[1])
+from sessiontools.turn import main
+sys.exit(main(sys.argv[2:]))' "$src" "$tv" || :
+  fi
+fi
+[ -n "$sound" ] || exit 0
+b=$dir/sounds/busy
+h=$HOME/.sessionkit/tools/settings
+s=$dir/settings
+ev=${SESSIONTOOLS_SOUND_HOME:-$HOME/.local/share/sessiontools/sound}/bin/sound-event
+cp=${CLAUDE_PID:-}
+case "$cp" in '' | *[!0-9]*) cp= ;; esac   # busy.claude_pid: digits only
+case "$verb" in
+  arm)
+    r=$b/engine.$cp
+    if [ -n "$cp" ] && [ -e "$r" ] &&
+      ! [ "$s/sounds.json" -nt "$r" ] && ! [ "$s/sounds.d" -nt "$r" ] &&
+      ! [ "$h/sounds.json" -nt "$r" ] && ! [ "$h/sounds.d" -nt "$r" ]; then
+      [ -x "$ev" ] || exit 0
+      if [ -n "$got" ]; then
+        printf '%s' "$payload" | "$ev" --hook arm "$sid"
+      else
+        "$ev" --hook arm "$sid"
+      fi
+      exit 0
+    fi
+    if [ -e "$b/off" ] &&
+      ! [ "$s/sounds.json" -nt "$b/off" ] && ! [ "$s/sounds.d" -nt "$b/off" ] &&
+      ! [ "$h/sounds.json" -nt "$b/off" ] && ! [ "$h/sounds.d" -nt "$b/off" ]; then
+      exit 0
+    fi
+    [ -e "$b/token" ] && exit 0
+    ;;
+  end | stop | clear)
+    armed=
+    for k in busy unread finished; do   # busy.SLOTS
+      if [ -e "$dir/sounds/$k/token" ] || [ -e "$dir/sounds/$k/pgid" ]; then armed=1; break; fi
+    done
+    rec=
+    if [ -n "$cp" ]; then
+      [ -e "$b/engine.$cp" ] && rec=1
+    else
+      for r in "$b"/engine.*; do [ -e "$r" ] && { rec=1; break; }; done
+    fi
+    if [ -n "$rec" ] && [ -x "$ev" ]; then
+      if [ "$verb" != end ]; then
+        "$ev" "$verb" "$sid" </dev/null
+      else
+        # stdin is read once: when python needs it too (an armed slot), keep
+        # a copy, as the turn mark does.
+        if [ -z "$got" ] && [ -n "$armed" ]; then payload=$(cat); got=1; fi
+        if [ -n "$got" ]; then
+          printf '%s' "$payload" | "$ev" --hook end "$sid"
+        else
+          "$ev" --hook end "$sid"
+        fi
+      fi
+    fi
+    [ -n "$armed" ] || exit 0
+    ;;
+  *) exit 0 ;;
+esac
+need || exit 0
+run() {
+  "$py" -I -c 'import sys
+if sys.version_info < (3, 11):
+    sys.exit(0)
+sys.path.insert(0, sys.argv[1])
+from sessiontools.busy import main
+sys.exit(main(sys.argv[2:]))' "$src" "$verb"
+}
+if [ -n "$got" ]; then
+  printf '%s' "$payload" | run || exit 0
+else
+  run || exit 0
+fi

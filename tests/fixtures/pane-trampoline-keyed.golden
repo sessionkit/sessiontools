@@ -1,0 +1,29 @@
+# session start: launch script (generated; do not edit)
+unset CLAUDE_CODE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_SESSION_AGENT_SOCK CLAUDE_SESSION_AGENT_PID CLAUDE_SESSION_PUB GIT_CONFIG_COUNT ${!GIT_CONFIG_KEY_@} ${!GIT_CONFIG_VALUE_@} CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+# keyed session: minted INSIDE the pane -- the key's ssh-agent and
+# reaper must belong to the pane's lifetime, not to the
+# launcher's.
+__ss_env_block="$(/kbin/session-key-init --agent-name voicemode+super --session-dir /tmp/s --reap-pid "$$")" || {
+  echo 'session start: session-key-init failed inside the pane' >&2
+  sleep 15   # hold the pane so the failure can actually be read
+  exit 1
+}
+while IFS= read -r __ss_line; do
+  case "$__ss_line" in *=*) export "$__ss_line";; esac
+done <<<"$__ss_env_block"
+printf '%s' "$CLAUDE_SESSION_ID" > /tmp/s/"$CLAUDE_SESSION_ID"/session-id
+__ss_reaped=''
+__ss_reap() {
+  [ -n "$__ss_reaped" ] && return
+  __ss_reaped=1
+  declare -F __ss_shred >/dev/null 2>&1 && __ss_shred
+  if [ -x /kbin/session-death ]; then
+    CLAUDE_SESSION_AGENT_SOCK="$CLAUDE_SESSION_AGENT_SOCK" /kbin/session-death /tmp/s/"$CLAUDE_SESSION_ID" voicemode+super >> /tmp/s/"$CLAUDE_SESSION_ID"/death.log 2>&1 || true
+  fi
+  [ -n "${CLAUDE_SESSION_AGENT_PID:-}" ] && kill "$CLAUDE_SESSION_AGENT_PID" 2>/dev/null
+}
+trap __ss_reap EXIT HUP INT TERM
+unset CLAUDE_CODE
+cd /w || exit 1
+v --flag
+exit "$?"

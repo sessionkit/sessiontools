@@ -1,0 +1,70 @@
+{
+  "description": "sessiontools' hooks, installed with the plugin. PostToolBatch: settle-hook, the settle alert. Once per model turn that calls a tool, it says ONE line once this session's context is at or past the threshold it set for itself, and nothing otherwise. SESSION_SETTLE_AT sets the threshold in tokens (250000, 250k, 1.5M); UNSET IS SILENT, ALWAYS, and python never starts. SESSION_SETTLE_SAY replaces the line ({at} and {used} are filled). SESSIONTOOLS_HOOK_SETTLE=off (or 0/false/no) switches it off with the plugin still loaded. No filter on who the session is: any session with a threshold is told. A subagent's batch (payload agent_id) is silent. It reads the count with sessiontools.window.scan on the payload's transcript, never blocks, and fails SILENT: no python3, python older than 3.11, a missing transcript or a crash all exit 0 with no output (hooks/settle-hook). PreToolUse, PostToolBatch, Stop (verb stop), UserPromptSubmit, SessionEnd: busy-sound, the busy sound. It plays a sound file once a tool batch has run past a delay, and stops it the moment the batch returns. SILENT UNLESS SET: the `sounds` settings (~/.sessionkit/tools/settings/sounds.json, agent front matter, seats/<seat>/settings/, sessions/<sid>/settings/) need enabled: true and busy.{auto_arm: true, file, delay}. A seat without them starts python once per session, then pays a few stat calls per tool. busy.trigger picks ONE mode: batch (unset; these hooks), landed or finished (signalled, not hooked: `session sound landed|given` plays and stops landed on sounds/unread; finished is held); any other value is silent in every mode, and a seat whose trigger is not batch is OFF for these hooks, paying what a seat without the setting pays. SESSIONTOOLS_HOOK_BUSY=off (or 0/false/no) switches it off with the plugin still loaded. A subagent's batch makes no sound. The player is afplay, in a detached process group that the batch end kills; end and clear stop every slot (busy, unread, finished). busy.player picks who plays the batch trigger's sound: afplay (unset) or engine, the resident sound engine. With engine, the session's first arm starts python once to write the engine's record (sounds/busy/engine.<claude pid>) and send arm; every later hook sends ONE OSC datagram (/sound/event ,ssd EVENT SID T) to UDP 127.0.0.1:44100 with the native sender (~/.local/share/sessiontools/sound/bin/sound-event, or under SESSIONTOOLS_SOUND_HOME), with no python and no wait. Not installed, or an engine that is off, is silent; any other player value is silent in every mode. It never blocks, and fails SILENT (hooks/busy-sound, sessiontools.busy). The same busy-sound hooks keep the TURN-ENDED MARK, so a seat whose turn is over while a background agent runs reads `idle with children`, not busy. DEFAULT OFF: nothing is written unless SESSIONTOOLS_HOOK_TURN=on (or 1/true/yes) is in the seat's environment; switching it on is a config change. On: Stop writes ~/.session/sessions/<sid>/turn-ended (under SESSIONS_DIR when set; only when the session dir exists) atomically, one JSON line {\"v\": 1, \"at\": <epoch s>, \"harness\": \"claude-code\", \"event\": \"Stop\", \"background\": <running background_tasks, or null>}; PreToolUse, UserPromptSubmit and SessionEnd unlink it. An event whose payload carries agent_id (a subagent's) changes nothing. The mark runs before every sound switch and fast path, costs one stat on PreToolUse when there is no mark, never blocks, and fails SILENT (hooks/busy-sound, sessiontools.turn).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/busy-sound\" arm",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/settle-hook\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/busy-sound\" end",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/busy-sound\" stop",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/busy-sound\" clear",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/busy-sound\" clear",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

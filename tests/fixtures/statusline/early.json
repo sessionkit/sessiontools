@@ -1,0 +1,12 @@
+{
+  "session_id": "early",
+  "model": {"id": "claude-sonnet-5", "display_name": "Sonnet 5"},
+  "cwd": "@CWD@",
+  "context_window": {
+    "context_window_size": 200000,
+    "used_percentage": null,
+    "current_usage": null
+  },
+  "cost": {"total_cost_usd": 0.0423},
+  "rate_limits": {"five_hour": {"used_percentage": 7}}
+}

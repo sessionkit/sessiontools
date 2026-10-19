@@ -1,0 +1,41 @@
+#!/bin/sh
+# settle-hook - the plugin's PostToolBatch entry: run sessiontools.settle on
+# the hook's JSON, from this plugin's own src/, and stay SILENT whatever goes
+# wrong. A hook must never be the reason a turn breaks.
+#
+#   SESSIONTOOLS_HOOK_SETTLE=off   exit 0 (also 0/false/no; python re-checks)
+#   SESSION_SETTLE_AT unset/empty  exit 0 - python never starts, costs nothing
+#   no pick-python.sh beside it    exit 0
+#   no python at all               exit 0
+#   python older than 3.11         exit 0 (the -c guard below)
+#   python crashes, or anything    exit 0, stderr to /dev/null
+#
+# The python is the one busy-sound runs: `pick`, from pick-python.sh beside
+# this file, sourced with `.` (no fork) and only once the threshold is set.
+# $SESSIONTOOLS_PYTHON, else the `session` command's shebang python (the tool
+# venv's, which `uv tool install` keeps off PATH), else python3 from PATH. A
+# clean Mac's PATH python3 is Apple's 3.9.6, so PATH alone would leave the
+# alert silent; there the -c guard is the second line of defence.
+#
+# No `exec python`: the `|| exit 0` has to run after python returns (the
+# same reason as sessionmail's mail-guard-hook). stdin passes through.
+# The shim's OWN stderr goes to /dev/null too: when python is killed, sh
+# itself reports it ("Killed: 9") on stderr, and a hook's stderr is shown.
+exec 2>/dev/null
+case "${SESSIONTOOLS_HOOK_SETTLE:-}" in
+  [Oo][Ff][Ff] | 0 | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo]) exit 0 ;;
+esac
+[ -n "${SESSION_SETTLE_AT:-}" ] || exit 0
+# This file's dir, by builtins (no `$(dirname)` fork). A bare `$0` is ".".
+case "$0" in */*) here=${0%/*} ;; *) here=. ;; esac
+[ -r "$here/pick-python.sh" ] || exit 0   # `.` of a missing file exits 1
+py=
+# shellcheck disable=SC1091 # linted on its own
+. "$here/pick-python.sh"
+pick || exit 0
+"$py" -I -c 'import sys
+if sys.version_info < (3, 11):
+    sys.exit(0)
+sys.path.insert(0, sys.argv[1])
+from sessiontools.settle import main
+sys.exit(main())' "$here/../src" || exit 0

@@ -1,0 +1,23 @@
+{
+  "name": "sessiontools",
+  "metadata": {
+    "description": "Self-hosting marketplace for the sessiontools plugin: the session skill.",
+    "version": "0.2.0"
+  },
+  "owner": {
+    "name": "Mike Bailey",
+    "email": "mike@sessionkit.ai"
+  },
+  "plugins": [
+    {
+      "name": "sessiontools",
+      "description": "The session command for coding agents: list the live sessions, read a seat's properties and context, start one from an agent file.",
+      "author": {
+        "name": "Mike Bailey",
+        "email": "mike@sessionkit.ai"
+      },
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

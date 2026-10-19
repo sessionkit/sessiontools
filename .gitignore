@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+
+# openspec init drops six opsx commands and six skills here; not ours, not shipped, so ignored
+.claude/

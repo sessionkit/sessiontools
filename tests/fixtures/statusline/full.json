@@ -1,0 +1,22 @@
+{
+  "session_id": "11111111-2222-3333-4444-555555555555",
+  "agent": {"name": "worker"},
+  "model": {"id": "claude-opus-5-5", "display_name": "Opus 5.5"},
+  "workspace": {"current_dir": "@CWD@"},
+  "context_window": {
+    "context_window_size": 1000000,
+    "used_percentage": 42.7,
+    "current_usage": {
+      "input_tokens": 1200,
+      "cache_creation_input_tokens": 20000,
+      "cache_read_input_tokens": 400000
+    },
+    "total_input_tokens": 2400000,
+    "total_output_tokens": 61000
+  },
+  "cost": {"total_cost_usd": 12.345},
+  "rate_limits": {
+    "five_hour": {"used_percentage": 12.4},
+    "seven_day": {"used_percentage": 63.9}
+  }
+}

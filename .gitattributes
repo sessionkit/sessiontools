@@ -1,0 +1,18 @@
+# Export-ignore: what `git archive` leaves out of a release.
+#
+# The dev diary stays in tree and history (no delete, no rewrite) and is left
+# out of the public tree, which is built fresh from `git archive`. This list
+# carries only the paths that exist here.
+#
+# Why two openspec lines. gitattributes documents that a pattern matching a
+# directory does not match the paths inside it, so `/openspec/**` is the
+# contract: it sets export-ignore on every file (`git check-attr` per file).
+# Alone it leaves an empty `openspec/` entry in the archive (measured, git
+# 2.56), so `/openspec` prunes that directory entry too. Every line is anchored
+# with a leading `/`, so no nested openspec or CLAUDE.md is caught.
+
+# The dev diary (openspec/RATIFICATION.md goes with it).
+/openspec      export-ignore
+/openspec/**   export-ignore
+# The plugin-root CLAUDE.md (.claude-plugin/ sits at the repo root).
+/CLAUDE.md     export-ignore

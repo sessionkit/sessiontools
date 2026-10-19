@@ -1,0 +1,9 @@
+{
+  "effortLevel": "fake-e",
+  "model": "fake-host",
+  "statusLine": {
+    "command": "~/.sessionkit/tools/settings/statusline.sh",
+    "padding": 1,
+    "type": "command"
+  }
+}
