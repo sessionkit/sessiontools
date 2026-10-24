@@ -135,6 +135,23 @@ def test_session_context_reports_a_live_seat_like_the_old_tool(fleet, monkeypatc
                                "model": "claude-opus-5-5", "band": None}   # ST-155: no threshold
 
 
+SONNET_5_5 = "claude-sonnet-5-5"
+
+
+def test_sonnet_5_5_has_a_window_in_context_and_in_list(fleet, monkeypatch, capsys):
+    _transcript(fleet, monkeypatch, "73f2f616-aaaa", CWD,
+                {"model": SONNET_5_5, "usage": {"input_tokens": 78_000}})
+    code, out, _ = _run(["context", "bob"], capsys)
+    assert (code, out) == (0, "Context: 78K / 1.00M (7%) · 922K free\n")
+    assert json.loads(_run(["context", "bob", "--json"], capsys)[1])["max"] == 1_000_000
+    code, out, _ = _run(["list", "--json"], capsys)
+    bob = json.loads(out)[0]
+    assert code == 0 and (bob["context_model"], bob["context_window"], bob["context_pct"]) == (
+        SONNET_5_5, 1_000_000, 7)
+    code, out, _ = _run(["list"], capsys)
+    assert code == 0 and [ln.split()[-1] for ln in out.splitlines()[2:]] == ["7%", "-"]
+
+
 def test_session_context_never_guesses_a_window(fleet, monkeypatch, capsys):
     _transcript(fleet, monkeypatch, "dead-1234", "/gone",
                 {"model": "claude-unmapped", "usage": {"input_tokens": 5000}})
@@ -272,7 +289,7 @@ def sent(fleet, monkeypatch):
                         lambda sock, pane, pid: got["checked"].append((sock, pane, pid)) or True)
     monkeypatch.setattr(send, "send_keys",
                         lambda sock, pane, text: got["typed"].append((sock, pane, text)) or True)
-    # `session send` is disabled (2030-07-30) but its code is
+    # `session send` is disabled (2030-12-08) but its code is
     # kept for bringing back; these tests drive the kept handler directly.
     got["run"] = lambda argv: cli._send(argv[1:])
     return got

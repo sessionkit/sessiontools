@@ -185,35 +185,119 @@ def test_the_two_lists_go_to_two_different_destinations():
 
 # ---------- idle and converse --------------------------------------------------
 
-def test_idle_injects_nothing_and_runs_no_generator(tmp_path):
+FLEET_WORDS = ("agent MD", "startup manifest")
+
+# The agent-file wording the converse line must not carry on a bare launch.
+VOICE_FLEET_WORDS = ("letter", "VOICE line", "heard.state", "mouth", "Talk", "seat")
+
+
+def test_idle_with_an_agent_file_injects_only_the_boot_line_and_runs_no_generator(tmp_path):
     marker = tmp_path / "generator-ran"
     start = parse_start({"idle": True, "context": {
         "system-prompt": [f"touch {marker}; printf 'TASK BOARD\\n'", "launch-info"],
         "initial": ["printf 'BRIEFING\\n'"]}})
-    injected = build(start, idle=True, cwd=str(tmp_path),
+    injected = build(start, idle=True, agent_file=True, cwd=str(tmp_path),
                      builtins=c.context_builtins(host="testhost"))
     assert injected.system_prompt == "" and injected.results == []
     assert not marker.exists(), "an idle launch ran a context generator"
-    assert injected.initial.strip() == c.IDLE_BOOT_TRIGGER
+    assert injected.initial == c.IDLE_BOOT_TRIGGER + "\n"
 
 
-def test_idle_still_carries_the_launch_only_signals():
+def test_idle_with_no_agent_file_injects_nothing(tmp_path):
+    marker = tmp_path / "generator-ran"
+    start = parse_start({"idle": True, "context": {
+        "system-prompt": [f"touch {marker}"], "initial": [f"touch {marker}"]}})
+    for case in (EMPTY_START, start):
+        injected = build(case, idle=True, cwd=str(tmp_path))
+        assert injected == c.InjectedContext("", "", [])
+    assert not marker.exists(), "an idle launch ran a context generator"
+
+
+def test_a_bare_idle_launch_is_neutral_by_default():
+    # The keyword defaults to the bare case: a caller that says nothing
+    # about an agent file never gets the boot line.
     initial = build(EMPTY_START, idle=True, converse=True, message="stand by").initial
-    for part in (c.IDLE_BOOT_TRIGGER, c.CONVERSE_SIGNAL, "stand by"):
-        assert part in initial
+    assert c.IDLE_BOOT_TRIGGER not in initial
+    for word in FLEET_WORDS + VOICE_FLEET_WORDS:
+        assert word not in initial
+
+
+def test_bare_idle_still_carries_the_launch_only_signals_in_order():
+    initial = build(EMPTY_START, idle=True, converse=True, message="stand by",
+                    agent_file=False).initial
+    assert initial == c.BARE_CONVERSE_SIGNAL + "\n\nstand by\n"
+
+
+def test_bare_idle_carries_the_users_words_alone():
+    initial = build(EMPTY_START, idle=True, message="stand by").initial
+    assert initial == "stand by\n"
+
+
+def test_agent_idle_still_carries_the_launch_only_signals_in_order():
+    initial = build(EMPTY_START, idle=True, converse=True, message="stand by",
+                    agent_file=True).initial
+    assert initial == f"{c.IDLE_BOOT_TRIGGER}\n\n{c.CONVERSE_SIGNAL}\n\nstand by\n"
 
 
 def test_idle_from_the_cli_and_from_front_matter_agree():
     start = parse_start({"idle": True})
-    assert (build(start, idle=switch_enabled(False, start.idle)).initial
-            == build(EMPTY_START, idle=switch_enabled(True, False)).initial)
+    for agent_file in (True, False):
+        assert (build(start, idle=switch_enabled(False, start.idle), agent_file=agent_file).initial
+                == build(EMPTY_START, idle=switch_enabled(True, False),
+                         agent_file=agent_file).initial)
+
+
+def test_agent_file_does_not_change_a_non_idle_launch():
+    start = parse_start({"context": {"initial": ["printf 'BRIEFING\\n'"]}})
+    assert (build(start, message="go", agent_file=True)
+            == build(start, message="go", agent_file=False))
 
 
 def test_converse_by_front_matter_tells_the_agent_it_can_speak():
+    # Front matter lives in an agent file, so this launch has one.
     start = parse_start({"converse": True})
-    initial = build(start, converse=switch_enabled(False, start.converse)).initial
+    initial = build(start, converse=switch_enabled(False, start.converse),
+                    agent_file=True).initial
     assert c.CONVERSE_SIGNAL in initial
     assert "converse tool" in initial and "mouth say" in initial
+
+
+def test_a_bare_converse_launch_gets_the_neutral_voice_line():
+    start = parse_start({"context": {"initial": ["printf 'BRIEFING\\n'"]}})
+    for case in (EMPTY_START, start):
+        initial = build(case, converse=True, message="go").initial
+        assert c.BARE_CONVERSE_SIGNAL in initial
+        assert c.CONVERSE_SIGNAL not in initial
+        assert initial.endswith(c.BARE_CONVERSE_SIGNAL + "\n\ngo\n")
+    assert build(EMPTY_START, converse=True, message="go").initial == (
+        c.BARE_CONVERSE_SIGNAL + "\n\ngo\n")
+
+
+def test_an_agent_file_converse_launch_keeps_the_fleet_voice_line():
+    start = parse_start({"context": {"initial": ["printf 'BRIEFING\\n'"]}})
+    initial = build(start, converse=True, message="go", agent_file=True).initial
+    assert initial.endswith(f"BRIEFING\n\n{c.CONVERSE_SIGNAL}\n\ngo\n")
+    assert c.BARE_CONVERSE_SIGNAL not in initial
+
+
+def test_the_converse_signal_follows_the_agent_file_idle_or_not():
+    for idle in (True, False):
+        bare = build(EMPTY_START, idle=idle, converse=True).initial
+        agent = build(EMPTY_START, idle=idle, converse=True, agent_file=True).initial
+        assert c.BARE_CONVERSE_SIGNAL in bare and c.CONVERSE_SIGNAL not in bare
+        assert c.CONVERSE_SIGNAL in agent and c.BARE_CONVERSE_SIGNAL not in agent
+    assert c.converse_signal(True) == c.CONVERSE_SIGNAL
+    assert c.converse_signal(False) == c.BARE_CONVERSE_SIGNAL
+
+
+def test_the_bare_voice_line_names_the_tool_and_no_fleet_terms():
+    line = c.BARE_CONVERSE_SIGNAL
+    assert "AVAILABLE" in line and "can speak" in line
+    assert "VoiceMode converse tool" in line
+    for word in VOICE_FLEET_WORDS + FLEET_WORDS:
+        assert word not in line
+    for order in ("Do NOT type", "first response aloud", "ACTIVE"):
+        assert order not in line
 
 
 def test_the_voice_line_states_a_fact_and_the_letter_decides():

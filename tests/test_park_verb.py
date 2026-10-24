@@ -26,7 +26,7 @@ from sessiontools.procs import Proc
 
 SID = "5e1f0c2a-0000-4000-8000-0000000000dd"
 OTHER = "9a9a9a9a-0000-4000-8000-0000000000ee"
-START = "Fri Dec  6 01:00:00 2030"
+START = "Sun Dec  8 01:00:00 2030"
 T0 = procs.parse_ctime(START)
 PARK_AT = T0 + 100.0
 # The far-future --keep-until sentinel: relative to the REAL now, never a literal year.
@@ -403,7 +403,7 @@ def test_park_writes_only_its_record_and_check_writes_nothing(home, capsys):
 # --- design §10 test 12: keep-until -----------------------------------------------------------
 
 def test_keep_until_is_written_and_shown(home, capsys):
-    t = "2030-12-06T17:00:00+11:00"
+    t = "2030-12-08T17:00:00+11:00"
     code, out = run(home, capsys, "--no-promises", "--keep-until", t, "--why", "the verdict",
                     now=datetime.fromisoformat(t).timestamp() - 3600)
     assert code == park.EXIT_CLEAN, out

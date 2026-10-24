@@ -4,7 +4,7 @@
 
 Every transcript is SYNTHETIC, built from the record shapes Claude Code
 writes (README Context; design §3; re-measured by do-001 on one Mac on
-2030-08-14): fake session ids, no mail, no real transcript copied in.
+2030-12-08): fake session ids, no mail, no real transcript copied in.
 The builder and its output are both committed; a test pins that a rebuild
 gives the committed bytes.
 
@@ -70,7 +70,7 @@ class Session:
         return f"{self.n:08d}-0000-4000-9000-{self.k:012d}"
 
     def _ts(self) -> str:
-        return f"2030-06-08T08:{self.k // 60:02d}:{self.k % 60:02d}.000Z"
+        return f"2030-06-09T08:{self.k // 60:02d}:{self.k % 60:02d}.000Z"
 
     def _base(self, kind: str, **more) -> dict:
         u = self._uuid()
@@ -368,7 +368,7 @@ def build() -> dict[str, str]:
     # colliding base names, long commands, each at least as long on average
     # as design evidence budget.py's real sample (its base names 10.0 chars,
     # paths 116.4, commands 451.9, re-measured by do-002 on
-    # 2030-08-14; the gate test asserts the floor). Figures are 4-digit: in
+    # 2030-12-08; the gate test asserts the floor). Figures are 4-digit: in
     # cl100k_base a 4-digit and a 5-digit number are both 2 tokens, so this
     # costs the short report what 5-digit sizes would, at a tenth of the bytes.
     s = Session(11)

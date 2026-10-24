@@ -152,7 +152,7 @@ def test_stranded_raises_on_an_unsearchable_folder_not_old_path(home):
 @needs_non_root
 def test_an_override_file_in_an_unsearchable_folder_raises(home, monkeypatch):
     conf = w(home / "conf" / "ears.json", {"x": 1})
-    monkeypatch.setenv(settings.SETTINGS_FILE_ENV["ears"], str(conf))
+    monkeypatch.setenv(settings.SETTINGS_FILE_ENV["ears"][0], str(conf))
     with unsearchable(conf.parent), pytest.raises(settings.SettingsDenied) as info:
         settings.host_files("ears")
     assert_denied(info, conf)

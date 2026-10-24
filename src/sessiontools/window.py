@@ -4,11 +4,11 @@ and `session context`.
 Named `window`, not `context`: `sessiontools.start.context` is the launch's
 injected prompt, a different thing (a review finding).
 
-Ported from the session repo (retired 2030-07-29): `session-context`'s
+Ported from the session repo (retired 2030-06-09): `session-context`'s
 `scan()` and `resolve_window()`, and `session-list`'s `context_fields()`
 and `_fmt_context()`. The fold and the window rules are theirs,
 unchanged; the long reasoning behind each rule lives in that repo's history
-(`session-20300729`), and the tests here pin the behaviour.
+(`session-20300609`), and the tests here pin the behaviour.
 
     from sessiontools import window
     f = window.of(session_id, cwd)   # a Fullness: used, peak, window, pct, model
@@ -46,18 +46,26 @@ SYNTHETIC_MODEL = "<synthetic>"
 #: resolves to None and renders `?`, never a guessed window. Source a new row
 #: from the Anthropic model catalog (the Models API's `max_input_tokens`),
 #: not from memory. Legacy ids publish no window and are absent on purpose.
+#:
+#: NO FAMILY OR PREFIX RULE. A family does not keep its window across
+#: versions: claude-haiku-4-5 is 200K and claude-haiku-5-5 is 1M, so a rule
+#: that read a new id's window off its family would have guessed wrong, and
+#: a wrong percentage is worse than `?`. A new id gets a row, from the
+#: catalog, or stays `?`.
 WINDOWS: dict[str, int] = {
     "claude-fable-5": 1_000_000,
     "claude-fable-5-1": 1_000_000,
     "claude-mythos-5": 1_000_000,
     "claude-mythos-5-1": 1_000_000,
     "claude-opus-5": 1_000_000,
-    "claude-opus-5-5": 1_000_000,   # from Claude Code 2.1.280's statusline, not the catalog
+    "claude-opus-5-5": 1_000_000,
     "claude-opus-4-8": 1_000_000,
     "claude-opus-4-7": 1_000_000,
     "claude-opus-4-6": 1_000_000,
+    "claude-sonnet-5-5": 1_000_000,
     "claude-sonnet-5": 1_000_000,
     "claude-sonnet-4-6": 1_000_000,
+    "claude-haiku-5-5": 1_000_000,
     "claude-haiku-4-5": 200_000,    # the one 200K model in the catalog
 }
 

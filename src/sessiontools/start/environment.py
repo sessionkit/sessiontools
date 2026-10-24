@@ -39,6 +39,7 @@ from collections.abc import Mapping
 from typing import NamedTuple
 
 from sessiontools.claude_code import SESSION_ID_VARS
+from sessiontools.session_info import LAUNCH_INFO_ENV
 from sessiontools.start.errors import PROG, AuthoringError, unknown_keys
 from sessiontools.start.vendor import config_scalar
 
@@ -304,9 +305,13 @@ def warn_env_file_traps(environment: Environment, work_dir: str) -> None:
 #: that name first. It handed the parent's signing block on too, so
 #: an unkeyed child's git signed as the parent through the parent's shim
 #: and, with the socket gone, failed every commit.
+#: LAUNCH_INFO_ENV is the launch-info marker: the id this launch's
+#: launch-info carries, which the session-info hook leaves out of its block.
+#: A parent's marker must never reach a child launched without launch-info,
+#: so it is scrubbed here and exported again only by `render_launch_script`.
 SESSION_IDENTITY_VARS = (*SESSION_ID_VARS,
                          "CLAUDE_SESSION_AGENT_SOCK", "CLAUDE_SESSION_AGENT_PID",
-                         "CLAUDE_SESSION_PUB", "GIT_CONFIG_COUNT")
+                         "CLAUDE_SESSION_PUB", "GIT_CONFIG_COUNT", LAUNCH_INFO_ENV)
 
 #: The rest of the signing block: git's indexed env-config pairs, an open
 #: family, so they are named by PREFIX. session-key-init owns the whole

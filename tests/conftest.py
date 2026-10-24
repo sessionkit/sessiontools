@@ -1,6 +1,6 @@
 """Every test runs walled off from the live machine's sessions.
 
-Measured 2030-07-30, the night tmux placement was ported: tests
+Measured 2030-12-08, the night tmux placement was ported: tests
 that once reached the bridge through `--in-tmux` now ran the port's own
 placement, inherited the developer's `$TMUX`, and opened windows in the
 LIVE tmux server - one of them, with no `AGENTS_DIR` of its own, launched
@@ -95,9 +95,12 @@ def _walled_off_from_the_live_sessions(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("SESSIONS_DIR", str(tmp_path_factory.mktemp("no-sessions")))
     # HOME too: a helper that builds its own environ with neither falls back
     # to HOME, and the real one is where the live tree lives. 29 test dirs
-    # reached the real ~/.session/sessions on 2030-08-03 that way
+    # reached the real ~/.session/sessions on 2030-12-08 that way
     # (sessionmail's conftest does the same).
     monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("no-home")))
+    # Claude Code's config dir follows HOME only while this is unset: a
+    # caller's own would point a test at a live settings.json.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("SESSION_KEY_INIT", os.path.join(sockets, "no-session-key-init"))
     # No test opens an audio device (ST-132 do-003): the sound engine's
     # device mode refuses, exit 2, while this is set. Tests drive it with
@@ -115,8 +118,10 @@ def _walled_off_from_the_live_sessions(monkeypatch, tmp_path_factory):
     monkeypatch.delenv("SESSION_LIST_MAX_AGE", raising=False)
     # A tool's settings-file variable moves where its schema is read from
     # (ST-147): a caller's own would point a test at the live one.
-    for variable in SETTINGS_FILE_ENV.values():
-        monkeypatch.delenv(variable, raising=False)
+    # Every name a tool reads, the old ones included.
+    for names in SETTINGS_FILE_ENV.values():
+        for variable in names:
+            monkeypatch.delenv(variable, raising=False)
     # The stranded line is said once per tool per PROCESS, and every test
     # shares this one: each test starts with none said.
     monkeypatch.setattr(settings, "_said_stranded", set())

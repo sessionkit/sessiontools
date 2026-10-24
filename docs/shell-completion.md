@@ -5,14 +5,22 @@ stdout. Install it with one line, and TAB completes `session`'s verbs,
 sub-verbs, long flags and the positional words a verb takes from a fixed
 table.
 
+For zsh, in `~/.zshrc` after compinit:
+
 ```console
-# zsh, in ~/.zshrc after compinit:
 eval "$(session completion zsh)"
+```
 
-# bash with the bash-completion package (2.x), once; it loads by command name:
+For bash with the bash-completion package (2.x), once. The package loads
+the file by command name:
+
+```console
 session completion bash > ~/.local/share/bash-completion/completions/session
+```
 
-# any bash, 3.2 included, without that package, in ~/.bashrc:
+For any bash, 3.2 included, without that package, in `~/.bashrc`:
+
+```console
 eval "$(session completion bash)"
 ```
 

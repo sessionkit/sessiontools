@@ -1,6 +1,6 @@
 """`session`: the session command, owned by sessiontools.
 
-At the cutover the session repo moved aside as `session-20300729`:
+At the cutover the session repo moved aside as `session-20300609`:
 sessiontools provides `session`, same verbs, and the verbs are PORTED -
 package code, well structured, in the right place - not copied.
 
@@ -14,6 +14,9 @@ package code, well structured, in the right place - not copied.
     session statusline install [--dry-run] [--force] | check [--diff] | sample
     session pane-state show [--json] | watch [--interval S] [--once] [--dry-run] [--stats]
     session pane-state agent on|off|status   the publisher's launchd agent
+    session default-model [show [--json] | list [--json] | enforce [--dry-run]]
+    session default-model watch [--interval S] | unit launchd|systemd
+                             pin the default every NEW claude starts on
     session ledger [SEAT] [--summary|--short|--long|--json] [--width N]
     session account list | status | use NAME | add NAME | remove NAME
     session reap [--idle DURATION] [--json] [--yes] [SHORT...]   idle seats, CLOSE or KEEP
@@ -36,7 +39,7 @@ import sys
 
 from sessiontools.verbs import Group, offer
 
-MAIL_MOVED = """session mail: retired with the session repo (2030-07-29). Its verbs live in sessionmail:
+MAIL_MOVED = """session mail: retired with the session repo (2030-06-09). Its verbs live in sessionmail:
   session mail ls|tree|cat|run PATH  ->  memory ls|tree|cat|run PATH
   session mail send ...              ->  message send ...
   session mail arm / wait            ->  pager listen"""
@@ -51,6 +54,7 @@ VERBS = (
     ("operator", "who seats ask, and who is privileged (one line of JSON)"),
     ("statusline", "install or check Claude Code's status line, or print its sample payload"),
     ("pane-state", "each seat's BUSY / FREE / UNKNOWN, on its tmux pane (show | watch | agent)"),
+    ("default-model", "pin the default every NEW claude starts on (show | list | enforce | watch | unit)"),
     ("ledger", "every file a session read and command it ran, with the tokens of each"),
     ("account", "the Claude account this Mac is on, and the switch (list | status | use)"),
     ("reap", "every seat idle past a limit, CLOSE or KEEP and why (--yes closes)"),
@@ -173,7 +177,7 @@ before the first typed input.
 The views (--parts, --startup, --boot, --hooks) read the transcript a
 second time; the one-line default never does, and settle never calls them.
 
-Unlike the old session-context (retired 2030-07-29):
+Unlike the old session-context (retired 2030-06-09):
   - the window is the model's; unknown or exceeded prints '?' and the JSON
     carries max/pct/free as null (the old CLI assumed 1M, the confidently
     wrong number). $CONTEXT_MAX still tightens a known window; it is no
@@ -392,14 +396,14 @@ NAME matches part of a session's name or repo, or a prefix of its id; the
 first match wins. TEXT is joined with spaces and typed literally."""
 
 
-#: `session send` is DISABLED (2030-07-30): run by accident, it typed into an
+#: `session send` is DISABLED (2030-12-08): run by accident, it typed into an
 #: agent's pane. Kept in case it is wanted back, but not in the help and not
 #: available as a command: if it is there, it is too inviting. So it is in neither the help
 #: nor HANDLERS; `_send` and send.py stay, unwired. Bringing it back: delete
 #: its DISABLED entry (checked FIRST in main, so it wins), add "send": _send
 #: to HANDLERS, and restore its VERBS row.
 DISABLED = {
-    "send": ("session send: disabled (2030-07-30: it typed into an agent's pane "
+    "send": ("session send: disabled (2030-12-08: it typed into an agent's pane "
              "by accident). To reach an agent, mail it: message send ADDRESS -s SUBJECT --no-body"),
 }
 
@@ -574,6 +578,13 @@ def _pane_state(argv: list[str]) -> int:
     return pane_state.main(argv)
 
 
+def _default_model(argv: list[str]) -> int:
+    """`session default-model show|list|enforce|watch|unit`: the pin of settings.json's
+    "model". Imported here and nowhere else."""
+    from sessiontools import default_model_cli
+    return default_model_cli.main(argv)
+
+
 LEDGER_EPILOG = """\
 Figures are tokens unless marked: tiktoken cl100k_base, a ±10% estimate of
 Claude's tokenizer, counted over the text that entered the window. '?' is
@@ -744,7 +755,8 @@ def _completion(argv: list[str]) -> int:
 
 HANDLERS = {"list": _list, "get": _get, "context": _context, "start": _start,
             "settings": _settings, "sound": _sound, "operator": _operator,
-            "statusline": _statusline, "pane-state": _pane_state, "ledger": _ledger,
+            "statusline": _statusline, "pane-state": _pane_state,
+            "default-model": _default_model, "ledger": _ledger,
             "account": _account, "reap": _reap, "park": _park, "completion": _completion}
 
 #: Each verb's parser, as a `sessiontools.verbs` reference: a builder, or a
@@ -761,6 +773,7 @@ PARSERS = {"list": "sessiontools.cli:_list_parser",
            "operator": "sessiontools.cli:_operator_parser",
            "statusline": "sessiontools.statusline:GROUP",
            "pane-state": "sessiontools.pane_state:GROUP",
+           "default-model": "sessiontools.default_model_cli:build_parser",
            "ledger": "sessiontools.cli:_ledger_parser",
            "account": "sessiontools.account.cli:parser",
            "reap": "sessiontools.reap:build_parser",

@@ -42,7 +42,7 @@ from sessiontools.start.errors import PROG, LaunchError
 SECRET_TIMEOUT_S = 120
 
 # The wedged-scdaemon signature. After a smartcard is unplugged and
-# replugged (2030-07-01), every decrypt fails INSTANTLY with this in gpg's
+# replugged (2030-06-09), every decrypt fails INSTANTLY with this in gpg's
 # stderr. Restarting scdaemon is the proven remedy; retrying without the
 # restart just fails again.
 CARD_ERROR_MARKER = "Card error"
@@ -101,7 +101,7 @@ def pass_backend(ref: str) -> str:
 
     It says so on stderr BEFORE the wait, because gpg may raise a PIN
     dialog and the key may wait for a touch: the measured failure
-    (2030-07-01) was a pinentry behind a fullscreen window while the key
+    (2030-06-09) was a pinentry behind a fullscreen window while the key
     blinked unseen. A "Card error" gets ONE scdaemon restart and ONE retry,
     loudly; any other failure is reported as it is."""
     print(f"{PROG}: pass:{ref} -- gpg may raise a PIN dialog and/or wait for a "

@@ -23,6 +23,11 @@ from sessiontools.operator import Operator, read_operator
 from sessiontools.start import policy
 
 FQDN = "box7.example.invalid"
+SHORT = "box7"
+# The real seams, kept before any test patches them.
+REAL_RESOLVE_FQDN = op_mod._resolve_fqdn
+REAL_RESOLVE_HOSTNAME = op_mod._resolve_hostname
+PTR = "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa"
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +36,10 @@ def _no_operator_from_the_caller(monkeypatch):
     the FQDN never comes from the network."""
     monkeypatch.delenv(op_mod.AGENT_OPERATOR_ADDR_ENV, raising=False)
     monkeypatch.delenv(op_mod.SESSION_MAIL_ROOT_ENV, raising=False)
+    for name in op_mod.MAIL_HOST_ENVS:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(op_mod, "_resolve_fqdn", lambda: FQDN)
+    monkeypatch.setattr(op_mod, "_resolve_hostname", lambda: SHORT)
 
 
 def _settings_dir() -> Path:
@@ -99,13 +107,145 @@ def test_mailbox_not_local_is_privileged_by_name_but_has_no_address(tmp_path):
     assert op.privileged == {"you", "alice"}
 
 
-@pytest.mark.parametrize("fqdn", ["", "box7", "   "])
-def test_an_fqdn_with_no_domain_derives_nothing(tmp_path, fqdn):
+@pytest.mark.parametrize("fqdn", ["", "box7", "   ", None])
+def test_an_fqdn_with_no_domain_derives_the_short_host(tmp_path, fqdn):
+    """The bare short host is the name the local mail drop delivers to, so
+    it is a real address, not a look-alike."""
     _host_settings({"operator": {"mailbox": "you", "privileged": ["alice"]}})
     op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "you")},
                        resolve_fqdn=lambda: fqdn)
+    assert op.address == f"you@{SHORT}"
+    assert op.privileged == {"you", "alice", f"you@{SHORT}"}
+
+
+def test_no_short_host_and_no_fqdn_derives_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(op_mod, "_resolve_hostname", lambda: "")
+    _host_settings({"operator": {"mailbox": "you", "privileged": ["alice"]}})
+    op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "you")},
+                       resolve_fqdn=lambda: PTR)
     assert op.address is None
     assert op.privileged == {"you", "alice"}
+
+
+# ---------- the host part: what the mail drop takes as this host -------------
+
+@pytest.mark.parametrize("fqdn", [PTR, "1.0.0.127.in-addr.arpa", PTR.upper()])
+def test_a_reverse_dns_fqdn_derives_the_short_host(tmp_path, fqdn):
+    """getfqdn() on a host whose name has no forward record returns the
+    loopback's PTR name; the address uses the short host instead."""
+    _host_settings({"operator": {"mailbox": "admin"}})
+    op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "admin")},
+                       resolve_fqdn=lambda: fqdn)
+    assert op.address == f"admin@{SHORT}"
+    assert "arpa" not in "".join(op.privileged)
+
+
+def test_the_default_lookup_patched_to_a_ptr_name_derives_the_short_host(
+        tmp_path, monkeypatch, capsys):
+    """socket.getfqdn itself returns the PTR name: the reader and
+    `session operator` both say <mailbox>@<short host>."""
+    monkeypatch.setattr(op_mod, "_resolve_fqdn", REAL_RESOLVE_FQDN)
+    monkeypatch.setattr(op_mod, "_resolve_hostname", REAL_RESOLVE_HOSTNAME)
+    monkeypatch.setattr(op_mod.socket, "getfqdn", lambda *a: PTR)
+    monkeypatch.setattr(op_mod.socket, "gethostname", lambda: "Box7.local")
+    monkeypatch.setenv(op_mod.SESSION_MAIL_ROOT_ENV, _mail_root(tmp_path, "admin"))
+    _host_settings({"operator": {"mailbox": "admin"}})
+    assert read_operator().address == "admin@box7"
+    assert _cli_json(capsys)["operator"] == "admin@box7"
+    assert policy.operator_ask_address(os.environ) == "admin@box7"
+
+
+@pytest.mark.parametrize("fqdn", ["otherbox.example.invalid", "box70.example.invalid",
+                                  "box.example.invalid", "example.invalid"])
+def test_an_fqdn_not_under_the_short_host_derives_the_short_host(tmp_path, fqdn):
+    _host_settings({"operator": {"mailbox": "you"}})
+    op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "you")},
+                       resolve_fqdn=lambda: fqdn)
+    assert op.address == f"you@{SHORT}"
+
+
+@pytest.mark.parametrize("fqdn", ["box7.example-tailnet.invalid", "BOX7.Example.Invalid"])
+def test_an_fqdn_under_the_short_host_is_kept(tmp_path, fqdn):
+    """A tailnet name stays the host part, so a privileged match against a
+    drop-qualified sender does not change."""
+    _host_settings({"operator": {"mailbox": "you"}})
+    op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "you")},
+                       resolve_fqdn=lambda: fqdn)
+    assert op.address == f"you@{fqdn.lower()}"
+
+
+def test_the_short_host_follows_the_mail_drops_order(tmp_path):
+    """The variables (first set wins), then the mail tool's `host` setting,
+    then the hostname's first label; each lowercased."""
+    home = Path(os.environ["HOME"])
+    mail_dir = host(home, op_mod.MAIL_SETTINGS_TOOL)
+    mail_dir.mkdir(parents=True, exist_ok=True)
+    assert op_mod.short_host({}, lambda: "Box7.lan") == "box7"
+    (mail_dir / "mail.json").write_text(json.dumps({"host": " Studio "}))
+    assert op_mod.short_host({}, lambda: "box7") == "studio"
+    assert op_mod.short_host({"SESSION_MAIL_HOST": "Older"}) == "older"
+    assert op_mod.short_host({"SESSIONMAIL_HOST": "Newer",
+                              "SESSION_MAIL_HOST": "older"}) == "newer"
+    assert op_mod.short_host({"SESSIONMAIL_HOST": "  "}, lambda: "x") == "studio"
+
+
+@pytest.mark.parametrize("raw", ["{not json", '{"host": 7}', '{"host": ""}', "[]"])
+def test_a_bad_mail_host_setting_falls_back_to_the_hostname(raw):
+    mail_dir = host(Path(os.environ["HOME"]), op_mod.MAIL_SETTINGS_TOOL)
+    mail_dir.mkdir(parents=True, exist_ok=True)
+    (mail_dir / "mail.json").write_text(raw)
+    assert op_mod.short_host({}, lambda: "box7.lan") == "box7"
+
+
+def _drop_on_this_host(address: str, host: str) -> bool:
+    """The local mail drop's on-this-host predicate, copied (not imported)
+    from its qualify step: a domain is this host when it IS the short host
+    or a name under it."""
+    local, at, domain = address.strip().lower().partition("@")
+    if not local:
+        return False
+    return not at or domain == host or domain.startswith(host + ".")
+
+
+#: (short host, FQDN): short, short under a tailnet, PTR, unrelated, case,
+#: a prefix that is not a label, nothing.
+DROP_TABLE = [
+    ("box7", "box7"),
+    ("box7", "box7.example-tailnet.invalid"),
+    ("box7", "BOX7.Example-Tailnet.Invalid"),
+    ("box7", PTR),
+    ("box7", "1.0.0.127.in-addr.arpa"),
+    ("box7", "otherbox.example.invalid"),
+    ("box7", "box70.example.invalid"),
+    ("box7", "example.invalid"),
+    ("box7", ""),
+    ("fresh-vm", PTR),
+    ("fresh-vm", "fresh-vm.local"),
+]
+
+
+@pytest.mark.parametrize(("short", "fqdn"), DROP_TABLE)
+def test_the_host_part_is_always_one_the_drop_takes_as_this_host(short, fqdn):
+    got = op_mod.host_part({}, resolve_fqdn=lambda: fqdn, resolve_hostname=lambda: short)
+    assert _drop_on_this_host(f"you@{got}", short)
+    assert not got.endswith(".arpa")
+
+
+@pytest.mark.parametrize(("short", "fqdn"), DROP_TABLE)
+def test_is_this_host_equals_the_drops_predicate(short, fqdn):
+    """On every non-reverse-DNS name the two tests agree; on a PTR name the
+    drop's would say no as well, unless the short host were a PTR label."""
+    assert op_mod.is_this_host(fqdn, short) == (
+        bool(fqdn) and _drop_on_this_host(f"you@{fqdn}", short))
+
+
+def test_a_reverse_dns_name_is_never_this_host_even_under_the_short_host():
+    """The one place the helper is stricter than the drop: a short host of
+    "1" would put the IPv6 loopback's PTR name under it."""
+    assert _drop_on_this_host(f"you@{PTR}", "1")
+    assert not op_mod.is_this_host(PTR, "1")
+    assert op_mod.host_part({}, resolve_fqdn=lambda: PTR,
+                            resolve_hostname=lambda: "1") == "1"
 
 
 def test_the_address_setting_is_the_operator_and_is_privileged(tmp_path):
@@ -274,10 +414,10 @@ def test_the_reader_is_re_exported_from_sessiontools():
 # ---------- the Fable gate reads through it ----------------------------------
 
 def test_policy_operator_ask_address_is_the_readers_address(tmp_path, monkeypatch):
-    monkeypatch.setattr(policy, "_resolve_operator_fqdn", lambda: "gate.example.invalid")
+    monkeypatch.setattr(policy, "_resolve_operator_fqdn", lambda: "box7.gate.example.invalid")
     _host_settings({"operator": {"mailbox": "you", "privileged": ["alice"]}})
     environ = {op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "you")}
-    assert policy.operator_ask_address(environ) == "you@gate.example.invalid"
+    assert policy.operator_ask_address(environ) == "you@box7.gate.example.invalid"
     _host_settings({"operator": {"privileged": ["alice"]}})
     assert policy.operator_ask_address(environ) is None       # privilege is not an address
 

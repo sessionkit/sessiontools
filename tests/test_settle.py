@@ -18,6 +18,8 @@ import re
 import stat
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -504,6 +506,217 @@ def test_the_pattern_would_catch_them():
         assert FORBIDDEN.search(text), text
     for text in ("agent_id", "roleplay", "seated", "unseat"):
         assert not FORBIDDEN.search(text), text
+
+
+# 8b. The count is this batch's own: wait for its row ----------------------
+#
+# PostToolBatch can start the hook before the harness has written the
+# batch's own assistant row (its tool_use block and its usage); live, the
+# row lands tens of milliseconds later. These tests write that row LATE,
+# from a timer, and call settle.main in process, so a read that does not
+# wait reads before the row every time. Through the shim the race would
+# also depend on how long python takes to start, so only the bound test
+# runs the shim.
+
+LATE_S = 0.25
+TOOL_ID = "toolu_late0001"
+
+
+def user_row() -> str:
+    return json.dumps({"type": "user", "message": {"role": "user", "content": "go"}})
+
+
+def batch_row(tokens: int, tool_id: str = TOOL_ID) -> str:
+    return json.dumps({"type": "assistant", "message": {
+        "model": "claude-opus-5-5", "role": "assistant",
+        "content": [{"type": "tool_use", "id": tool_id, "name": "Bash",
+                     "input": {"command": "date"}}],
+        "usage": {"input_tokens": tokens, "cache_creation_input_tokens": 0,
+                  "cache_read_input_tokens": 0, "output_tokens": 20}}})
+
+
+def result_row(tool_id: str = TOOL_ID) -> str:
+    return json.dumps({"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tool_id, "content": "Thu"}]}})
+
+
+def batch_payload(path: Path, *tool_ids: str) -> dict:
+    return payload(path, tool_calls=[
+        {"tool_name": "Bash", "tool_input": {"command": "date"},
+         "tool_use_id": i, "tool_response": "Thu"} for i in (tool_ids or (TOOL_ID,))])
+
+
+def said_in_process(body: dict, env: dict) -> str:
+    out = io.StringIO()
+    assert settle.main(stdin=io.StringIO(json.dumps(body)), stdout=out, env=env) == 0
+    lines = out.getvalue().splitlines()
+    assert len(lines) == 1, out.getvalue()
+    return json.loads(lines[0])["hookSpecificOutput"]["additionalContext"]
+
+
+def append(path: Path, *rows: str) -> None:
+    with path.open("a") as f:
+        f.write("".join(r + "\n" for r in rows))
+
+
+@pytest.fixture
+def late(request):
+    """`late(path, *rows)` appends the rows LATE_S from now, from a timer."""
+    timers = []
+
+    def land(path: Path, *rows: str) -> None:
+        t = threading.Timer(LATE_S, append, (path, *rows))
+        timers.append(t)
+        t.start()
+
+    yield land
+    for t in timers:
+        t.join()
+
+
+class FakeTime:
+    """The wait's clock and sleep: each sleep advances the clock, counts,
+    and runs `on_sleep(n)` (n = this sleep's number) if one is set."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = 0
+        self.on_sleep = None
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps += 1
+        self.now += seconds
+        if self.on_sleep:
+            self.on_sleep(self.sleeps)
+
+
+@pytest.fixture
+def fake_time(monkeypatch) -> FakeTime:
+    ft = FakeTime()
+    monkeypatch.setattr(settle, "_clock", lambda: ft.now)
+    monkeypatch.setattr(settle, "_sleep", ft.sleep)
+    return ft
+
+
+@pytest.fixture
+def no_wait(monkeypatch):
+    def refuse(_seconds):
+        raise AssertionError("the hook waited")
+    monkeypatch.setattr(settle, "_sleep", refuse)
+
+
+def test_turn_one_counts_the_batch_row_that_lands_after_the_hook_starts(tmp_path, late):
+    path = tmp_path / f"{SID}.jsonl"
+    path.write_text(user_row() + "\n")                 # turn 1: no usage row yet
+    late(path, batch_row(FAR_OVER), result_row())
+    assert "past 1K" in said_in_process(batch_payload(path), {"SESSION_SETTLE_AT": "1k"})
+
+
+def test_a_later_turn_counts_its_own_batch_not_the_one_before(tmp_path, late):
+    path = tmp_path / f"{SID}.jsonl"
+    path.write_text(user_row() + "\n" + batch_row(500, "toolu_prev") + "\n"
+                    + result_row("toolu_prev") + "\n")
+    late(path, batch_row(2_000), result_row())
+    line = said_in_process(batch_payload(path),
+                           {"SESSION_SETTLE_AT": "1k", "SESSION_SETTLE_SAY": "used {used}"})
+    assert line == "used 2K"
+
+
+def test_a_row_that_never_lands_is_silent_and_bounded(tmp_path, pybin):
+    path = tmp_path / f"{SID}.jsonl"
+    path.write_text(user_row() + "\n")
+    t0 = time.monotonic()
+    assert_silent(run_shim(batch_payload(path), {"SESSION_SETTLE_AT": "1k"}, pybin))
+    assert time.monotonic() - t0 < 3.0
+
+
+def test_the_cap_stays_well_inside_the_hook_timeout():
+    timeouts = {h["timeout"] for entry in json.loads(HOOKS.read_text())["hooks"]["PostToolBatch"]
+                for h in entry["hooks"]}
+    assert 0 < settle.ROW_POLL_S < settle.ROW_WAIT_S <= 1.0 < min(timeouts)
+
+
+def test_a_row_that_never_lands_waits_the_cap_then_counts_the_disk(tmp_path, fake_time):
+    path = tmp_path / f"{SID}.jsonl"
+    path.write_text(batch_row(2_000, "toolu_prev") + "\n")
+    env = {"SESSION_SETTLE_AT": "1k", "SESSION_SETTLE_SAY": "used {used}"}
+    assert settle.decide(env, batch_payload(path)) == "used 2K"
+    assert fake_time.now == pytest.approx(settle.ROW_WAIT_S, abs=settle.ROW_POLL_S)
+    assert fake_time.sleeps == pytest.approx(settle.ROW_WAIT_S / settle.ROW_POLL_S, abs=1)
+
+
+def test_a_row_already_on_disk_is_not_waited_for(tmp_path, no_wait):
+    path = tmp_path / f"{SID}.jsonl"
+    path.write_text(user_row() + "\n" + batch_row(2_000) + "\n" + result_row() + "\n")
+    env = {"SESSION_SETTLE_AT": "1k", "SESSION_SETTLE_SAY": "used {used}"}
+    assert settle.decide(env, batch_payload(path)) == "used 2K"
+
+
+def test_any_one_of_the_batch_ids_ends_the_wait(tmp_path, no_wait):
+    path = tmp_path / f"{SID}.jsonl"
+    path.write_text(batch_row(2_000, "toolu_b") + "\n")
+    assert settle.await_batch_row(path, settle.batch_ids(
+        batch_payload(path, "toolu_a", "toolu_b")))
+
+
+@pytest.mark.parametrize("extra", [{}, {"tool_calls": []}, {"tool_calls": "x"},
+                                   {"tool_calls": [{"tool_use_id": ""}, {"tool_use_id": 7},
+                                                   "toolu_bare", None]}],
+                         ids=["absent", "empty", "not-a-list", "no-usable-id"])
+def test_a_payload_naming_no_tool_call_is_not_waited_for(tmp_path, no_wait, extra):
+    path = transcript(tmp_path, 2_000)
+    env = {"SESSION_SETTLE_AT": "1k", "SESSION_SETTLE_SAY": "used {used}"}
+    assert settle.decide(env, payload(path, **extra)) == "used 2K"
+
+
+def test_the_tool_result_row_alone_does_not_end_the_wait(tmp_path, fake_time):
+    """The tool_result row and a text block carry the id too; only an
+    assistant row's tool_use block counts."""
+    path = tmp_path / f"{SID}.jsonl"
+    mention = json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": f"see {TOOL_ID}"}]}})
+    nested = json.dumps({"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_use", "id": TOOL_ID}]}})
+    path.write_text("\n".join([result_row(), mention, nested, "{" + TOOL_ID]) + "\n")
+    assert settle.await_batch_row(path, frozenset({TOOL_ID})) is False
+    assert fake_time.sleeps > 0
+
+
+def test_a_row_appended_between_polls_ends_the_wait_there(tmp_path, fake_time):
+    path = tmp_path / f"{SID}.jsonl"
+    path.write_text(user_row() + "\n")
+    fake_time.on_sleep = lambda n: n == 3 and append(path, batch_row(2_000), result_row())
+    assert settle.await_batch_row(path, frozenset({TOOL_ID})) is True
+    assert fake_time.sleeps == 3
+
+
+def test_a_half_written_row_waits_for_its_newline(tmp_path, fake_time):
+    path = tmp_path / f"{SID}.jsonl"
+    row = batch_row(2_000)
+    path.write_text(user_row() + "\n" + row[:40])
+
+    def finish(n):
+        if n == 1:
+            with path.open("a") as f:
+                f.write(row[40:])             # whole row, no newline yet
+        elif n == 2:
+            append(path, "")                  # the newline lands
+
+    fake_time.on_sleep = finish
+    assert settle.await_batch_row(path, frozenset({TOOL_ID})) is True
+    assert fake_time.sleeps == 2
+
+
+def test_a_failed_read_ends_the_wait_at_once(tmp_path, no_wait):
+    assert settle.await_batch_row(tmp_path / "gone.jsonl", frozenset({TOOL_ID})) is False
+
+
+@pytest.mark.parametrize(("calls", "ids"), [
+    (None, set()), ("x", set()), ([], set()),
+    ([{"tool_use_id": "a"}, {"tool_use_id": "b"}, {"tool_use_id": "a"}], {"a", "b"}),
+    ([{"tool_use_id": ""}, {"tool_use_id": 1}, {}, "a", None], set())])
+def test_batch_ids(calls, ids):
+    assert settle.batch_ids({} if calls is None else {"tool_calls": calls}) == ids
 
 
 # 9. Plugin wiring ----------------------------------------------------------

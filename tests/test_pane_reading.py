@@ -1,7 +1,7 @@
 """The pane signal's reading (ST-134 design.md §3): BUSY, FREE or UNKNOWN.
 
 Every table here is synthetic. The command lines are pinned to shapes
-measured on one Mac (Claude Code 2.1.296) on 2030-12-11, on the seat
+measured on one Mac (Claude Code 2.1.296) on 2030-12-08, on the seat
 that wrote this test, and in findings/r02:
 
 - a Bash tool call: `/opt/homebrew/bin/bash -c source …/shell-snapshots/… &&
@@ -26,7 +26,7 @@ from sessiontools import procs, turn
 from sessiontools.claude_code import PANE_BUSY, PANE_FREE, PANE_UNKNOWN, Reading
 from sessiontools.procs import Proc
 
-START = "Wed Dec 11 01:00:00 2030"
+START = "Sun Dec  8 01:00:00 2030"
 T0 = procs.parse_ctime(START)
 NOW = T0 + 3600
 SID = "f1340000-0000-4000-8000-000000000134"
@@ -90,7 +90,7 @@ def test_a_dead_pid_is_unknown():
 
 def test_a_reused_pid_is_unknown():
     tree = Tree().monitor()
-    late = "Wed Dec 11 01:00:30 2030"     # 30 s off: another process holds the pid
+    late = "Sun Dec  8 01:00:30 2030"     # 30 s off: another process holds the pid
     assert cc.pane_reading(seat(proc_start=late), tree.table).word == PANE_UNKNOWN
 
 

@@ -473,3 +473,143 @@ def test_the_schema_names_no_environment_variable(tree):
     """No `x-env` key: the birth must read no variable into `sounds`."""
     w(host_dir(tree, "sounds") / "sounds.schema.json", SCHEMA.read_text())
     assert settings.env_keys("sounds") == []
+
+
+# --- the stop sound's settings (ST-236 design D2, D8) ------------------------------
+
+def stop_on(path, **extra) -> dict:
+    data = {"enabled": True, "stop": {"file": str(path)}}
+    data.update(extra)
+    return data
+
+
+def stop_off(tree: Path) -> Path:
+    return tree / ".session" / "sessions" / SID / "sounds" / "stop" / "off"
+
+
+def test_stop_config_is_the_file_when_set(tree, wav):
+    w(session_file(tree), stop_on(wav))
+    assert busy.stop_config(SID) == wav
+
+
+def test_stop_config_unset_is_silent(tree, wav):
+    assert busy.stop_config(SID) is None
+    w(session_file(tree), on(wav))                    # a busy sound alone
+    assert busy.stop_config(SID) is None
+
+
+@pytest.mark.parametrize("enabled", [False, None, "true", 1, "yes"])
+def test_stop_config_needs_enabled_the_boolean_true(tree, wav, enabled):
+    data = stop_on(wav)
+    if enabled is None:
+        del data["enabled"]
+    else:
+        data["enabled"] = enabled
+    w(session_file(tree), data)
+    assert busy.stop_config(SID) is None
+
+
+@pytest.mark.parametrize("block", [None, "on", ["file"], True, 7])
+def test_stop_must_be_a_map(tree, block):
+    w(session_file(tree), {"enabled": True, "stop": block})
+    assert busy.stop_config(SID) is None
+
+
+@pytest.mark.parametrize("file", ["", "   ", 7, None, ["x"], "relative/dance.wav",
+                                  "/no/such.wav"])
+def test_stop_file_must_name_a_readable_file(tree, wav, file):
+    w(session_file(tree), {"enabled": True, "stop": {"file": file}})
+    assert busy.stop_config(SID) is None
+
+
+def test_stop_file_may_not_be_a_directory(tree, wav):
+    w(session_file(tree), stop_on(wav.parent))
+    assert busy.stop_config(SID) is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 000 file")
+def test_an_unreadable_stop_file_is_silent(tree, wav):
+    w(session_file(tree), stop_on(wav))
+    wav.chmod(0o000)
+    try:
+        assert busy.stop_config(SID) is None
+    finally:
+        wav.chmod(0o644)
+
+
+def test_stop_file_tilde_expands_against_home(tree, wav):
+    w(session_file(tree), {"enabled": True, "stop": {"file": "~/sounds/dance.wav"}})
+    assert busy.stop_config(SID) == wav
+
+
+def test_stop_ignores_unknown_keys_and_the_busy_block(tree, wav):
+    w(session_file(tree), {"enabled": True, "busy": {"trigger": "landd"},
+                           "stop": {"file": str(wav), "delay": "x", "device": 3}})
+    assert busy.stop_config(SID) == wav
+    assert busy.config(SID) is None                   # the busy typo stays the busy's
+
+
+def test_stop_config_layers_like_busy(tree, wav):
+    w(host(tree), stop_on(wav))
+    assert busy.stop_config(SID) == wav
+    w(session_file(tree), {"enabled": False})
+    assert busy.stop_config(SID) is None
+
+
+@pytest.mark.parametrize("bad", ["{", "[1, 2]"])
+def test_stop_config_on_a_bad_layer_is_silence_never_an_error(tree, wav, bad):
+    w(host(tree), stop_on(wav))
+    w(session_file(tree), bad)
+    assert busy.stop_config(SID) is None
+
+
+def test_stop_config_with_no_sid_is_silent(tree, wav):
+    w(host(tree), stop_on(wav))
+    assert busy.stop_config("") is None
+
+
+# --- D8: the arm's resolve keeps the stop sound's OFF stamp too ----------------------
+
+def test_the_arms_resolve_stamps_stop_off_back_dated_when_the_stop_sound_is_unset(tree):
+    started = (ANCHOR_SUMMER + timedelta(days=1)).timestamp() + 0.25
+    busy.resolve_for_batch(SID, now=lambda: started)
+    assert stop_off(tree).is_file()
+    assert stop_off(tree).stat().st_mtime == pytest.approx(started - 1.0, abs=1e-3)
+    assert (stop_off(tree).parent.stat().st_mode & 0o777) == 0o700
+
+
+def test_the_arms_resolve_clears_stop_off_when_the_stop_sound_is_set(tree, wav):
+    busy.resolve_for_batch(SID)
+    assert stop_off(tree).is_file()
+    w(session_file(tree), {**on(wav), **stop_on(wav)})
+    assert busy.resolve_for_batch(SID) is not None
+    assert not stop_off(tree).exists()
+    assert not off(tree).exists()
+
+
+def test_the_busy_and_stop_stamps_are_independent(tree, wav):
+    w(session_file(tree), stop_on(wav))               # stop on, busy off
+    assert busy.resolve_for_batch(SID) is None
+    assert off(tree).is_file() and not stop_off(tree).exists()
+
+
+def test_the_resolve_writes_no_stop_stamp_without_a_session_dir(tree):
+    other = "99999999-0000-0000-0000-000000000000"
+    busy.resolve_for_batch(other)
+    assert not (tree / ".session" / "sessions" / other).exists()
+
+
+def test_stop_is_not_a_slot_end_and_clear_stop():
+    assert busy.STOP == "stop" and busy.STOP not in busy.SLOTS
+
+
+# --- the schema's stop block ---------------------------------------------------------
+
+def test_the_schema_accepts_a_stop_file_and_refuses_bad_ones(wav):
+    jsonschema = pytest.importorskip("jsonschema")
+    validator = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text()))
+    assert list(validator.iter_errors(stop_on(wav))) == []
+    assert list(validator.iter_errors({**on(wav), **stop_on(wav)})) == []
+    for bad in ({"stop": {"file": ""}}, {"stop": {"file": 7}}, {"stop": "on"},
+                {"stop": ["file"]}):
+        assert list(validator.iter_errors(bad)), bad

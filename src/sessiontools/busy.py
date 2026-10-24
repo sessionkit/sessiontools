@@ -24,16 +24,19 @@ THREE PARTS, bottom to top:
   sessiontools decides whether anything plays. `landed` plays on
   `sounds/unread/` only when the trigger resolves to `landed`; `given` stops
   it. `finished` is HELD (its addressing is not yet decided) and not built.
+- THE STOP SOUND: `stop_config`, `stop_sound` and `stop_play`. Stop's verb,
+  `stop`, clears the slots as before, then plays the `stop` block's file
+  once, through the mouth's queue. See THE STOP SOUND below.
 
 THE SETTINGS are the `sounds` tool of the cascade (`sessiontools.settings`):
 `~/.sessionkit/tools/settings/sounds.json`, the agent's front matter `settings:`,
 `seats/<seat>/settings/sounds.json`, `sessions/<sid>/settings/sounds.json`
 (each with its `sounds.d/*.json`). A main switch, then each sound's own block,
-so a stop sound and clip sounds can slot in beside
-`busy`::
+so the stop sound sits beside `busy`, and clip sounds can slot in too::
 
     {"enabled": true,
-     "busy": {"auto_arm": true, "file": "~/x.wav", "delay": 8}}
+     "busy": {"auto_arm": true, "file": "~/x.wav", "delay": 8},
+     "stop": {"file": "~/done.aiff"}}
 
 `config()` is the sound, shared with the signalled (second) trigger. It knows
 nothing of hook payloads or batches. It reports `auto_arm` and does not act on
@@ -81,6 +84,27 @@ session unless a host- or session-layer `sounds` file is newer (`[ -nt ]`).
 the stamp is back-dated to one second before the resolve started: a file
 written during or after the resolve is always newer to the second.
 
+THE STOP SOUND: the seat's turn ended (Stop, the shim's `stop` verb). The
+`stop` block holds one key, `file`, and is validated as `busy` is: silent
+unless `enabled` is the boolean true, `stop` is a map and `stop.file` names a
+readable regular file (`~` expanded, absolute). A bad value is silent, never
+a fallback. A subagent's Stop (`agent_id`) plays nothing.
+
+- It plays ONCE per Stop, in one DETACHED child (`stop_main`), so the hook
+  never waits: `mouth play FILE` when `mouth` is on PATH, which queues it
+  behind any line still speaking; `afplay FILE` only when the mouth is
+  absent, exits non-zero (no device, no player) or cannot be run. A mouth
+  that times out or is killed by a signal is NOT followed by afplay: it
+  may have queued, and two sounds is worse than one late one. No `--device`: the mouth's own rule
+  picks it.
+- Its slot dir, `sounds/stop/`, is NOT in SLOTS: it holds only its OFF
+  stamp, so no `clear` touches it, and once queued the sound is the
+  mouth's (`mouth stop` flushes it).
+- Its OFF stamp, `sounds/stop/off`, follows the busy stamp's rule (the
+  shim tests it on `stop` only). Both the arm's resolve and Stop write it,
+  so a seat that made a tool call before its first Stop starts no python
+  at Stop unless its stop sound is ON.
+
 NEVER RAISES out of `config()`, `batch_sound()` or `resolve_for_batch()`:
 their callers are hooks, and a hook must never be the reason a turn breaks.
 A layer file that will not parse, a missing PyYAML, a missing session dir:
@@ -93,7 +117,9 @@ import contextlib
 import json
 import math
 import os
+import re
 import secrets
+import shutil
 import signal as _signal  # `signal` is the sound-signal verb below
 import stat
 import subprocess
@@ -128,6 +154,9 @@ SLOTS = (SOUND, UNREAD, FINISHED)
 AFPLAY = "afplay"
 ENGINE = "engine"
 PLAYERS = frozenset({AFPLAY, ENGINE})
+#: The stop sound's block in the settings, and its slot dir (the OFF stamp
+#: only). NOT in SLOTS: no `clear` touches it.
+STOP = "stop"
 #: The engine's record in the slot dir: `engine.<claude pid>`. The shim tests
 #: `engine.$CLAUDE_PID` with one stat, and globs `engine.*` without one.
 RECORD = "engine."
@@ -333,6 +362,7 @@ def _resolve(sid: str, env: Mapping[str, str] | None,
                 clear_off(slot)
             if (sound is None or sound.player != ENGINE) and drop_records(slot):
                 _tell_engine("clear", sid, env)
+            _stamp_stop(sid, env, started)
     return sound, started
 
 
@@ -525,12 +555,15 @@ def stop(slot: str | Path) -> bool:
 
 # --- the speech guard: is the mouth speaking? --------------------------------------
 #
-# UNBLESSED: `playing.json` is voicemode's INTERNAL file, with no documented
-# contract (the voicemode maintainers are asked to bless it or to name the
-# surface they would rather we read).
+# UNBLESSED: `playing.json` is the mouth's INTERNAL file (sessionvoice's mouth,
+# which began as voicemode's), with no documented contract (its maintainers are
+# asked to bless it or to name the surface they would rather we read).
 # Every read of the mouth's state goes through MOUTH_PLAYING, MOUTH_PID and
 # `mouth_speaking()` below, so a different surface is a one-line change there.
-# We only stat and read; we never write, lock or create anything in the mouth dir.
+# WHERE the mouth lives is sessionvoice's rule, copied (not imported) into
+# `mouth_dir()`: `$MOUTH_DIR`, else `<sessionvoice home>/mouth`.
+# We only stat and read; we never write, lock or create anything in the mouth
+# dir or under any home it is looked for in.
 
 #: The mouth's "speaking now" file: written (tmp + rename) when its player
 #: takes a line, before synthesis; unlinked when the line ends. UNBLESSED.
@@ -542,23 +575,89 @@ MOUTH_PID = "player.pid"
 STEP = 0.1
 
 
+#: sessionvoice's home variables, read in this order (its `SESSIONVOICE_HOME`,
+#: then the old `VOICEMODE_BASE_DIR`).
+MOUTH_HOME_ENV = ("SESSIONVOICE_HOME", "VOICEMODE_BASE_DIR")
+#: The mouth dir's own variable, then its old name (presence, not truthiness).
+MOUTH_DIR_ENV = ("MOUTH_DIR", "VOICEMODE_MOUTH_DIR")
+#: sessionvoice's default home, then the old one, under $HOME.
+MOUTH_HOMES = (".sessionvoice", ".voicemode")
+
+#: The standard library's own pattern: an unclosed `${` takes the rest of the
+#: value with it, so nothing after it expands.
+_VAR = re.compile(r"\$(\w+|\{[^}]*\}?)", re.ASCII)
+
+
+def _expandvars(raw: str, e: Mapping[str, str]) -> str:
+    """`os.path.expandvars`, against the mapping E instead of the process env:
+    `$NAME` and `${NAME}` when NAME is in E; anything else, an unclosed `${`
+    and all that follows it included, is left as it is."""
+    def one(m: re.Match[str]) -> str:
+        name = m.group(1)
+        if name.startswith("{"):
+            if not name.endswith("}"):
+                return m.group(0)
+            name = name[1:-1]
+        return e[name] if name in e else m.group(0)
+
+    return _VAR.sub(one, raw) if "$" in raw else raw
+
+
+def _populated(root: Path) -> bool:
+    """sessionvoice's POPULATED: `<root>/logs/conversations` holds a
+    `heard.lock` or a `heard_*.jsonl`. A dir that exists but holds no heard
+    log never decides. A stat, never a write; an OSError is False."""
+    d = root / "logs" / "conversations"
+    try:
+        return (d / "heard.lock").exists() or any(d.glob("heard_*.jsonl"))
+    except OSError:
+        return False
+
+
 def mouth_dir(env: Mapping[str, str] | None = None) -> Path:
-    """The mouth dir, by voicemode's own rule (`voice_mode/mouth/paths.py`):
-    `$VOICEMODE_MOUTH_DIR`, else `$VOICEMODE_BASE_DIR/mouth`, else
-    `~/.voicemode/mouth`; `~` expands against the HOME of ENV."""
+    """The mouth dir, by sessionvoice's own rule (its `mouth/paths.py` and
+    `ears/home.py`), copied here so that nothing imports sessionvoice:
+
+    1. `$MOUTH_DIR` if it is set, else the old `$VOICEMODE_MOUTH_DIR` if that
+       is set (presence: a set `MOUTH_DIR` hides the old name even when
+       empty). A non-empty value is the dir; an empty one falls through.
+    2. Else `<home>/mouth`, where home is the first of: `$SESSIONVOICE_HOME`,
+       `$VOICEMODE_BASE_DIR` (each only when non-empty, with `$VAR` and `~`
+       expanded); `~/.sessionvoice` if it holds a heard log; `~/.voicemode`
+       if it holds a heard log; else `~/.sessionvoice`.
+
+    `~` and `$VAR` expand against ENV and its HOME. Only stats: nothing is
+    written, locked or created under any home."""
     e = os.environ if env is None else env
+    home = settings.home(env)
 
-    def expand(raw: str) -> Path:
-        if raw == "~":
-            return settings.home(env)
-        if raw.startswith("~/"):
-            return settings.home(env) / raw[2:]
-        return Path(raw)
+    def expanduser(raw: str) -> str:
+        # `os.path.expanduser`, with HOME from ENV: HOME without its trailing
+        # `/`, then the rest as given (`~//m` stays under HOME, not at `/m`).
+        if raw == "~" or raw.startswith("~/"):
+            return (str(home).rstrip("/") + raw[1:]) or "/"
+        return os.path.expanduser(raw)           # `~user`, or no `~` at all
 
-    explicit = e.get("VOICEMODE_MOUTH_DIR")
+    def path_expanduser(raw: str) -> Path:
+        # `Path(raw).expanduser()`, with HOME from ENV: it looks at the first
+        # part of the parsed path, so `./~/m` is under HOME too.
+        p = Path(raw)
+        if p.anchor or not p.parts or not p.parts[0].startswith("~"):
+            return p
+        return Path(expanduser(p.parts[0])).joinpath(*p.parts[1:])
+
+    name = next((n for n in MOUTH_DIR_ENV if n in e), None)
+    explicit = e[name] if name is not None else None
     if explicit:
-        return expand(explicit)
-    return expand(e.get("VOICEMODE_BASE_DIR") or "~/.voicemode") / "mouth"
+        return path_expanduser(explicit)
+    for n in MOUTH_HOME_ENV:
+        raw = e.get(n)
+        if raw:
+            return Path(expanduser(_expandvars(raw, e))) / "mouth"
+    for root in (home / h for h in MOUTH_HOMES):
+        if _populated(root):
+            return root / "mouth"
+    return home / MOUTH_HOMES[0] / "mouth"
 
 
 def _pid_live(path: Path) -> bool:
@@ -829,8 +928,8 @@ def signal(event: str, sid: str, ref: str | None = None,
 SWITCH_ENV = "SESSIONTOOLS_HOOK_BUSY"
 SID_ENV = "CLAUDE_CODE_SESSION_ID"
 OFF_WORDS = frozenset({"off", "0", "false", "no"})
-#: `stop` is Stop's verb: `clear` to the sound. The hook shim tells it apart
-#: from UserPromptSubmit's `clear` for the turn-ended mark.
+#: `stop` is Stop's verb: `clear` to the sound, then the stop sound. The hook
+#: shim tells it apart from UserPromptSubmit's `clear` for the turn-ended mark.
 VERBS = ("arm", "end", "stop", "clear")
 
 
@@ -889,6 +988,152 @@ def clear(payload: Mapping[str, Any], env: Mapping[str, str]) -> bool:
     return any(stopped)
 
 
+# --- the stop sound: the seat's turn ended ------------------------------------------
+#
+# Stop's verb plays the `stop` block's file once, after `clear`. One detached
+# child does the playing, so the hook returns at once: the mouth first (its
+# queue keeps the order behind a line still speaking), afplay only when the
+# mouth is absent or refuses. Its slot dir holds only the OFF stamp.
+
+#: The mouth's CLI, resolved on PATH, so tests put a fake first. Called as
+#: `mouth play FILE`: it queues FILE as a line and returns.
+MOUTH: tuple[str, ...] = ("mouth",)
+#: How long the child waits for `mouth play` before it gives up, in seconds.
+#: A mouth that times out may have queued, so no afplay follows it.
+MOUTH_TIMEOUT = 5.0
+#: How the stop child is run: the caller's own interpreter, `-I`, this src/.
+STOP_ENTRY = ("import sys; sys.path.insert(0, sys.argv[1]); "
+              "from sessiontools.busy import stop_main; sys.exit(stop_main(sys.argv[2:]))")
+
+
+def stop_config(sid: str, env: Mapping[str, str] | None = None) -> Path | None:
+    """The stop sound's file for session SID, or None (silent). Silent unless
+    `enabled` is the boolean true, `stop` is a map and `stop.file` names a
+    readable regular file (`~` expanded against the HOME of ENV, absolute).
+    Other keys in the block are ignored. Never raises."""
+    if not sid:
+        return None
+    try:
+        merged = values(sid, env)
+        if merged.get("enabled") is not True:
+            return None
+        block = merged.get(STOP)
+        if not isinstance(block, Mapping):
+            return None
+        return _path(block.get("file"), env)
+    except Exception:  # noqa: BLE001 - a hook's settings never break a turn
+        return None
+
+
+def _stamp_stop(sid: str, env: Mapping[str, str] | None, started: float) -> Path | None:
+    """Resolve the stop sound and keep its OFF stamp: OFF stamps
+    `sounds/stop/off` back-dated to before STARTED, ON removes it. The file,
+    or None. Writes only under `sounds/stop/`, and nothing at all when the
+    session dir does not exist. The arm's resolve and Stop both call it.
+    Never raises."""
+    file = stop_config(sid, env)
+    with contextlib.suppress(Exception):
+        slot = slot_dir(sid, env, STOP)
+        if slot.parent.parent.is_dir():
+            if file is None:
+                mark_off(slot, started)
+            else:
+                clear_off(slot)
+    return file
+
+
+def stop_play(file: str | Path, *, mouth: Sequence[str] = MOUTH,
+              player: Sequence[str] = PLAYER, timeout: float = MOUTH_TIMEOUT) -> bool:
+    """Start the stop child for FILE and return at once: its own process
+    group, stdio on /dev/null, cwd `/`, this process's env (PATH, the mouth's
+    variables, HOME). True when it started. Never raises."""
+    try:
+        if not mouth or not player:
+            return False
+        argv = [sys.executable, "-I", "-c", STOP_ENTRY, str(SRC), str(file),
+                repr(float(timeout)), str(len(mouth)), *mouth, *player]
+        subprocess.Popen(argv, start_new_session=True, close_fds=True, cwd="/",
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    except Exception:  # noqa: BLE001 - a hook never breaks a turn
+        return False
+    return True
+
+
+def _quiet_run(argv: Sequence[str], timeout: float | None = None) -> int:
+    """Run ARGV with stdio on /dev/null: its exit status. Raises what
+    `subprocess.run` raises (OSError, TimeoutExpired, after it killed it)."""
+    return subprocess.run(list(argv), timeout=timeout, check=False,
+                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode
+
+
+def stop_run(file: str | Path, mouth: Sequence[str] = MOUTH,
+             player: Sequence[str] = PLAYER, timeout: float = MOUTH_TIMEOUT) -> str:
+    """The stop child's work, in order. Which one played it: "mouth",
+    "player", or "" (nothing: a mouth that timed out, or a player that could
+    not run).
+
+    1. MOUTH found on PATH: `MOUTH play FILE`, bounded by TIMEOUT. Exit 0:
+       queued, done. Non-zero, or it cannot be run (OSError): fall back.
+       Timed out (it is killed) or killed by a signal: nothing follows, as
+       it may have queued.
+    2. The fallback: `PLAYER FILE`, errors swallowed."""
+    file = str(file)
+    if mouth and shutil.which(mouth[0]):
+        try:
+            code = _quiet_run([*mouth, "play", file], timeout)
+        except subprocess.TimeoutExpired:
+            return ""
+        except OSError:
+            code = 1                     # it could not run: it queued nothing
+        if code == 0:
+            return "mouth"
+        if code < 0:                     # a signal ended it, not a refusal
+            return ""
+    try:
+        _quiet_run([*player, file])
+    except Exception:  # noqa: BLE001
+        return ""
+    return "player"
+
+
+def stop_main(argv: Sequence[str]) -> int:
+    """`FILE TIMEOUT N MOUTH... PLAYER...`, as `stop_play` spawns it: N is
+    how many words the mouth's argv has. Always 0."""
+    try:
+        file, timeout, n, *rest = argv
+        count = int(n)
+        mouth, player = tuple(rest[:count]), tuple(rest[count:])
+        stop_run(file, mouth or MOUTH, player or PLAYER, float(timeout))
+    except Exception:  # noqa: BLE001 - a detached child has no one to tell
+        return 0
+    return 0
+
+
+def stop_sound(payload: Mapping[str, Any], env: Mapping[str, str]) -> bool:
+    """Stop's sound: resolve the `stop` block (its OFF stamp kept, as the arm
+    keeps it) and, when ON, start the stop child once. A subagent's Stop
+    (`agent_id`) and a session with no dir play nothing and stamp nothing.
+    Touches only `sounds/stop/`. True when the child started."""
+    if payload.get("agent_id"):
+        return False
+    sid = _sid(payload, env)
+    if sid is None or not slot_dir(sid, env, STOP).parent.parent.is_dir():
+        return False
+    file = _stamp_stop(sid, env, time.time())
+    if file is None:
+        return False
+    return stop_play(file)
+
+
+def stop_turn(payload: Mapping[str, Any], env: Mapping[str, str]) -> bool:
+    """Stop: `clear` every slot first (unchanged), then the stop sound. True
+    when the stop child started."""
+    clear(payload, env)
+    return stop_sound(payload, env)
+
+
 def main(argv: Sequence[str] | None = None, stdin=None,
          env: Mapping[str, str] | None = None) -> int:
     """`busy-sound arm|end|stop|clear` with the hook payload on stdin. Always 0,
@@ -912,7 +1157,7 @@ def _main(args: list[str], stdin, environ: Mapping[str, str]) -> int:
         payload = json.loads(raw) if raw.strip() else {}
         if not isinstance(payload, dict):
             return 0
-        {"arm": arm, "end": end, "stop": clear, "clear": clear}[verb](payload, environ)
+        {"arm": arm, "end": end, "stop": stop_turn, "clear": clear}[verb](payload, environ)
     except Exception:  # noqa: BLE001
         return 0
     return 0

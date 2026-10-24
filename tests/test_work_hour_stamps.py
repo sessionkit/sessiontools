@@ -68,7 +68,7 @@ def archive_hits(repo: Path, ref: str = "HEAD") -> list[str]:
     return hits
 
 
-def stamp(clock: str, day: str, date: str = "2030-12-10") -> str:
+def stamp(clock: str, day: str, date: str = "2030-12-08") -> str:
     """A stamp built at run time from its parts (see the module docstring)."""
     return f"{clock} {day} {date}"
 

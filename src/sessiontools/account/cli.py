@@ -103,7 +103,10 @@ A host whose login shell exports CLAUDE_CODE_OAUTH_TOKEN from a file
 names that file in the `session` setting account.token_file (no
 default). `use` then swaps the file and never runs `security`: live
 seats keep the token they launched with until they restart, and the
-plan names them.
+plan names them. A seat `session start` launches does NOT follow the
+file unless its agent file says inherit: [CLAUDE_CODE_OAUTH_TOKEN];
+without it, it signs in from Claude's stored credentials, and `status`
+says so.
 
 `new` runs `claude setup-token` in a masked copy of its screen, saves the
 token to passage at <PREFIX>/<E>, reads it back, and registers it. PREFIX

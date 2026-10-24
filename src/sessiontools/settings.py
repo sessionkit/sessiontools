@@ -59,10 +59,10 @@ LAYERS = ("template", "host", "agent", "seat", "session")
 #: hand-typed string that predated `sounds`). sessiontools' own are `session`
 #: (snapshot, operator, start) and `sounds` (busy); tests/test_settings.py
 #: pins each module constant that names a tool, and each schema the repo
-#: ships under settings/, to this tuple. `mail`, `ears` and `mouth` belong to
-#: other repos, so nothing here can derive them: add a tool's name when it
-#: moves onto the cascade.
-TOOLS = ("mail", "session", "ears", "mouth", "sounds", "claude-code", "view")
+#: ships under settings/, to this tuple. `mail`, `ears`, `mouth` and `phone`
+#: belong to other repos, so nothing here can derive them: add a tool's name
+#: when it moves onto the cascade.
+TOOLS = ("mail", "session", "ears", "mouth", "sounds", "claude-code", "view", "phone")
 #: The kit's home under HOME. One constant: no variable or flag moves it.
 KIT_DIR = ".sessionkit"
 #: Each tool (a command) -> the package that ships it, whose settings
@@ -71,7 +71,7 @@ KIT_DIR = ".sessionkit"
 #: it, never a guess from a directory's name. tests/test_settings.py pins
 #: the keys to TOOLS.
 PACKAGES = {"mail": "mail", "session": "tools", "ears": "voice", "mouth": "voice",
-            "sounds": "tools", "claude-code": "tools", "view": "view"}
+            "sounds": "tools", "claude-code": "tools", "view": "view", "phone": "phone"}
 #: The variable that names a tool's SETTINGS FILE, for the tools whose
 #: installer writes the tool's schema beside that file (sessionvoice's
 #: `install_schema`, the only writer of dot-named schemas, does so for these
@@ -81,8 +81,13 @@ PACKAGES = {"mail": "mail", "session": "tools", "ears": "voice", "mouth": "voice
 #: one supported place is host_dir(tool); a tool joins this table
 #: when its installer does the same. The same variable names the tool's
 #: host-layer file, so the cascade reads that layer from it too (host_files).
+#: Each tool's names are read in order, the tool's own rule: the current
+#: name, then any old name it still accepts (the mouth's `MOUTH_SETTINGS`,
+#: then the old `VOICEMODE_MOUTH_SETTINGS`). Presence, not truthiness, picks
+#: the name: a current name set to "" hides the old one (settings_file_variable).
 #: tests/test_settings.py pins the keys to TOOLS.
-SETTINGS_FILE_ENV = {"ears": "EARS_CONF", "mouth": "VOICEMODE_MOUTH_SETTINGS"}
+SETTINGS_FILE_ENV = {"ears": ("EARS_CONF",),
+                     "mouth": ("MOUTH_SETTINGS", "VOICEMODE_MOUTH_SETTINGS")}
 SESSION_DIR = ".session"
 #: Keys a layer file may carry that are not settings.
 META_KEYS = ("_locked", "_about", "$schema")
@@ -345,12 +350,27 @@ def _same_files(a: list[Path], b: list[Path]) -> bool:
     return all(p.resolve() in real for p in b)
 
 
+def settings_file_variable(tool: str, env: Mapping[str, str] | None = None) -> str | None:
+    """The name of TOOL's settings-file variable that is read: the first of
+    its SETTINGS_FILE_ENV names that is set in ENV (presence, not
+    truthiness: a current name set to "" hides an old one), else its
+    current name. None for a tool not in the table. A message that names
+    the variable names this one, the one actually read."""
+    names = SETTINGS_FILE_ENV.get(tool)
+    if not names:
+        return None
+    e = os.environ if env is None else env
+    return next((n for n in names if n in e), names[0])
+
+
 def settings_file_override(tool: str, env: Mapping[str, str] | None = None) -> Path | None:
-    """The file TOOL's SETTINGS_FILE_ENV variable names, or None: a tool not
-    in the table, or its variable unset or empty. `~` expands against the
-    HOME of ENV. The one read of the variable: the schema lookup and the
-    host layer both go through here, so they cannot disagree on it."""
-    variable = SETTINGS_FILE_ENV.get(tool)
+    """The file TOOL's settings-file variable (settings_file_variable) names,
+    or None: a tool not in the table, or no name of it set, or the name read
+    set to "" (an empty value is no override, and an old name it hides is
+    not read). `~` expands against the HOME of ENV. The one read of the
+    variable: the schema lookup and the host layer both go through here, so
+    they cannot disagree on it."""
+    variable = settings_file_variable(tool, env)
     if not variable:
         return None
     named = (os.environ if env is None else env).get(variable) or ""
@@ -406,7 +426,7 @@ def host_files(tool: str, env: Mapping[str, str] | None = None) -> HostFiles:
     if _is_dir(drop_ins):
         host.extend(sorted(p for p in _entries(drop_ins) if _is_file(p) and p.suffix == ".json"))
     found = HostFiles(template if _is_file(template) else None, host, [])
-    variable = SETTINGS_FILE_ENV[tool]
+    variable = settings_file_variable(tool, env)
     default = _tool_dir(tool, env)
     if not _is_file(override):
         found.notes.append(f"{tool}: ${variable} names {override}, which is not a file: "
@@ -1482,7 +1502,7 @@ def report(res: Resolved, env: Mapping[str, str] | None = None) -> str:
         where = f"{hosts}, seats/<seat>/settings, sessions/<sid>/settings"
         missing = f"no {res.tool}.json under {where}"
         if override is not None:     # the default dir is not read under an override
-            missing = (f"no {_short(str(override), env)} (${SETTINGS_FILE_ENV[res.tool]}), "
+            missing = (f"no {_short(str(override), env)} (${settings_file_variable(res.tool, env)}), "
                        f"and no {res.tool}.json under seats/<seat>/settings, "
                        f"sessions/<sid>/settings")
         lines = [f"{res.tool}  not moved: {missing}"]

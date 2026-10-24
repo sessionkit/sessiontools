@@ -2,9 +2,9 @@
 they have been idle - one driver per harness, a library first.
 
 Import it, or use the command it ships: `session` (since
-2030-07-29, when the session repo was retired). `session list` and
+2030-06-09, when the session repo was retired). `session list` and
 `session get` are built on the functions below; `session start` is its own
-package, `sessiontools.start`; `session send` is disabled (2030-07-30).
+package, `sessiontools.start`; `session send` is disabled (2030-12-08).
 
     from sessiontools import sessions, live, find, idle_seconds
     from sessiontools import session_id, current, SESSION_ID_VARS

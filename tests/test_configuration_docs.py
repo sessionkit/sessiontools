@@ -22,6 +22,8 @@ import pytest
 from sessiontools import (
     band,
     busy,
+    default_model,
+    default_model_watch,
     operator,
     pane_state,
     pane_state_agent,
@@ -141,7 +143,8 @@ def test_readme_logs_names_each_log_the_code_writes(tmp_path):
     env = {"HOME": str(tmp_path)}
     home = str(tmp_path)
     logs = [sound_service.log_path(env), pane_state_agent.log_path(env),
-            snapshot.state_dir(env) / "reap.log"]
+            snapshot.state_dir(env) / "reap.log", default_model_watch.log_path(env),
+            default_model.state_dir(env) / "log.jsonl"]
     for log in logs:
         shown = "~" + str(log)[len(home):]
         assert f"`{shown}`" in section, shown
@@ -303,12 +306,17 @@ def test_the_session_keys_match_the_code():
     _row(text, tokenfile.SETTING_KEY)
     _row(text, "home")
     _row(text, "home_dir")
+    pin = _row(text, f"{default_model.SETTINGS_BLOCK}.{default_model.SETTINGS_KEY}")
+    assert pin[2] == "none: nothing is pinned"
+    assert pin[4] == "template and host"
 
 
 def test_the_sounds_keys_are_the_schemas():
     schema = json.loads((ROOT / "settings/sounds.schema.json").read_text(encoding="utf-8"))
-    keys = ["enabled"] + [f"busy.{k}" for k in schema["properties"]["busy"]["properties"]]
-    assert set(schema["properties"]) == {"enabled", "busy"}
+    keys = ["enabled"] + [f"{block}.{k}" for block in ("busy", "stop")
+                          for k in schema["properties"][block]["properties"]]
+    assert set(schema["properties"]) == {"enabled", "busy", "stop"}
+    assert "stop.file" in keys
     text = _section(_read(SETTINGS_DOC), "The `sounds` tool's keys")
     for key in keys:
         _row(text, key)
@@ -370,6 +378,10 @@ def test_sounds_are_read_from_the_session_layer(tree):
 
 
 def test_the_template_and_host_readers_ignore_the_session_layer(tree):
+    layer = Path(tree["HOME"]) / ".session" / "sessions" / SID / "settings" / "session.json"
+    data = json.loads(layer.read_text(encoding="utf-8"))
+    layer.write_text(json.dumps({**data, "model": {"default": "opus"}}), encoding="utf-8")
+    assert default_model.setting(tree).value is None
     assert snapshot.max_age(tree) == snapshot.DEFAULT_MAX_AGE
     assert pane_state.interval(tree) == pane_state.DEFAULT_INTERVAL
     assert operator.read_operator(tree, resolve_fqdn=lambda: "").address is None
@@ -378,7 +390,7 @@ def test_the_template_and_host_readers_ignore_the_session_layer(tree):
 def test_the_layers_table_says_which_readers_read_which_layers():
     text = _section(_read(SETTINGS_DOC), "Who reads which layers")
     assert _row(text, "`session`: `operator.*`, `list.max_age`, `pane_state.*`, "
-                      "`account.*`")[1] == "template and host only"
+                      "`account.*`, `model.default`")[1] == "template and host only"
     assert _row(text, "`session`: `context.near_pct`")[1] == "all five"
     assert _row(text, "`sounds`: every key")[1] == "all five"
     assert _row(text, "`claude-code`: `statusLine`")[1] == "template and host only"

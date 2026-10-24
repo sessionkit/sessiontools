@@ -2,7 +2,7 @@
 (unit and prepare level; the subprocess pass is in test_start_run.py) and
 its GIT-24 section. Two deliberate changes: the ask is `message send`, and
 GIT-24 keeps a seat's committer by TM-5594's commit_as marker, not the
-retired whitelist (ST-62, by the 2030-07-09 ruling)."""
+retired whitelist (ST-62, by the 2030-06-09 ruling)."""
 
 from __future__ import annotations
 
@@ -17,8 +17,18 @@ from git_support import hermetic_env
 from settings_support import host, shown
 from start_support import plan_for
 
+from sessiontools import operator as op_mod
 from sessiontools.start import policy as p
 from sessiontools.start.errors import EXIT_USAGE, LaunchError
+
+
+@pytest.fixture(autouse=True)
+def _short_host_is_box7(monkeypatch):
+    """The short host is box7 whatever box runs the suite, and no caller's
+    mail-host variable leaks in."""
+    for name in op_mod.MAIL_HOST_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(op_mod, "_resolve_hostname", lambda: "box7")
 
 
 def gate(section=None, cli=(), environ=None, declared=None):
@@ -151,7 +161,7 @@ def _ask(text):
 def test_the_refusal_asks_through_message_send_not_the_retired_session_mail(
         monkeypatch, tmp_path):
     """DEVIATION, on purpose: `session mail send` retired with the session
-    repo (2030-07-29); its successor is sessionmail's `message send`, whose
+    repo (2030-06-09); its successor is sessionmail's `message send`, whose
     sender is the environment (no --from)."""
     monkeypatch.setattr(p, "_resolve_operator_fqdn", lambda: "box7.example-tailnet.invalid")
     _host_settings({"operator": {"mailbox": "ops"}})
@@ -172,12 +182,34 @@ def test_the_refusal_honours_agent_operator_addr_override(monkeypatch):
 @pytest.mark.parametrize("fqdn", ["barehost", "", None, "   "])
 def test_an_undeliverable_address_names_the_override_never_a_look_alike(
         monkeypatch, tmp_path, fqdn):
+    """No host name at all (no short host, no FQDN under one): no address."""
+    monkeypatch.setattr(op_mod, "_resolve_hostname", lambda: "")
     monkeypatch.setattr(p, "_resolve_operator_fqdn", lambda: fqdn)
     _host_settings({"operator": {"mailbox": "ops"}})
     text = _refusal(environ={p.SESSION_MAIL_ROOT_ENV: _local_mail_root(tmp_path)})
     assert "message send" not in text
     assert "mail your own initiator" in text and "AGENT_OPERATOR_ADDR" in text
     assert _ask(text).splitlines()[0].strip() != ""
+
+
+@pytest.mark.parametrize("fqdn", [
+    "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa",
+    "1.0.0.127.in-addr.arpa", "otherbox.example.invalid", "barehost", ""])
+def test_the_ask_names_the_short_host_when_the_fqdn_is_not_this_host(
+        monkeypatch, tmp_path, fqdn):
+    """A reverse-DNS (PTR) name, an unrelated FQDN or none: the refusal asks
+    `ops@box7`, the address the local mail drop delivers."""
+    monkeypatch.setattr(p, "_resolve_operator_fqdn", lambda: fqdn)
+    _host_settings({"operator": {"mailbox": "ops"}})
+    local = {p.SESSION_MAIL_ROOT_ENV: _local_mail_root(tmp_path)}
+    assert p.operator_ask_address(local) == "ops@box7"
+    assert "message send ops@box7 " in _refusal(environ=local)
+
+
+def test_the_policy_seam_and_the_readers_seam_are_one_lookup(monkeypatch):
+    """The gate asks the network through the reader's one FQDN lookup."""
+    monkeypatch.setattr(op_mod, "_resolve_fqdn", lambda: "box7.one.invalid")
+    assert p._resolve_operator_fqdn() == "box7.one.invalid"
 
 
 def test_a_mailbox_setting_whose_maildir_is_not_local_derives_no_address(
@@ -473,7 +505,7 @@ def test_the_marker_names_are_tm_5594s():
 
 
 def test_the_retired_whitelist_is_gone():
-    """The 2030-07-09 ruling replaced it; nothing here reads it."""
+    """The 2030-06-09 ruling replaced it; nothing here reads it."""
     for name in ("COMMITTER_WHITELIST", "read_committer_whitelist"):
         assert not hasattr(p, name)
     assert "whitelist_path" not in p.resolve_committer_identity.__code__.co_varnames

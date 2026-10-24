@@ -8,8 +8,12 @@ works with whoever installed it.
 ```console
 $ session operator
 {"operator": "you@host.example", "mailbox": "you", "privileged": ["admin", "deploy", "you", "you@host.example"]}
+```
 
-$ session operator            # nothing configured
+With nothing configured:
+
+```console
+$ session operator
 {"operator": null, "mailbox": null, "privileged": []}
 ```
 
@@ -44,12 +48,18 @@ op.is_privileged("Admin")     # exact match after strip, case-insensitive
 ## The rules
 
 1. **`operator`, the address:** `AGENT_OPERATOR_ADDR` if set; else
-   `operator.address`; else `<operator.mailbox>@<FQDN>`, only when that
-   maildir is local and the FQDN has a dot; else null. The Fable gate's
+   `operator.address`; else `<operator.mailbox>@<host>`, only when that
+   maildir is local; else null. `<host>` is the name the local mail drop
+   takes as this host: the FQDN when it is a name under the short host
+   (a tailnet name, say), else the short host itself. A reverse-DNS
+   (`*.arpa`) name or any other FQDN is never used. The short host comes
+   from `SESSIONMAIL_HOST`, else `SESSION_MAIL_HOST`, else the `host` key
+   of the mail tool's settings, else the hostname's first label,
+   lowercased: the drop's own order. The Fable gate's
    refusal names this address (`session start`).
 2. **`privileged`:** every string in `operator.privileged` (stripped,
    empties dropped), plus the operator as the settings name it:
-   `operator.address` (else the derived `<mailbox>@<FQDN>`) and
+   `operator.address` (else the derived `<mailbox>@<host>`) and
    `operator.mailbox`. The operator is always privileged.
 3. **`AGENT_OPERATOR_ADDR` grants no privilege.** Any process can set
    it. It may redirect where an ask goes, but never makes its setter an

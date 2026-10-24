@@ -8,8 +8,9 @@ from __future__ import annotations
 import re
 
 import pytest
-from start_support import FIXTURES
+from start_support import FIXTURES, ROOT
 
+import sessiontools.start
 from sessiontools.start import args as a
 from sessiontools.start.agents import NO_AGENT
 from sessiontools.start.errors import EXIT_USAGE
@@ -110,6 +111,39 @@ def test_the_converse_flag_is_a_launcher_flag_before_the_agent_name():
     with pytest.raises(SystemExit) as excinfo:
         a.parse_args(["bob", "--converse"])
     assert excinfo.value.code == EXIT_USAGE
+
+
+def _converse_help() -> str:
+    (action,) = [x for x in a.build_parser()._actions if "--converse" in x.option_strings]
+    return " ".join(action.help.split())
+
+
+def _converse_doc_item() -> str:
+    text = (ROOT / "docs" / "session-start-launcher.md").read_text()
+    (item,) = re.findall(r"^- `--converse`:.*?(?=^- |^$)", text, re.MULTILINE | re.DOTALL)
+    return " ".join(item.split())
+
+
+def _converse_usage_line() -> str:
+    (line,) = [x for x in sessiontools.start.__doc__.splitlines() if "--converse" in x]
+    return " ".join(line.split())
+
+
+@pytest.mark.parametrize(("text", "says"), [
+    (_converse_help, ("can speak", "not an order")),
+    (_converse_doc_item, ("can speak", "not an order")),
+    (_converse_usage_line, ("can speak",)),
+], ids=["help", "launcher-doc", "module-doc"])
+def test_the_converse_flag_is_described_as_a_capability_not_an_order(text, says):
+    # The line the flag injects tells the agent the session can speak; it
+    # never orders a spoken first response. Help, doc and the package's own
+    # usage block say the same; the one-line usage entry has no room for
+    # "not an order", so it states the capability alone.
+    line = text()
+    for phrase in says:
+        assert phrase in line
+    for order in ("SPEAK", "instruct", "speak the first response", "speak its first"):
+        assert order not in line
 
 
 def test_directory_flag_after_the_agent_name_is_the_position_trap():

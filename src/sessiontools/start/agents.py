@@ -37,7 +37,7 @@ DEFAULT_SESSIONS_DIR = (".session", "sessions")
 # The agent that means "none" on a command line that goes on to carry a
 # first message or vendor flags: argparse hands the first bare word to the
 # positional whatever it says, and `--` does not separate (measured
-# 2030-07-10). `session start` must be callable without an agent.
+# 2030-06-09). `session start` must be callable without an agent.
 NO_AGENT = "-"
 
 

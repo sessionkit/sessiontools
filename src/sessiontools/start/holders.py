@@ -1,7 +1,7 @@
 """The front door: a hand launch of an agent that a live Claude
 Code session already holds is refused, naming the holder and its age.
 
-Measured on master b216a19 (2030-08-02): a live
+Measured on master b216a19 (2030-12-08): a live
 sidecar for agent `scout` stood beside `session start scout hello`, and the
 launch exec'd the vendor anyway, exit 0. The incident behind the card was
 the same shape (15 Jun, `alice`, a human's own shell): a second `alice` beside the

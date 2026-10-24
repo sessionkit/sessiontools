@@ -17,6 +17,15 @@ The count is `window.scan()` on the transcript the hook payload names - the
 same fold `session context` prints - not a `session context` subprocess
 (2.5 s a call, measured; the fold is tens of milliseconds).
 
+PostToolBatch can start the hook before the harness has written the
+batch's own assistant row (the one whose `tool_use` block the payload's
+`tool_calls[].tool_use_id` names, with this turn's usage). Read at once,
+the count would be the previous turn's, or none on the first turn. So
+when the payload names its tool calls, `decide()` first waits for that row:
+it reads the transcript's new tail every `ROW_POLL_S` and stops at the row,
+or at `ROW_WAIT_S` at most, then counts what is on disk. A payload that
+names no tool call is not waited for.
+
 IT NEVER BREAKS A TURN. `main()` swallows everything and returns 0, and it
 never writes to stderr: a hook's stderr or a non-zero exit shows up as an
 error line. A slow, missing or unreadable read is silence.
@@ -28,6 +37,7 @@ import json
 import math
 import os
 import sys
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -48,6 +58,16 @@ DEFAULT_SAY = ("You're past {at}. At a good stopping point, settle: "
 EVENT = "PostToolBatch"
 
 _SCALE = {"k": 1_000, "m": 1_000_000}
+
+#: The longest wait for this batch's own assistant row, and the poll
+#: interval. The row lands tens of milliseconds after the hook starts; the
+#: hook's own timeout is 5 s, so the cap stays well inside it.
+ROW_WAIT_S = 1.0
+ROW_POLL_S = 0.01
+
+#: The clock and the sleep the wait uses (tests replace them).
+_clock = time.monotonic
+_sleep = time.sleep
 
 
 def switched_off(env: Mapping[str, str]) -> bool:
@@ -96,6 +116,63 @@ def _transcript(payload: Mapping[str, object], env: Mapping[str, str]) -> Path |
     return window.transcript_path(cwd if isinstance(cwd, str) else None, sid, env)
 
 
+def batch_ids(payload: Mapping[str, object]) -> frozenset[str]:
+    """The `tool_use_id` of each of the payload's `tool_calls`: the ids this
+    batch's assistant row carries. Empty when the payload names none."""
+    calls = payload.get("tool_calls")
+    if not isinstance(calls, list):
+        return frozenset()
+    return frozenset(c["tool_use_id"] for c in calls
+                     if isinstance(c, dict) and isinstance(c.get("tool_use_id"), str)
+                     and c["tool_use_id"])
+
+
+def _is_batch_row(raw: bytes, ids: frozenset[str]) -> bool:
+    """`raw` is an assistant row with a `tool_use` block whose id is in
+    `ids`. Parsed, never a substring match: the tool_result row that follows
+    carries the same id, and only the assistant row carries the usage."""
+    if not any(i.encode() in raw for i in ids):
+        return False
+    try:
+        row = json.loads(raw)
+    except ValueError:
+        return False
+    if not isinstance(row, dict) or row.get("type") != "assistant":
+        return False
+    message = row.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id") in ids
+        for block in content)
+
+
+def await_batch_row(path: Path, ids: frozenset[str]) -> bool:
+    """Wait until this batch's own assistant row is on disk: True once it
+    is, False at the cap or on a failed read. No ids: True at once.
+
+    Each poll reads only what was appended since the last one, so the
+    file is read once in all; a half-written last line waits for its
+    newline."""
+    if not ids:
+        return True
+    deadline = _clock() + ROW_WAIT_S
+    offset, tail = 0, b""
+    while True:
+        try:
+            with path.open("rb") as f:
+                f.seek(offset)
+                chunk = f.read()
+        except OSError:
+            return False
+        offset += len(chunk)
+        *lines, tail = (tail + chunk).split(b"\n")
+        if any(_is_batch_row(line, ids) for line in lines):
+            return True
+        if _clock() >= deadline:
+            return False
+        _sleep(ROW_POLL_S)
+
+
 def decide(env: Mapping[str, str], payload: object) -> str | None:
     """The line to say for this batch, or None for silence.
 
@@ -105,6 +182,10 @@ def decide(env: Mapping[str, str], payload: object) -> str | None:
     next batch); no transcript; a count under the threshold. `used` is the
     last usage row, so a synthetic zero tail is under any threshold.
     Fires at `used >= at`: reaching the mark counts as past it.
+
+    `used` is this batch's own: when the payload names its tool calls, the
+    count waits for their assistant row (`await_batch_row`, at most
+    `ROW_WAIT_S`). A row that never lands is counted as the disk has it.
     """
     if switched_off(env):
         return None
@@ -116,6 +197,7 @@ def decide(env: Mapping[str, str], payload: object) -> str | None:
     path = _transcript(payload, env)
     if path is None:
         return None
+    await_batch_row(path, batch_ids(payload))
     used = window.scan(path).used
     if used < at:
         return None

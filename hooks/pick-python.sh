@@ -1,7 +1,8 @@
 # shellcheck shell=sh
 # pick-python.sh - the hooks' one python picker. Not a hook and not run:
-# busy-sound and settle-hook source it with `.`, by path from their own $0,
-# so it costs one file read and no fork. It defines `pick` and empties $py.
+# busy-sound, settle-hook, clock-hook and session-info source it with `.`,
+# by path from their own $0, so it costs one file read and no fork. It
+# defines `pick` and empties $py.
 #
 #   pick    sets $py to the python to run, once; later calls return at once.
 #           Returns 1, with $py empty, when there is no python at all.

@@ -298,7 +298,11 @@ def test_the_plan_without_yes_writes_nothing_and_runs_no_claude(world, capsys):
     assert "keychain: not read: a seat that signs in from it does not move" in out
     assert "preflight: runs before the write" in out
     assert ("seats:   2 live seats keep the token they launched with until they restart: "
-            "s1, s2; new launches read the new file") in out
+            "s1, s2; new launches from a shell that reads the file read the new file"
+            ) in out
+    assert ("session start: its seats do NOT follow the file unless their agent file "
+            "has inherit: [CLAUDE_CODE_OAUTH_TOKEN]; without it they sign in from "
+            "Claude's stored credentials") in out
     assert "this seat holds the old token: no" in out
     assert f"backup:  {world.cfg / u.FILE_BACKUP_DIR}{os.sep} (written before" in out
     assert "witness: wit" in out
@@ -362,6 +366,7 @@ def test_the_swap_backs_up_stages_commits_verifies_and_ledgers(world, capsys):
     assert f"backup:  {backup}" in out
     assert f"done: the host's token file is on b (b@example.com); ledger {world.ledger}" in out
     assert out.count("2 live seats keep the token they launched with") == 2
+    assert out.count(u.START_NOTICE) == 2                 # in the plan, and after done
     world.assert_keychain_untouched()
     assert_no_leak(world, capsys)
 
@@ -527,7 +532,9 @@ def test_one_seat_no_seats_and_a_failed_scan(world, capsys):
             in world.out.getvalue())
     world.seats = []
     assert world.run(yes=False) == 3
-    assert "seats:   no live seats; new launches read the new file" in world.out.getvalue()
+    assert ("seats:   no live seats; new launches from a shell that reads the file read "
+            "the new file") in world.out.getvalue()
+    assert u.START_NOTICE in world.out.getvalue()        # said with no live seats too
 
     def broken():
         raise RuntimeError("no session list")

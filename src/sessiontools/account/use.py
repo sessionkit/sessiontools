@@ -8,8 +8,12 @@ A host signs in by one of two routes, and the `session` setting
   within about 50 s, and cold-starts each one's cache;
 - **a token file** (the setting set): the login shell exports
   `CLAUDE_CODE_OAUTH_TOKEN` from it, so a seat keeps the token it launched
-  with until it restarts, and only new launches read the new file. On this
-  route `use` never runs `security` (the steps below, as "the file route").
+  with until it restarts, and only new launches from a shell that reads the
+  file read the new file. A seat `session start` launches does NOT follow
+  the file: the variable is stripped unless its agent file says `inherit:
+  [CLAUDE_CODE_OAUTH_TOKEN]`, and with no token it signs in from Claude's
+  stored credentials. On this route `use` never runs `security` (the steps
+  below, as "the file route").
 
 Either way `use` runs in the order that makes
 failure cheap: it shows the plan before it asks for anything, and nothing
@@ -51,9 +55,11 @@ The file route, where it differs:
    token line, else exit 5); already on NAME is exit 0;
 4. the plan names the file (and a link's target), says the Keychain is not
    read, and gives the restart report in place of the cost: every live seat
-   (the seat scan) keeps the token it launched with until it restarts, and
-   whether THIS process holds the file's current token (compared in memory
-   with `same_token`, shown as yes or no);
+   (the seat scan) keeps the token it launched with until it restarts, a
+   seat `session start` launches does not follow the file unless its agent
+   file inherits the variable, and whether THIS process holds the file's
+   current token (compared in memory with `same_token`, shown as yes or
+   no);
 6. the preflight, as on the Keychain route, BEFORE the backup and the
    stage: a failed one leaves nothing on disk, the host file byte for byte
    as it was;
@@ -248,8 +254,10 @@ def claude_preflight(token: str, *, runner: PreflightRunner | None = None,
 class Seat:
     """One live seat. On the Keychain route it follows the host, and
     `tokens` is its context, the cache a switch cold-starts (None when it
-    cannot be read). On the token-file route it keeps the token it launched
-    with until it restarts, and only its label is shown."""
+    cannot be read). On the token-file route it keeps what it holds until
+    it restarts, and only its label is shown; one that `session start`
+    launches does not follow the file even then, unless its agent file
+    inherits `CLAUDE_CODE_OAUTH_TOKEN`."""
 
     label: str
     tokens: int | None
@@ -683,6 +691,13 @@ def _use_keychain(target: _Target, keychain: kc.Keychain, *, who: str | None, ye
 # --- the token-file route --------------------------------------------------------------
 
 
+#: The token-file plan's and done report's line on `session start` seats:
+#: they do not read the file, unless the agent file carries the variable.
+START_NOTICE = ("  session start: its seats do NOT follow the file unless their agent "
+                "file has inherit: [CLAUDE_CODE_OAUTH_TOKEN]; without it they sign in "
+                "from Claude's stored credentials")
+
+
 def restart_report(seat_scan: SeatScan) -> str:
     """Which live seats keep the token they launched with: all of them, by
     label. `use` cannot see a seat's token (reading another process's env
@@ -745,7 +760,9 @@ def _use_token_file(target: _Target, route: tf.TokenFile, *, who: str | None, ye
     # 4. the plan, with the restart report
     seats = restart_report(seat_scan)
     this_seat = "yes" if holds_token(environ, current) else "no"
-    report = (f"  seats:   {seats}; new launches read the new file\n"
+    report = (f"  seats:   {seats}; new launches from a shell that reads the file "
+              "read the new file\n"
+              f"{START_NOTICE}\n"
               f"  this seat holds the old token: {this_seat}")
     print(f"use {name} ({account.email}): the host moves from {from_name} to {name}\n"
           f"  file:    {route.describe()}\n"

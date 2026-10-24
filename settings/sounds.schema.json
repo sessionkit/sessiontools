@@ -38,6 +38,17 @@
           "minimum": 0
         }
       }
+    },
+    "stop": {
+      "description": "The stop sound: plays FILE once when the seat's turn ends (the Stop hook), queued through the mouth (mouth play FILE) so it lands after any line still speaking; played directly by afplay only when the mouth is absent, refuses or cannot be run. No hook clears it (it is not a slot), and a subagent's Stop is silent. Unset is silent.",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "The sound file to play, an absolute path or ~/... . Missing, unreadable or relative is silent.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
     }
   }
 }

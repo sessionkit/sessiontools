@@ -107,12 +107,14 @@ refusal. `status` names one that is still there (`legacy` in `--json`).
 With nothing to retire, they say so and do nothing; `--dry-run` lists
 the retire and changes nothing.
 
-```console
-session pane-state agent on --dry-run   # the plist it would write; changes nothing
-session pane-state agent on             # write the plist, load it, prove it
-session pane-state agent status         # plist, pid, who holds the watch lock
-session pane-state agent off            # boot it out, remove the plist
-```
+- `session pane-state agent on --dry-run` prints the plist it would
+  write, and changes nothing.
+- `session pane-state agent on` writes the plist, loads it and proves it.
+- `session pane-state agent status` shows the plist, the pid and who
+  holds the watch lock.
+- `session pane-state agent off` boots it out and removes the plist.
+
+How the job runs:
 
 - **What it runs:** `<this install's session> pane-state watch`, by
   absolute path, because launchd does no PATH lookup. On an editable
@@ -180,4 +182,4 @@ session pane-state agent off            # boot it out, remove the plist
 
 The other verbs: [the `session` verbs][verbs].
 
-[verbs]: session-command-verbs.md
+[verbs]: session.md

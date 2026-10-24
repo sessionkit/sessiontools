@@ -18,8 +18,14 @@
   process's own env, fingerprinted and named. On the Keychain route it is
   labelled `env token: immune to use`; on the token-file route `env token:
   from launch; moves at restart`, since the shell reads the swapped file at
-  the next launch. Absent, the seat `follows the host`. No other seat's
-  environment is read.
+  the next launch. Absent on the Keychain route, the seat `follows the
+  host`: it reads the one item. Absent on the token-file route, it does
+  NOT: `no env token: not on the token file`. A seat launched by `session
+  start` has the variable stripped unless its agent file says `inherit:
+  [CLAUDE_CODE_OAUTH_TOKEN]`, and with no token it signs in from Claude's
+  stored credentials, which `status` does not read. A tool shell may strip
+  the variable from a seat that holds it, so run from one, `status` can
+  under-read. No other seat's environment is read.
 - **How much of the plan is used?** The exporter at `usage_url` (default
   `http://localhost:9103/metrics`, a local Claude exporter;
   `claude_plan_usage_percent{account,window}`), labelled `usage of the live
@@ -58,7 +64,9 @@ Three deliberate calls:
   (...)`, exit 0. `status` is a report; the failure is the finding. The
   registry or config being refused is still exit 5.
 - **A seat that follows the host carries the host's name** in `--json`
-  (`seat.name` == `host.name`), so a reader need not join the two.
+  (`seat.name` == `host.name`), so a reader need not join the two. A seat
+  that is not on the token file carries `seat.name` null: its stored
+  credentials are not read, so its account is not known, never guessed.
 
 Nothing here prints, stores or raises with a token, an item or a
 fingerprint: an fp is turned into a name or `unknown`, and that is all that
@@ -103,6 +111,14 @@ VIA_LEDGER = "from ledger, unverified"
 VIA_ENV = "env token: immune to use"
 VIA_ENV_FILE = "env token: from launch; moves at restart"
 VIA_FOLLOWS = "follows the host"
+VIA_NOT_FILE = "no env token: not on the token file"
+#: The text `status` prints for VIA_NOT_FILE: what such a seat signs in as,
+#: and how to carry the token. Two lines; the second is indented under it.
+NOT_FILE_TEXT = (
+    "NOT on the token file: no CLAUDE_CODE_OAUTH_TOKEN here, so this seat signs "
+    "in from Claude's stored credentials\n"
+    "       an agent file with inherit: [CLAUDE_CODE_OAUTH_TOKEN] carries the token; "
+    "a tool shell may strip the variable from a seat that has it")
 USAGE_LABEL = "usage of the live account"
 FILE_LABEL = "usage of the host account"
 SOURCE_FILE = "limits_file"
@@ -268,10 +284,13 @@ def host_of(registry: reg.Registry, config: Config, *, keychain: kc.Keychain | N
 def on_token_file(environ: Mapping[str, str] | None = None,
                   home: str | os.PathLike | None = None) -> bool:
     """Whether the host signs in from a token file: `account.token_file` is
-    set. Settings only; no file or item is read. A settings layer that
-    cannot be read answers False here (the host line reports it)."""
+    set, whatever its value. A value the route refuses (a relative path, an
+    empty one) is still the token-file route: the host line reports it
+    unreadable, and the seat is not given `follows the host`. Settings
+    only; no file or item is read. A settings layer that cannot be read
+    answers False here (the host line reports it)."""
     try:
-        return tf.token_file_setting(environ, home) is not None
+        return tf.token_file_is_set(environ, home)
     except tf.TokenFileError:
         return False
 
@@ -284,9 +303,17 @@ def seat_of(registry: reg.Registry, host: Who, env: Mapping[str, str], *,
     """This process's own route. An env token is fingerprinted in memory and
     named; the value goes nowhere. On a TOKEN_FILE host the env token came
     from that file at launch, so `use` moves it at the next restart: it is
-    not immune to `use` there."""
+    not immune to `use` there.
+
+    With no env token, a Keychain host's seat follows the host (it reads
+    the one item). A token-file host's seat does NOT: only a shell that
+    exports the file's token puts it on the file, and with none the seat
+    signs in from Claude's stored credentials, which are not read here. Its
+    name is None, never the host's."""
     token = (env.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
     if not token:
+        if token_file:
+            return Who(None, None, VIA_NOT_FILE)
         return Who(host.name, host.email, VIA_FOLLOWS)
     via = VIA_ENV_FILE if token_file else VIA_ENV
     account = registry.by_fp(reg.fingerprint(token))
@@ -495,6 +522,8 @@ def _who_text(who: Who) -> str:
 def _seat_text(seat: Who) -> str:
     if seat.via == VIA_FOLLOWS:
         return VIA_FOLLOWS
+    if seat.via == VIA_NOT_FILE:
+        return NOT_FILE_TEXT
     return _who_text(seat)
 
 

@@ -44,7 +44,9 @@ HELD = {"ledger": "ST-26 OQ3: teaching agents the verb waits on the maintainer",
         "park": "agents are taught it by the settle protocol (taskmaster's text), and the "
                 "skill is at its 400-token cap",
         "completion": "a human's shell setup, not an agent's verb; the skill is at its "
-                      "400-token cap"}
+                      "400-token cap",
+        "default-model": "a host setting a human opts into, not an agent's verb; the skill "
+                         "is at its 400-token cap"}
 
 
 def front_matter(text: str) -> dict[str, str]:

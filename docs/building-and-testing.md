@@ -4,14 +4,11 @@ A checkout you can import from and test, then `make check` before you
 push. In the source repository, read `openspec/specs/` before you
 build: it is what this package is meant to be.
 
-```console
-make install     # uv sync: a checkout you can import from and test
-make             # list the targets
-make check       # lint, then test
-make test        # the pytest suite
-```
-
+- `make install` runs `uv sync`: a checkout you can import from and
+  test.
 - `make` alone prints the targets, one per line.
+- `make check` is lint, then test.
+- `make test` runs the pytest suite.
 - `make lint` is `lock-check`, then ruff, then shellcheck on every
   tracked shell script.
 - `make lock-check` fails when `uv.lock` disagrees with
@@ -45,11 +42,11 @@ archives.
 
 ## History
 
-- 0.0.1, 2030-07-18: born as a library.
-- 2030-07-29: sessiontools took over the `session` command when the
+- 0.0.1, 2030-06-09: born as a library.
+- 2030-06-09: sessiontools took over the `session` command when the
   session repo was retired. `list` and `get`
   were ported onto the library, `start` ported as `sessiontools.start`,
-  and `send` disabled (2030-07-30).
+  and `send` disabled (2030-12-08).
 - On PyPI as `sessiontools`: 0.0.1, 0.0.2, 0.0.3 and 0.1.0.
 - The [CHANGELOG][changelog] has every release.
 

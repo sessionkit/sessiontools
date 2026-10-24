@@ -1,7 +1,7 @@
 """The process table, read once: every pid's parent and start time.
 
 Liveness is one rule, the one `session list` always used (and sessionmail's
-doorbell uses since 2030-07-29): a sidecar's session is live when its pid is
+doorbell uses since 2030-06-09): a sidecar's session is live when its pid is
 running AND that process started within SAME_PROCESS_SECONDS of the
 sidecar's `procStart`. A pid the OS has handed to something else is not the
 session. `ps` is asked in UTC because `procStart` is UTC ctime.
@@ -45,7 +45,7 @@ class Proc:
     command: str | None = None
 
 
-#: `lstart` in the C locale is always five words: `Wed Jan  2 17:00:00 2030`
+#: `lstart` in the C locale is always five words: `Sun Jun  9 17:00:00 2030`
 #: (a one-digit day is padded, and `split` folds the padding).
 LSTART_WORDS = 5
 

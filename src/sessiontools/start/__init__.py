@@ -2,8 +2,8 @@
 
     session start <agent>                  launch an agent by name
     session start --dry-run <agent>        show what would run; launch nothing
-    session start --idle <agent>           boot self-directed, inject nothing
-    session start --converse <agent>       speak the first response
+    session start --idle <agent>           boot self-directed, run no generators
+    session start --converse <agent>       tell the agent this session can speak
     session start --in-tmux <agent>        in a new tmux window, not in place
     session start <agent> review the auth  trailing words = the first message
 
@@ -12,7 +12,7 @@ the vendor untouched, `claude:` renders to argv by one rule, and the
 launcher's own keys live under `start:`. Front matter supplies defaults;
 the command line overrides them.
 
-THE PORT. This package is the old launcher (session-20300729 `81e5662`,
+THE PORT. This package is the old launcher (session-20300609 `81e5662`,
 `skills/session/scripts/session-start`) ported as package code, well
 structured, in the right place. Library first:
 

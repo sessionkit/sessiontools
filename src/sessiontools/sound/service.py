@@ -226,7 +226,7 @@ def _wait_gone(wait_s: float | None = None, label: str | None = None) -> bool:
 
 def _bootstrap(path: Path) -> subprocess.CompletedProcess:
     """bootstrap, with ONE retry: a bootstrap in the window after a bootout
-    fails "5: Input/output error" (measured twice, 2030-08-04)."""
+    fails "5: Input/output error" (measured twice, 2030-12-08)."""
     r = _launchctl("bootstrap", _domain(), str(path))
     if r.returncode != 0:
         time.sleep(1.0)

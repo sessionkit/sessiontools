@@ -6,10 +6,12 @@ hook to the first sample is about 20 ms instead of about 220 ms with
 `afplay` (median of 20 runs).
 It is macOS only, one per user, and **off until you switch it on**:
 
-```console
-session sound engine on        # build if stale, load the agent, ping it
-session sound engine status    # binaries, plist, pid, the engine's answer
-```
+- `session sound engine on` builds the engine if it is stale, loads the
+  agent and pings it.
+- `session sound engine status` shows the binaries, the plist, the pid
+  and the engine's answer.
+
+How it behaves:
 
 - A host-wide opt-in is one line in the host layer
   (`~/.sessionkit/tools/settings/sounds.json`):
@@ -84,8 +86,8 @@ any path there, untouched, and the log says why.
 - `~/Library/Mail`, `~/Library/Messages`.
 - `/Volumes/*`, `/net`, `/Network`, and any mount the kernel calls
   non-local or removable.
-- It checks the sound file, the mouth dir (`VOICEMODE_MOUTH_DIR` /
-  `VOICEMODE_BASE_DIR`), the sessions root and each seat's record dir.
+- It checks the sound file, the mouth dir (`MOUTH_DIR`, or `mouth/` in
+  sessionvoice's home), the sessions root and each seat's record dir.
 - A seat whose sound or mouth is refused stays silent: keep the busy
   sound and the mouth elsewhere.
 

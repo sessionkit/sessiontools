@@ -10,6 +10,7 @@ made and kills every fake player it saw.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -158,7 +159,9 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setenv("SESSIONS_DIR", str(tmp_path / ".session" / "sessions"))
     # The waiter inherits this env: its mouth is the rig's, never the host's.
     monkeypatch.setenv("VOICEMODE_MOUTH_DIR", str(tmp_path / "mouth"))
-    monkeypatch.delenv("VOICEMODE_BASE_DIR", raising=False)
+    # An ambient MOUTH_DIR or SESSIONVOICE_HOME would win over the rig's dir.
+    for name in ("MOUTH_DIR", "SESSIONVOICE_HOME", "VOICEMODE_BASE_DIR"):
+        monkeypatch.delenv(name, raising=False)
     r = Rig(tmp_path)
     yield r
     r.teardown()
@@ -665,6 +668,8 @@ def test_a_waiter_held_off_by_speech_ends_when_its_seat_goes(rig):
 
 def test_wait_takes_an_injected_mouth_over_the_env(rig, tmp_path, monkeypatch):
     other = tmp_path / "other-mouth"
+    monkeypatch.delenv("MOUTH_DIR", raising=False)
+    monkeypatch.delenv("SESSIONVOICE_HOME", raising=False)
     monkeypatch.setenv("VOICEMODE_MOUTH_DIR", str(other))
     rig.speak()                                     # the rig's mouth speaks
     slot = rig.slot("busy")
@@ -684,16 +689,224 @@ def test_wait_takes_an_injected_mouth_over_the_env(rig, tmp_path, monkeypatch):
     assert pids(rig.mark) == []
 
 
-def test_the_mouth_dir_is_voicemodes_rule():
-    home = {"HOME": "/h"}
-    assert busy.mouth_dir(home) == Path("/h/.voicemode/mouth")
+def _heard(root: Path, kind: str = "lock") -> Path:
+    """Give ROOT a heard log, sessionvoice's POPULATED: a `heard.lock`
+    (KIND "lock") or a `heard_*.jsonl` (KIND "jsonl")."""
+    d = root / "logs" / "conversations"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / ("heard.lock" if kind == "lock" else "heard_2030-06-09.jsonl")).write_text("")
+    return root
+
+
+def _bare(root: Path) -> Path:
+    """ROOT exists, down to its conversations dir, but holds no heard log."""
+    (root / "logs" / "conversations").mkdir(parents=True, exist_ok=True)
+    (root / "logs" / "conversations" / "other.txt").write_text("")
+    return root
+
+
+def test_the_mouth_dir_is_sessionvoices_rule(tmp_path):
+    h = tmp_path / "h"
+    h.mkdir()
+    home = {"HOME": str(h)}
+    sv, vm = h / ".sessionvoice", h / ".voicemode"
+
+    # a fresh HOME: sessionvoice's default home
+    assert busy.mouth_dir(home) == sv / "mouth"
+    # existing but empty homes never decide
+    _bare(vm)
+    assert busy.mouth_dir(home) == sv / "mouth"
+    vm.joinpath("mouth").mkdir()
+    assert busy.mouth_dir(home) == sv / "mouth"
+    # only ~/.voicemode holds a heard log: adopted in place
+    _heard(vm, "jsonl")
+    assert busy.mouth_dir(home) == vm / "mouth"
+    _bare(sv)
+    assert busy.mouth_dir(home) == vm / "mouth"
+    # both hold one: ~/.sessionvoice
+    _heard(sv, "lock")
+    assert busy.mouth_dir(home) == sv / "mouth"
+
+    # the home variables: SESSIONVOICE_HOME, then VOICEMODE_BASE_DIR
+    assert busy.mouth_dir({**home, "SESSIONVOICE_HOME": "/s"}) == Path("/s/mouth")
     assert busy.mouth_dir({**home, "VOICEMODE_BASE_DIR": "/b"}) == Path("/b/mouth")
-    assert busy.mouth_dir({**home, "VOICEMODE_BASE_DIR": "~/vm"}) == Path("/h/vm/mouth")
-    assert busy.mouth_dir({**home, "VOICEMODE_BASE_DIR": "/b",
-                           "VOICEMODE_MOUTH_DIR": "/m"}) == Path("/m")
-    assert busy.mouth_dir({**home, "VOICEMODE_MOUTH_DIR": "~/m"}) == Path("/h/m")
-    assert busy.mouth_dir({**home, "VOICEMODE_MOUTH_DIR": "",
-                           "VOICEMODE_BASE_DIR": ""}) == Path("/h/.voicemode/mouth")
+    assert busy.mouth_dir({**home, "SESSIONVOICE_HOME": "/s",
+                           "VOICEMODE_BASE_DIR": "/b"}) == Path("/s/mouth")
+    assert busy.mouth_dir({**home, "SESSIONVOICE_HOME": "",
+                           "VOICEMODE_BASE_DIR": "/b"}) == Path("/b/mouth")
+    assert busy.mouth_dir({**home, "SESSIONVOICE_HOME": "",
+                           "VOICEMODE_BASE_DIR": ""}) == sv / "mouth"
+    # the mouth's own variable, then its old name, by presence
+    assert busy.mouth_dir({**home, "MOUTH_DIR": "/m"}) == Path("/m")
+    assert busy.mouth_dir({**home, "VOICEMODE_MOUTH_DIR": "/o"}) == Path("/o")
+    assert busy.mouth_dir({**home, "MOUTH_DIR": "/m", "VOICEMODE_MOUTH_DIR": "/o",
+                           "SESSIONVOICE_HOME": "/s"}) == Path("/m")
+    assert busy.mouth_dir({**home, "VOICEMODE_MOUTH_DIR": "/o",
+                           "SESSIONVOICE_HOME": "/s"}) == Path("/o")
+    # a set but empty MOUTH_DIR hides the old name and falls to the home rule
+    assert busy.mouth_dir({**home, "MOUTH_DIR": "", "VOICEMODE_MOUTH_DIR": "/o"}) == sv / "mouth"
+    assert busy.mouth_dir({**home, "MOUTH_DIR": "", "VOICEMODE_MOUTH_DIR": "/o",
+                           "SESSIONVOICE_HOME": "/s"}) == Path("/s/mouth")
+    assert busy.mouth_dir({**home, "VOICEMODE_MOUTH_DIR": ""}) == sv / "mouth"
+    # `~` in each variable is the HOME of the env given
+    assert busy.mouth_dir({**home, "MOUTH_DIR": "~/m"}) == h / "m"
+    assert busy.mouth_dir({**home, "MOUTH_DIR": "~"}) == h
+    assert busy.mouth_dir({**home, "VOICEMODE_MOUTH_DIR": "~/o"}) == h / "o"
+    assert busy.mouth_dir({**home, "SESSIONVOICE_HOME": "~/s"}) == h / "s" / "mouth"
+    assert busy.mouth_dir({**home, "VOICEMODE_BASE_DIR": "~/vm"}) == h / "vm" / "mouth"
+    # `$VAR` in a home variable expands against the env given
+    assert busy.mouth_dir({**home, "SESSIONVOICE_HOME": "$HOME/s"}) == h / "s" / "mouth"
+    assert busy.mouth_dir({**home, "X": "/x",
+                           "VOICEMODE_BASE_DIR": "${X}/vm"}) == Path("/x/vm/mouth")
+    assert busy.mouth_dir({**home, "SESSIONVOICE_HOME": "/s/$NOPE"}) == Path("/s/$NOPE/mouth")
+    # an unclosed `${` is left as it is, and so is everything after it
+    assert busy.mouth_dir({**home, "SESSIONVOICE_HOME": "/s/${X$HOME"}) \
+        == Path("/s/${X$HOME/mouth")
+    # `~//` is still under HOME, never at the root
+    assert busy.mouth_dir({**home, "MOUTH_DIR": "~//m"}) == h / "m"
+    assert busy.mouth_dir({**home, "SESSIONVOICE_HOME": "~//s"}) == h / "s" / "mouth"
+    # MOUTH_DIR expands as a parsed path does: a leading `./` drops away
+    assert busy.mouth_dir({**home, "MOUTH_DIR": "./~/m"}) == h / "m"
+
+
+def test_the_mouth_dir_creates_nothing(tmp_path):
+    h = tmp_path / "h"
+    h.mkdir()
+    busy.mouth_dir({"HOME": str(h)})
+    assert list(h.iterdir()) == []
+
+
+def test_an_unreadable_conversations_dir_is_not_a_heard_log(tmp_path):
+    h = tmp_path / "h"
+    convo = _heard(h / ".voicemode", "jsonl") / "logs" / "conversations"
+    convo.chmod(0o000)
+    try:
+        if os.access(convo, os.R_OK):
+            pytest.skip("this user reads past a mode-0 dir")
+        assert busy.mouth_dir({"HOME": str(h)}) == h / ".sessionvoice" / "mouth"
+    finally:
+        convo.chmod(0o700)
+
+
+# sessionvoice's resolver, copied here (never imported: sessiontools does not
+# depend on sessionvoice) from its `ears/home.py` (`populated`,
+# `sessionvoice_home`), `ears/envnames.py` (`get` for MOUTH_DIR) and
+# `mouth/paths.py` (`mouth_dir`). It reads the PROCESS env and HOME, as
+# sessionvoice does; the table test below runs it under fake HOMEs.
+
+def _sv_populated(root) -> bool:
+    d = Path(root) / "logs" / "conversations"
+    try:
+        return (d / "heard.lock").exists() or any(d.glob("heard_*.jsonl"))
+    except OSError:
+        return False
+
+
+def _sv_home() -> Path:
+    for name in ("SESSIONVOICE_HOME", "VOICEMODE_BASE_DIR"):
+        raw = os.environ.get(name)
+        if raw:
+            return Path(os.path.expanduser(os.path.expandvars(raw)))
+    h = Path(os.path.expanduser("~"))
+    if _sv_populated(h / ".sessionvoice"):
+        return h / ".sessionvoice"
+    if _sv_populated(h / ".voicemode"):
+        return h / ".voicemode"
+    return h / ".sessionvoice"
+
+
+def _sv_envnames_get(new: str, old: str):
+    for name in (new, old):
+        if name in os.environ:
+            return os.environ[name]
+    return None
+
+
+def _sv_mouth_dir() -> Path:
+    env = _sv_envnames_get("MOUTH_DIR", "VOICEMODE_MOUTH_DIR")
+    if env:
+        return Path(env).expanduser()
+    return _sv_home() / "mouth"
+
+
+#: (the env, with "@" for the fake HOME; the homes given a heard log
+#: ("sv"/"vm", by lock or jsonl); the homes that exist bare).
+MOUTH_TABLE = [
+    ({}, (), ()),
+    ({}, (), ("sv", "vm")),
+    ({}, (("sv", "lock"),), ()),
+    ({}, (("sv", "jsonl"),), ("vm",)),
+    ({}, (("vm", "lock"),), ()),
+    ({}, (("vm", "jsonl"),), ("sv",)),
+    ({}, (("sv", "lock"), ("vm", "jsonl")), ()),
+    ({"SESSIONVOICE_HOME": "/s"}, (("vm", "lock"),), ()),
+    ({"VOICEMODE_BASE_DIR": "/b"}, (("sv", "lock"),), ()),
+    ({"SESSIONVOICE_HOME": "/s", "VOICEMODE_BASE_DIR": "/b"}, (), ()),
+    ({"SESSIONVOICE_HOME": "", "VOICEMODE_BASE_DIR": "/b"}, (), ()),
+    ({"SESSIONVOICE_HOME": "", "VOICEMODE_BASE_DIR": ""}, (("vm", "lock"),), ()),
+    ({"SESSIONVOICE_HOME": "~/s"}, (), ()),
+    ({"VOICEMODE_BASE_DIR": "~"}, (), ()),
+    ({"SESSIONVOICE_HOME": "$HOME/s"}, (), ()),
+    ({"SESSIONVOICE_HOME": "${HOME}/s/$UNSET_ONE"}, (), ()),
+    ({"SESSIONVOICE_HOME": "/s/${UNSET_ONE$HOME"}, (), ()),
+    ({"VOICEMODE_BASE_DIR": "$HOME/s/${HOME"}, (), ()),
+    ({"MOUTH_DIR": "/m"}, (("vm", "lock"),), ()),
+    ({"MOUTH_DIR": "~/m"}, (), ()),
+    ({"MOUTH_DIR": "~"}, (), ()),
+    ({"VOICEMODE_MOUTH_DIR": "/o"}, (), ()),
+    ({"VOICEMODE_MOUTH_DIR": "~/o"}, (), ()),
+    ({"MOUTH_DIR": "/m", "VOICEMODE_MOUTH_DIR": "/o"}, (), ()),
+    ({"MOUTH_DIR": "", "VOICEMODE_MOUTH_DIR": "/o"}, (), ()),
+    ({"MOUTH_DIR": "", "VOICEMODE_MOUTH_DIR": "/o"}, (("vm", "jsonl"),), ()),
+    ({"VOICEMODE_MOUTH_DIR": ""}, (("vm", "lock"),), ()),
+    ({"MOUTH_DIR": "", "SESSIONVOICE_HOME": "/s"}, (), ()),
+    ({"VOICEMODE_MOUTH_DIR": "/o", "SESSIONVOICE_HOME": "/s"}, (), ()),
+    ({"MOUTH_DIR": "~//m"}, (), ()),
+    ({"MOUTH_DIR": "./~/m"}, (), ()),
+    ({"VOICEMODE_MOUTH_DIR": "~//"}, (), ()),
+    ({"SESSIONVOICE_HOME": "~//s"}, (), ()),
+    ({"VOICEMODE_BASE_DIR": "~//"}, (), ()),
+    ({"SESSIONVOICE_HOME": "./~/s"}, (), ()),
+    ({"MOUTH_DIR": "rel/m"}, (), ()),
+    ({"SESSIONVOICE_HOME": "rel/s"}, (), ()),
+]
+
+_MOUTH_VARS = ("MOUTH_DIR", "VOICEMODE_MOUTH_DIR", "SESSIONVOICE_HOME", "VOICEMODE_BASE_DIR",
+               "UNSET_ONE")
+
+
+@pytest.mark.parametrize(("env", "heard", "bare"), MOUTH_TABLE)
+def test_the_mouth_dir_equals_sessionvoices_resolver(tmp_path, monkeypatch, env, heard, bare):
+    h = tmp_path / "home"
+    h.mkdir()
+    roots = {"sv": h / ".sessionvoice", "vm": h / ".voicemode"}
+    for key, kind in heard:
+        _heard(roots[key], kind)
+    for key in bare:
+        _bare(roots[key])
+    for name in _MOUTH_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(h))
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    want = _sv_mouth_dir()
+    assert busy.mouth_dir(dict(os.environ)) == want
+    assert busy.mouth_dir() == want
+    assert busy.mouth_dir({"HOME": str(h), **env}) == want
+
+
+@pytest.mark.parametrize("fake_home", ["/", "/h/", "//h"])
+@pytest.mark.parametrize(("name", "value"), [("MOUTH_DIR", "~//m"), ("MOUTH_DIR", "~"),
+                                             ("SESSIONVOICE_HOME", "~//s"),
+                                             ("SESSIONVOICE_HOME", "~")])
+def test_the_mouth_dir_takes_home_as_sessionvoice_does(monkeypatch, fake_home, name, value):
+    # HOME at the root, with a trailing slash, or with two leading ones: `~`
+    # expands as sessionvoice's own expanduser does. Only stats run here.
+    for n in _MOUTH_VARS:
+        monkeypatch.delenv(n, raising=False)
+    monkeypatch.setenv("HOME", fake_home)
+    monkeypatch.setenv(name, value)
+    assert busy.mouth_dir({"HOME": fake_home, name: value}) == _sv_mouth_dir()
 
 
 def test_voicemode_base_dir_moves_the_mouth_the_waiter_reads(rig, monkeypatch):
@@ -1528,7 +1741,8 @@ def test_hooks_json_wires_every_event_and_keeps_settle():
     assert commands("PreToolUse") == [f"{shim} arm"]
     assert hooks["PreToolUse"][0]["matcher"] == "*"
     assert commands("PostToolBatch") == ['"${CLAUDE_PLUGIN_ROOT}/hooks/settle-hook"',
-                                         f"{shim} end"]
+                                         f"{shim} end",
+                                         '"${CLAUDE_PLUGIN_ROOT}/hooks/clock-hook"']
     assert commands("Stop") == [f"{shim} stop"]      # stop: clear, and sets the turn mark
     for event in ("UserPromptSubmit", "SessionEnd"):
         assert commands(event) == [f"{shim} clear"], event
@@ -1548,3 +1762,512 @@ def test_hooks_json_names_the_trigger_key():
 def test_the_shim_is_executable_and_parses():
     assert os.access(SHIM, os.X_OK)
     assert subprocess.run(["/bin/sh", "-n", str(SHIM)], check=False).returncode == 0
+
+
+# --- the stop sound (ST-236): the child, the verb, the shim ----------------------------
+#
+# Fake `mouth` and `afplay` only: each logs its argv and records its pid in a
+# mark the teardown kills. No real player is ever on PATH.
+
+class Stop:
+    """The rig's stop-sound fakes. `afplay` on PATH logs its argv (and keeps
+    playing 30 s, as the rig's own fake does, so a busy sound can be seen to
+    stop). `mouth` runs BODY after logging, so a test picks how it answers.
+    `short` is a logging player that exits at once, for in-process runs."""
+
+    def __init__(self, rig: Rig):
+        self.rig = rig
+        self.file = rig.root / "done.aiff"
+        self.file.write_text("FORM")
+        self.mouth_log = rig.root / "mouth.log"
+        self.afplay_log = rig.root / "afplay.log"
+        self.pids = rig.root / "stop-pids"
+        rig.marks.append(self.pids)
+        rig.player.write_text(f'#!/bin/sh\necho $$ >> "{rig.mark}"\n'
+                              f'echo "$@" >> "{self.afplay_log}"\nexec sleep 30\n')
+        self.short = rig.bin / "short-afplay"
+        self.short.write_text(f'#!/bin/sh\necho $$ >> "{self.pids}"\n'
+                              f'echo "$@" >> "{self.afplay_log}"\nexit 0\n')
+        self.short.chmod(0o755)
+        self.mouth = rig.bin / "mouth"
+
+    def mouth_does(self, body: str = "exit 0") -> Path:
+        self.mouth.write_text(f'#!/bin/sh\necho $$ >> "{self.pids}"\n'
+                              f'echo "$@" >> "{self.mouth_log}"\n{body}\n')
+        self.mouth.chmod(0o755)
+        return self.mouth
+
+    def mouth_cannot_exec(self) -> Path:
+        """Found on PATH (executable), but its interpreter does not exist:
+        the exec raises OSError."""
+        self.mouth.write_text("#!/nonexistent/interpreter\n")
+        self.mouth.chmod(0o755)
+        return self.mouth
+
+    def settings(self, file: Path | str | None = None, **extra) -> Path:
+        data = {"enabled": True, "stop": {"file": str(file or self.file)}}
+        data.update(extra)
+        path = self.rig.session / "settings" / "sounds.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+        return path
+
+    @staticmethod
+    def _lines(path: Path) -> list[str]:
+        try:
+            return path.read_text().splitlines()
+        except FileNotFoundError:
+            return []
+
+    def mouth_calls(self) -> list[str]:
+        return self._lines(self.mouth_log)
+
+    def afplay_calls(self) -> list[str]:
+        return self._lines(self.afplay_log)
+
+    @property
+    def off(self) -> Path:
+        return self.rig.session / "sounds" / "stop" / "off"
+
+
+@pytest.fixture
+def st(rig):
+    return Stop(rig)
+
+
+def settled(timeout: float = 0.5) -> None:
+    """Give a detached stop child time to do what it should NOT do."""
+    time.sleep(timeout)
+
+
+# the child's work, in process (design Tests 2 and 13) -------------------------------
+
+def test_stop_run_mouth_ok_queues_once_and_no_afplay(st):
+    st.mouth_does("exit 0")
+    assert busy.stop_run(st.file, (str(st.mouth),), (str(st.short),)) == "mouth"
+    assert st.mouth_calls() == [f"play {st.file}"]
+    assert st.afplay_calls() == []
+
+
+def test_stop_run_mouth_absent_plays_afplay_once(st):
+    assert busy.stop_run(st.file, (str(st.rig.bin / "no-mouth"),), (str(st.short),)) == "player"
+    assert st.afplay_calls() == [str(st.file)]
+
+
+def test_stop_run_mouth_absent_on_path_plays_afplay_once(st, monkeypatch):
+    """The default MOUTH is looked up on PATH: with none there, afplay."""
+    monkeypatch.setenv("PATH", str(st.rig.bin))
+    assert busy.stop_run(st.file, busy.MOUTH, (str(st.short),)) == "player"
+    assert st.afplay_calls() == [str(st.file)] and st.mouth_calls() == []
+
+
+@pytest.mark.parametrize("code", [1, 2, 127])
+def test_stop_run_mouth_non_zero_falls_back_to_afplay_once(st, code):
+    st.mouth_does(f"exit {code}")
+    assert busy.stop_run(st.file, (str(st.mouth),), (str(st.short),)) == "player"
+    assert st.mouth_calls() == [f"play {st.file}"]
+    assert st.afplay_calls() == [str(st.file)]
+
+
+def test_stop_run_mouth_timeout_is_killed_and_not_followed_by_afplay(st):
+    st.mouth_does("exec sleep 30")
+    began = time.monotonic()
+    # 2 s, not less: under load the fake's shell may not reach its log line
+    # in a shorter timeout, and the mouth must be seen to have been asked.
+    assert busy.stop_run(st.file, (str(st.mouth),), (str(st.short),), timeout=2.0) == ""
+    assert time.monotonic() - began < 10
+    assert st.mouth_calls() == [f"play {st.file}"]
+    assert st.afplay_calls() == []
+    assert until(lambda: all(gone(p) for p in pids(st.pids))), "the mouth outlived its timeout"
+
+
+@pytest.mark.parametrize("sig", ["KILL", "TERM"])
+def test_stop_run_mouth_killed_by_a_signal_is_not_followed_by_afplay(st, sig):
+    """A signal is not a refusal: the mouth may have queued before it died,
+    so, as after a timeout, nothing follows (never two sounds)."""
+    st.mouth_does(f"kill -{sig} $$")
+    assert busy.stop_run(st.file, (str(st.mouth),), (str(st.short),)) == ""
+    assert st.mouth_calls() == [f"play {st.file}"]
+    assert st.afplay_calls() == []
+
+
+def test_stop_run_mouth_that_cannot_exec_falls_back_to_afplay_once(st, monkeypatch):
+    st.mouth_cannot_exec()
+    monkeypatch.setenv("PATH", f"{st.rig.bin}:/usr/bin:/bin")
+    assert busy.stop_run(st.file, ("mouth",), (str(st.short),)) == "player"
+    assert st.afplay_calls() == [str(st.file)]
+
+
+def test_stop_run_a_player_that_cannot_run_is_quiet(st):
+    assert busy.stop_run(st.file, (str(st.rig.bin / "no-mouth"),),
+                         (str(st.rig.bin / "no-player"),)) == ""
+
+
+def test_stop_main_reads_the_argv_stop_play_writes(st):
+    st.mouth_does("exit 2")
+    argv = [str(st.file), "5.0", "1", str(st.mouth), str(st.short)]
+    assert busy.stop_main(argv) == 0
+    assert st.mouth_calls() == [f"play {st.file}"]
+    assert st.afplay_calls() == [str(st.file)]
+
+
+@pytest.mark.parametrize("argv", [[], ["f"], ["f", "x", "1", "m"], ["f", "1", "z", "m"]])
+def test_stop_main_on_a_bad_argv_is_zero(argv):
+    assert busy.stop_main(argv) == 0
+
+
+def test_stop_play_detaches_the_child_and_it_queues_through_the_mouth(st):
+    st.mouth_does("exit 0")
+    began = time.monotonic()
+    assert busy.stop_play(st.file, mouth=(str(st.mouth),), player=(str(st.short),)) is True
+    assert time.monotonic() - began < 2
+    assert until(lambda: st.mouth_calls() == [f"play {st.file}"])
+    settled()
+    assert st.afplay_calls() == []
+
+
+def test_stop_play_returns_at_once_with_a_slow_mouth(st):
+    st.mouth_does("exec sleep 30")
+    began = time.monotonic()
+    assert busy.stop_play(st.file, mouth=(str(st.mouth),), player=(str(st.short),),
+                          timeout=2.0) is True
+    assert time.monotonic() - began < 2
+    assert until(lambda: st.mouth_calls())
+    assert until(lambda: all(gone(p) for p in pids(st.pids)))
+    settled()
+    assert st.afplay_calls() == [], "a timed-out mouth was followed by afplay"
+
+
+def test_stop_play_never_raises(st, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("no fork")
+    monkeypatch.setattr(busy.subprocess, "Popen", boom)
+    assert busy.stop_play(st.file) is False
+    assert busy.stop_play(st.file, mouth=()) is False
+
+
+# the verb, in process (design Tests 3 and 4) ---------------------------------------
+
+@pytest.fixture
+def launches(monkeypatch):
+    got: list[str] = []
+    monkeypatch.setattr(busy, "stop_play", lambda file, **k: got.append(str(file)) or True)
+    return got
+
+
+def test_stop_sound_on_clears_off_and_launches_once(st, launches):
+    st.off.parent.mkdir(parents=True)
+    st.off.write_text("")
+    st.settings()
+    assert busy.stop_sound({}, st.rig.env()) is True
+    assert launches == [str(st.file)]
+    assert not st.off.exists()
+
+
+def test_stop_sound_off_stamps_off_back_dated_and_launches_nothing(st, launches):
+    before = time.time()
+    assert busy.stop_sound({}, st.rig.env()) is False
+    after = time.time()
+    assert launches == []
+    mtime = st.off.stat().st_mtime
+    assert before - 1.0 - 0.01 <= mtime <= after - 1.0 + 0.01
+
+
+def test_stop_sound_for_a_subagent_does_nothing_and_stamps_nothing(st, launches):
+    st.settings()
+    assert busy.stop_sound({"agent_id": "a0c2"}, st.rig.env()) is False
+    assert launches == [] and not st.off.parent.exists()
+
+
+def test_stop_sound_without_a_session_dir_does_nothing(st, launches, tmp_path):
+    env = st.rig.env(CLAUDE_CODE_SESSION_ID="99999999-0000-0000-0000-000000000000")
+    assert busy.stop_sound({}, env) is False
+    assert launches == []
+    assert not (tmp_path / ".session" / "sessions" / "99999999-0000-0000-0000-000000000000").exists()
+
+
+@pytest.mark.parametrize("sid", [None, "", ".", "..", "a/b"])
+def test_stop_sound_without_a_usable_sid_does_nothing(st, launches, sid):
+    st.settings()
+    env = st.rig.env(CLAUDE_CODE_SESSION_ID=None)
+    assert busy.stop_sound({"session_id": sid}, env) is False
+    assert launches == []
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_stop_sound_touches_only_its_own_slot(st, launches, on):
+    """ST-70 F6: the stop path never reaches `sounds/busy/` (an engine's
+    record and the busy stamp survive it), nor any other slot."""
+    busy_slot = st.rig.busy
+    busy_slot.mkdir(parents=True)
+    (busy_slot / "off").write_text("")
+    (busy_slot / f"engine.{os.getpid()}").write_text("{}")
+    before = {p.name: p.stat().st_mtime_ns for p in busy_slot.iterdir()}
+    if on:
+        st.settings()
+    busy.stop_sound({}, st.rig.env())
+    assert {p.name: p.stat().st_mtime_ns for p in busy_slot.iterdir()} == before
+    made = sorted(p.name for p in (st.rig.session / "sounds").iterdir()
+                  if not p.name.startswith("."))
+    assert made == (["busy"] if on else ["busy", "stop"])
+
+
+def test_stop_turn_stops_an_armed_busy_slot_and_still_plays(st, launches):
+    st.settings()
+    slot = st.rig.busy
+    busy.play(slot, st.rig.wav, 0, player=(str(st.rig.player),))
+    assert until(lambda: pids(st.rig.mark))
+    player = pids(st.rig.mark)[0]
+    assert busy.stop_turn({}, st.rig.env()) is True
+    assert until(lambda: gone(player)), "the busy sound outlived Stop"
+    assert not (slot / "token").exists()
+    assert launches == [str(st.file)]
+
+
+@pytest.mark.parametrize("verb", ["end", "clear"])
+def test_only_stop_plays_it_end_and_clear_never_do(st, launches, verb):
+    st.settings()
+    assert busy.main([verb], io_of({}), st.rig.env()) == 0
+    assert launches == [] and not st.off.exists()
+
+
+def test_main_stop_plays_it_and_is_silent(st, launches, capsys):
+    st.settings()
+    assert busy.main(["stop"], io_of({}), st.rig.env()) == 0
+    assert launches == [str(st.file)]
+    assert capsys.readouterr() == ("", "")
+
+
+def test_main_stop_is_zero_and_silent_when_the_play_blows_up(st, monkeypatch, capsys):
+    st.settings()
+
+    def boom(*a, **k):
+        raise RuntimeError("x")
+    monkeypatch.setattr(busy, "stop_sound", boom)
+    assert busy.main(["stop"], io_of({}), st.rig.env()) == 0
+    assert capsys.readouterr() == ("", "")
+
+
+def io_of(payload) -> object:
+    import io
+    return io.StringIO(json.dumps(payload))
+
+
+# the shim, as hooks.json runs it (design Tests 5-10, 12) ----------------------------
+
+def test_through_the_shim_unset_stop_plays_nothing(st):
+    st.mouth_does("exit 0")
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    settled()
+    assert st.mouth_calls() == [] and st.afplay_calls() == []
+    assert st.off.exists()
+
+
+def test_through_the_shim_set_stop_queues_the_sound_once(st):
+    st.mouth_does("exit 0")
+    st.settings()
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    assert until(lambda: st.mouth_calls() == [f"play {st.file}"])
+    settled()
+    assert st.mouth_calls() == [f"play {st.file}"]
+    assert st.afplay_calls() == []
+
+
+def test_through_the_shim_each_stop_queues_once(st):
+    st.mouth_does("exit 0")
+    st.settings()
+    for n in (1, 2):
+        silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+        assert until(lambda n=n: len(st.mouth_calls()) == n)
+    settled()
+    assert len(st.mouth_calls()) == 2 and st.afplay_calls() == []
+
+
+def test_through_the_shim_no_mouth_plays_afplay_once(st):
+    st.settings()
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    assert until(lambda: st.afplay_calls() == [str(st.file)])
+    settled()
+    assert st.afplay_calls() == [str(st.file)]
+
+
+def test_through_the_shim_a_mouth_that_refuses_falls_back_to_afplay_once(st):
+    st.mouth_does("exit 2")
+    st.settings()
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    assert until(lambda: st.afplay_calls() == [str(st.file)])
+    settled()
+    assert st.mouth_calls() == [f"play {st.file}"]
+    assert st.afplay_calls() == [str(st.file)]
+
+
+def test_through_the_shim_a_subagents_stop_plays_nothing(st):
+    st.mouth_does("exit 0")
+    st.settings()
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop", "agent_id": "a0c2"}))
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop", "agent_id": "a0c2"},
+                       SESSIONTOOLS_HOOK_TURN="on"))
+    settled()
+    assert st.mouth_calls() == [] and st.afplay_calls() == []
+
+
+@pytest.mark.parametrize("word", ["off", "0", "false", "No"])
+def test_through_the_shim_the_off_switch_silences_it(st, word):
+    st.mouth_does("exit 0")
+    st.settings()
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}, SESSIONTOOLS_HOOK_BUSY=word))
+    settled()
+    assert st.mouth_calls() == [] and st.afplay_calls() == []
+    assert st.rig.python_runs() == 0
+
+
+@pytest.mark.parametrize("bad", [{"enabled": "true"}, {"stop": "on"},
+                                 {"stop": {"file": "relative.aiff"}},
+                                 {"stop": {"file": "/no/such.aiff"}}])
+def test_through_the_shim_a_bad_value_is_silent(st, bad):
+    st.mouth_does("exit 0")
+    data = {"enabled": True, "stop": {"file": str(st.file)}}
+    data.update(bad)
+    path = st.settings()
+    path.write_text(json.dumps(data))
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    settled()
+    assert st.mouth_calls() == [] and st.afplay_calls() == []
+
+
+def test_through_the_shim_the_hook_returns_promptly_with_a_slow_mouth(st):
+    st.mouth_does("exec sleep 30")
+    st.settings()
+    began = time.monotonic()
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    assert time.monotonic() - began < 3, "the hook waited for the mouth"
+    assert until(lambda: st.mouth_calls() == [f"play {st.file}"])
+    # The mouth is killed while the child still waits on it (as the teardown
+    # would): the child must not start afplay after it, nor outlive the test.
+    for pid in pids(st.pids):
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+    settled()
+    assert st.afplay_calls() == [], "a killed mouth was followed by afplay"
+
+
+def test_through_the_shim_an_off_seats_second_stop_starts_no_python(st):
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    assert st.rig.python_runs() == 1 and st.off.exists()
+    for _ in range(3):
+        silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    assert st.rig.python_runs() == 1
+
+
+def test_through_the_shim_a_newer_session_layer_re_resolves_and_plays(st):
+    st.mouth_does("exit 0")
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    assert st.rig.python_runs() == 1
+    st.settings()                         # written after `off`: newer to `-nt`
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    assert st.rig.python_runs() == 2
+    assert until(lambda: st.mouth_calls() == [f"play {st.file}"])
+    assert not st.off.exists()
+
+
+def test_through_the_shim_an_older_layer_file_does_not_re_resolve(st):
+    path = st.settings(file="/no/such.aiff")
+    past = time.time() - 60
+    os.utime(path, (past, past))
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    assert st.rig.python_runs() == 1 and st.off.exists()
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    assert st.rig.python_runs() == 1
+
+
+def test_through_the_shim_after_the_first_arm_an_off_seats_stop_starts_no_python(st):
+    """D8: the arm's resolve stamps `sounds/stop/off`, so the first Stop of a
+    seat that called a tool first starts no python."""
+    silent(st.rig.shim("arm"))
+    assert st.rig.python_runs() == 1 and st.off.exists()
+    silent(st.rig.shim("end"))
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    silent(st.rig.shim("clear", {"hook_event_name": "UserPromptSubmit"}))
+    assert st.rig.python_runs() == 1
+
+
+def test_through_the_shim_an_afplay_busy_seat_starts_no_python_at_stop(st):
+    """D8 for a seat with only a busy sound: the arm stamps stop's `off`."""
+    path = st.rig.settings(delay=30)
+    past = time.time() - 60             # older than `off`, even to `-nt`'s whole seconds
+    os.utime(path, (past, past))
+    silent(st.rig.shim("arm"))
+    silent(st.rig.shim("end"))
+    runs = st.rig.python_runs()
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    assert st.rig.python_runs() == runs
+
+
+def test_through_the_shim_an_on_seat_starts_python_every_stop(st):
+    st.mouth_does("exit 0")
+    st.settings()
+    silent(st.rig.shim("arm"))
+    assert not st.off.exists()
+    for n in (2, 3):
+        silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+        assert st.rig.python_runs() == n
+
+
+def test_through_the_shim_stop_still_stops_the_busy_sound_and_plays(st):
+    """R7: an armed busy sound is stopped by Stop as before, and the stop
+    sound still plays (it is not in the slots `clear` stops)."""
+    st.mouth_does("exit 0")
+    path = st.rig.settings(delay=0.2)
+    data = json.loads(path.read_text())
+    data["stop"] = {"file": str(st.file)}
+    path.write_text(json.dumps(data))
+    silent(st.rig.shim("arm"))
+    assert until(lambda: str(st.rig.wav) in st.afplay_calls())
+    player = pids(st.rig.mark)[0]
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    assert until(lambda: gone(player)), "the busy sound outlived Stop"
+    assert not (st.rig.busy / "token").exists()
+    assert until(lambda: st.mouth_calls() == [f"play {st.file}"])
+
+
+@pytest.mark.parametrize("verb", ["end", "clear"])
+def test_through_the_shim_end_and_clear_never_play_it(st, verb):
+    """Only `stop` plays it: with a busy sound armed (so python runs on
+    end and clear), still nothing reaches the mouth or afplay for it."""
+    st.mouth_does("exit 0")
+    path = st.rig.settings(delay=30)
+    data = json.loads(path.read_text())
+    data["stop"] = {"file": str(st.file)}
+    path.write_text(json.dumps(data))
+    silent(st.rig.shim("arm"))
+    assert (st.rig.busy / "token").exists()
+    silent(st.rig.shim(verb))
+    assert not (st.rig.busy / "token").exists()
+    settled()
+    assert st.mouth_calls() == [] and str(st.file) not in st.afplay_calls()
+
+
+def test_through_the_shim_a_layer_that_is_not_json_is_silent(st):
+    st.mouth_does("exit 0")
+    path = st.settings()
+    path.write_text("{")
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}))
+    settled()
+    assert st.mouth_calls() == [] and st.afplay_calls() == []
+
+
+def test_through_the_shim_no_python_is_silent(st):
+    st.settings()
+    (st.rig.bin / "python3").unlink()
+    result = subprocess.run(["/bin/sh", str(SHIM), "stop"], input="{}", capture_output=True,
+                            text=True, timeout=30, check=False,
+                            env={**st.rig.env(), "PATH": "/nonexistent"})
+    silent(result)
+
+
+def test_through_the_shim_a_python_that_crashes_is_silent(st):
+    st.settings()
+    crash = st.rig.bin / "crash-python"
+    crash.write_text("#!/bin/sh\necho Traceback >&2\nexit 1\n")
+    crash.chmod(0o755)
+    silent(st.rig.shim("stop", {"hook_event_name": "Stop"}, SESSIONTOOLS_PYTHON=str(crash)))

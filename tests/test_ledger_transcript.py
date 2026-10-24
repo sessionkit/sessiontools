@@ -408,7 +408,7 @@ def test_a_re_read_of_the_new_version_repeats_it_and_a_revert_repeats_the_old(tm
 def test_a_load_and_a_read_of_one_version_repeat_across_conventions(tmp_path):
     """A load counts true lines (`wc -l`), a Read `totalLines` (one more for
     a final newline), and a boot load's text has its final newline stripped
-    (measured on real transcripts, 2030-08-14: 536 of 537 boot
+    (measured on real transcripts, 2030-12-08: 536 of 537 boot
     loads equal the file less its final newlines, 60 of 70 nested loads the
     file itself). One version still repeats; another is a re-read."""
     s = build.Session(65)

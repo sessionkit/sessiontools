@@ -112,6 +112,27 @@ def token_file_setting(environ: Mapping[str, str] | None = None,
     and host layers, or None when no layer sets it. HOME, when given, is the
     home those layers are read under (and `~` expands to). A layer file the
     reader refuses, or a bad value, is exit 5."""
+    found = _setting_value(environ, home)
+    if found is None:
+        return None
+    node, origin, home_dir = found
+    return check_setting(node, f"{SETTING_KEY} (in {origin})", home_dir), origin
+
+
+def token_file_is_set(environ: Mapping[str, str] | None = None,
+                      home: str | os.PathLike | None = None) -> bool:
+    """Whether some layer sets SETTING_KEY at all, whatever its value. A
+    value `check_setting` refuses (relative, empty, not a string) still
+    puts the host on the token-file route: the setting is a statement of
+    the route, and a bad path in it does not make the host a Keychain
+    host. A layer the reader refuses is exit 5, as in `token_file_setting`."""
+    return _setting_value(environ, home) is not None
+
+
+def _setting_value(environ: Mapping[str, str] | None,
+                   home: str | os.PathLike | None) -> tuple[object, str, str | None] | None:
+    """(raw value, origin, HOME) of SETTING_KEY through the `session` tool's
+    template and host layers, unchecked; None when no layer sets it."""
     from sessiontools import settings
 
     env = dict(os.environ if environ is None else environ)
@@ -127,8 +148,7 @@ def token_file_setting(environ: Mapping[str, str] | None = None,
         node = node.get(part) if isinstance(node, Mapping) else None
     if node is None:
         return None
-    origin = origins.get(SETTING_KEY, SETTING_TOOL)
-    return check_setting(node, f"{SETTING_KEY} (in {origin})", env.get("HOME")), origin
+    return node, origins.get(SETTING_KEY, SETTING_TOOL), env.get("HOME")
 
 
 # --- the one-token-line rule ---------------------------------------------------------

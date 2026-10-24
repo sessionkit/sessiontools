@@ -1,0 +1,40 @@
+#!/bin/sh
+# clock-hook - the plugin's third PostToolBatch entry: run
+# sessiontools.clockline on the hook's JSON, from this plugin's own src/,
+# and stay SILENT whatever goes wrong. A hook must never be the reason a
+# turn breaks.
+#
+#   SESSIONTOOLS_HOOK_CLOCK unset   exit 0 - OFF BY DEFAULT; python never starts
+#   anything but on/1/true/yes      exit 0 (any case; nothing is trimmed)
+#   no pick-python.sh beside it     exit 0
+#   no python at all                exit 0
+#   python older than 3.11          exit 0 (the -c guard below)
+#   python crashes, or anything     exit 0, stderr to /dev/null
+#
+# SESSION_CLOCK_WARN_AT (the warn mark) is read by python, not here: the
+# line is said on every batch once switched on, mark or no mark.
+#
+# The python is the one settle-hook and busy-sound run: `pick`, from
+# pick-python.sh beside this file, sourced with `.` (no fork) and only once
+# the switch is on. No `exec python`: the `|| exit 0` has to run after
+# python returns. stdin passes through. The shim's OWN stderr goes to
+# /dev/null too: when python is killed, sh itself reports it on stderr, and
+# a hook's stderr is shown.
+exec 2>/dev/null
+case "${SESSIONTOOLS_HOOK_CLOCK:-}" in
+  [Oo][Nn] | 1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss]) ;;
+  *) exit 0 ;;
+esac
+# This file's dir, by builtins (no `$(dirname)` fork). A bare `$0` is ".".
+case "$0" in */*) here=${0%/*} ;; *) here=. ;; esac
+[ -r "$here/pick-python.sh" ] || exit 0   # `.` of a missing file exits 1
+py=
+# shellcheck disable=SC1091 # linted on its own
+. "$here/pick-python.sh"
+pick || exit 0
+"$py" -I -c 'import sys
+if sys.version_info < (3, 11):
+    sys.exit(0)
+sys.path.insert(0, sys.argv[1])
+from sessiontools.clockline import main
+sys.exit(main())' "$here/../src" || exit 0

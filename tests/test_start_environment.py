@@ -11,9 +11,10 @@ import re
 import shutil
 import subprocess
 
-from start_support import TIMEOUT_S
+from start_support import ROOT, TIMEOUT_S
 
 from sessiontools.start import environment as e
+from sessiontools.start.agentfile import parse_agent_markdown
 
 BASH = shutil.which("bash") or "/bin/bash"
 ENV_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
@@ -163,3 +164,43 @@ def test_host_environ_without_a_venv_is_a_plain_copy():
     environ = {"PATH": "/usr/bin", "HOME": "/tmp/h"}
     assert e.host_environ(environ) == environ
     assert e.host_environ(environ) is not environ
+
+
+# ---------- the docs: who needs `inherit:` for a token login -------------------
+
+def _yaml_blocks(text: str) -> list[str]:
+    return re.findall(r"^```yaml\n(.*?)^```", text, re.MULTILINE | re.DOTALL)
+
+
+def _credentials_section() -> str:
+    text = (ROOT / "docs" / "session-start-launcher.md").read_text(encoding="utf-8")
+    (section,) = re.findall(r"^### Credentials are never handed down\n(.*?)(?=^#{2,3} )",
+                            text, re.MULTILINE | re.DOTALL)
+    return section
+
+
+def _inherited(block: str) -> tuple:
+    front_matter, _ = parse_agent_markdown(f"---\n{block}---\n")
+    return e.parse_environment(front_matter["environment"]).inherit
+
+
+def test_the_launcher_doc_names_every_credential_the_launch_drops():
+    section = _credentials_section()
+    for name in e.CREDENTIAL_VARS:
+        assert f"`{name}`" in section, name
+
+
+def test_the_launcher_doc_shows_a_token_login_the_inherit_lines():
+    # A login by token starts without it unless the agent file inherits it;
+    # the doc's lines must parse as an environment that does exactly that.
+    section = _credentials_section()
+    assert "/login" in section
+    assert any(_inherited(block) == ("CLAUDE_CODE_OAUTH_TOKEN",)
+               for block in _yaml_blocks(section))
+
+
+def test_the_readme_points_a_token_login_at_the_inherit_lines():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "#credentials-are-never-handed-down" in readme
+    assert any(_inherited(block) == ("CLAUDE_CODE_OAUTH_TOKEN",)
+               for block in _yaml_blocks(readme))

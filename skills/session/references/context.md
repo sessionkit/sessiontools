@@ -5,11 +5,9 @@ has every flag. Never guess your context: run this.
 
 ## The one-liner (the default)
 
-```bash
-session context            # this session
-session context c3a7       # a live seat, or a session id prefix
-session context --peak     # the high-water mark instead of now
-```
+- `session context`: this session.
+- `session context c3a7`: a live seat, or a session id prefix.
+- `session context --peak`: the high-water mark instead of now.
 
 It prints one line: `Context: 45K / 1.00M (4%) · 954K free`. It is cheap,
 and it never reads the transcript a second time. Reach for it first.

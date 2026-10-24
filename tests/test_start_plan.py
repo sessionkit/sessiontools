@@ -21,6 +21,7 @@ from start_support import (
 from sessiontools import claude_code
 from sessiontools.start import plan as pl
 from sessiontools.start.args import parse_args
+from sessiontools.start.context import BARE_CONVERSE_SIGNAL, CONVERSE_SIGNAL
 from sessiontools.start.environment import (
     SESSION_IDENTITY_VARS,
     render_identity_unset,
@@ -352,6 +353,24 @@ def test_the_launch_says_one_thing_about_voice(tmp_path):
     typing = plan_for(tmp_path, declares, flags=["--dry-run"], work="w2")
     assert "**Voice**: inactive" in typing.injected.system_prompt
     assert "converse" not in typing.injected.initial
+
+
+def test_a_bare_converse_launch_plans_the_neutral_voice_line(tmp_path):
+    """The bare agent `-` has no agent file: idle or not, its first message
+    carries the neutral voice line. An agent-file launch keeps the fleet one."""
+    work = tmp_path / "bare"
+    work.mkdir()
+    environ = {"AGENTS_DIR": make_agents_root(tmp_path), "PATH": os.environ.get("PATH", ""),
+               "SESSIONS_DIR": str(tmp_path / "sessions"),
+               "SESSION_KEY_INIT": os.environ["SESSION_KEY_INIT"]}
+    for idle in ([], ["--idle"]):
+        bare = pl.prepare(parse_args(["--dry-run", "--converse", *idle, "-", "stand by"]),
+                          environ=environ, work_dir=str(work))
+        assert bare.injected.initial == BARE_CONVERSE_SIGNAL + "\n\nstand by\n"
+        agent = plan_for(tmp_path, "", argv_tail=["stand by"],
+                         flags=["--dry-run", "--converse", *idle], work="agent")
+        assert CONVERSE_SIGNAL in agent.injected.initial
+        assert BARE_CONVERSE_SIGNAL not in agent.injected.initial
 
 
 # ---------- where the session runs -------------------------------------------------------

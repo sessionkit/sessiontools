@@ -1,14 +1,14 @@
 """Which tmux pane a process runs in, across every tmux server on the host.
 
 A pane id is per SERVER, not per machine: `%4` on the default server and
-`%4` on `tm-store-work` were live at the same moment (measured 2030-07-10).
+`%4` on `tm-store-work` were live at the same moment (measured 2030-06-09).
 So a pane is only an address with its server, and `locate` returns both.
 The socket DIRECTORY is the registry: tmux names each file after the `-L`
 name. Default first, because most seats live there.
 
 A socket FILE is not a server: a server that died leaves its file behind,
 and a host collects them (1034 files, 6 live servers on one host,
-2030-08-11 - one `session list` forked tmux 1034 times, about 6 s). So
+2030-12-08 - one `session list` forked tmux 1034 times, about 6 s). So
 `sockets()` knocks first, in-process: a plain connect() that is refused is
 a dead file, skipped with no tmux fork. That is tmux's own rule - its
 client reads ECONNREFUSED as "no server" too.

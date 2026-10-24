@@ -29,9 +29,15 @@ from start_support import (
     write_key_init_stub,
 )
 
-from sessiontools.start.context import PlannedFile, PlannedPlugin
+from sessiontools.start.args import parse_args
+from sessiontools.start.context import (
+    BARE_CONVERSE_SIGNAL,
+    CONVERSE_SIGNAL,
+    PlannedFile,
+    PlannedPlugin,
+)
 from sessiontools.start.errors import EXIT_USAGE, LaunchError
-from sessiontools.start.plan import RESUME_UNDER_TMUX
+from sessiontools.start.plan import RESUME_UNDER_TMUX, prepare
 
 SID = "11111111-2222-3333-4444-555555555555"
 EFFORT = "claude:\n  effort: high\n"
@@ -214,6 +220,32 @@ def test_an_unkeyed_resume_plan_keeps_the_sessions_own_id(tmp_path):
     assert plan.argv[-1].startswith("Session restarted. Current date and time: ")
     assert plan.argv[-1].endswith("\n\ngo on")
     assert not (tmp_path / "agents" / "sessions").exists()
+
+
+def bare_resume_plan(tmp_path: Path, *flags: str):
+    """A resume plan for the bare agent `-`: no agent file in play."""
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    environ = {"AGENTS_DIR": make_agents_root(tmp_path), "PATH": os.environ.get("PATH", ""),
+               "SESSIONS_DIR": str(tmp_path / "sessions"),
+               "SESSION_KEY_INIT": os.environ["SESSION_KEY_INIT"], **home_of(tmp_path)}
+    return prepare(parse_args([*flags, "-", "go", "--resume", SID]), environ=environ,
+                   work_dir=str(work))
+
+
+def test_a_bare_converse_resume_carries_the_neutral_voice_line(tmp_path):
+    message = bare_resume_plan(tmp_path, "--converse").argv[-1]
+    assert message.startswith("Session restarted. Current date and time: ")
+    assert message.endswith(f"\n\n{BARE_CONVERSE_SIGNAL}\n\ngo")
+    assert CONVERSE_SIGNAL not in message
+
+
+def test_an_agent_file_converse_resume_keeps_the_fleet_voice_line(tmp_path):
+    for front_matter, flags in ((EFFORT, ["--converse"]), ("start:\n  converse: true\n", [])):
+        plan = plan_for(tmp_path, front_matter, argv_tail=["go", "--resume", SID],
+                        flags=flags, extra_env=home_of(tmp_path))
+        assert plan.argv[-1].endswith(f"\n\n{CONVERSE_SIGNAL}\n\ngo")
+        assert BARE_CONVERSE_SIGNAL not in plan.argv[-1]
 
 
 def test_a_keyed_live_resume_mints_through_the_primitive_and_forks(tmp_path, capsys):

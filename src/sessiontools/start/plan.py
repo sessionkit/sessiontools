@@ -45,6 +45,7 @@ from sessiontools.start.agents import (
     sessions_root,
 )
 from sessiontools.start.context import (
+    BUILTIN_LAUNCH_INFO,
     DRY_RUN_MESSAGE_NAME,
     FIRST_MESSAGE_POINTER_LEAD,
     MESSAGE_PREFIX,
@@ -61,6 +62,7 @@ from sessiontools.start.context import (
 )
 from sessiontools.start.environment import (
     DRY_RUN_SECRET_NAME,
+    LAUNCH_INFO_ENV,
     RELATIVE_PREFIX,
     DeclaredSecret,
     declared_secrets,
@@ -496,7 +498,8 @@ def render_launch_script(argv: list, work_dir: str,
                          env_prelude: str = "", secret_file: str | None = None,
                          vendor_env: Mapping[str, str] | None = None,
                          shebang: bool = False, pane_mint: PaneMint | None = None,
-                         record: LaunchRecord | None = None) -> str:
+                         record: LaunchRecord | None = None,
+                         launch_info: str | None = None) -> str:
     """The bash a launch runs - ONE text for both endings: `bash -c` on the
     direct path, and with `shebang` the 0700 trampoline a tmux pane runs.
     In this order - the order is the contract:
@@ -507,6 +510,8 @@ def render_launch_script(argv: list, work_dir: str,
         pane mint                           (keyed in tmux: mint FIRST, so
                                              every later line sees the id)
         export this session's identity
+        launch-info marker                  (the id launch-info carries,
+                                             when it rendered one)
         committer identity                  (export the human, or unset)
         unset CLAUDE_CODE                   (the child is not nested)
         vendor env defaults                 (before the prelude: an agent's
@@ -519,6 +524,12 @@ def render_launch_script(argv: list, work_dir: str,
         exec argv                           (shlex-quoted; exec, so the
                                              vendor owns this pid - which is
                                              what makes --reap-pid true)
+
+    `launch_info` is the session id this launch's launch-info built-in
+    rendered (`launch_info_marker`), exported as LAUNCH_INFO_ENV so the
+    session-info hook leaves that id out of its block. The first line has
+    already unset an inherited one. It goes before the prelude, so an
+    agent's own `environment:` declaration still wins.
 
     Under a pane mint the argv is NOT exec'd: the pane-lifetime trap needs a
     shell to fire in, so bash stays the pane's process (its `$$` is what the
@@ -539,6 +550,9 @@ def render_launch_script(argv: list, work_dir: str,
         lines.append("# session identity")
         for name, value in identity.env.items():
             lines.append(f"export {name}={shlex.quote(value)}")
+    if launch_info:
+        lines.append("# launch-info carries this session id")
+        lines.append(f"export {LAUNCH_INFO_ENV}={shlex.quote(launch_info)}")
     if committer is not None and committer.mode == "override":
         lines.append("# committer identity resolved to the human")
         lines.append(f"export GIT_COMMITTER_NAME={shlex.quote(committer.name)}")
@@ -564,6 +578,25 @@ def render_launch_script(argv: list, work_dir: str,
     else:
         lines.append("exec " + rendered)
     return "\n".join(lines) + "\n"
+
+
+def launch_info_marker(injected: InjectedContext,
+                       identity: SessionIdentity | None) -> str | None:
+    """The session id to export as LAUNCH_INFO_ENV, or None for no export.
+
+    Only when the `launch-info` built-in RAN and rendered WITH an id: an
+    identity minted launcher-side (a pane mint has no id yet, so launch-info
+    printed none), and a launch-info result that is ok. A built-in that
+    raised rendered a failure note with no id, and a marker then would hide
+    the id the seat never saw. No launch-info entry, `--idle` (no generator
+    runs) and a resume (`assemble_resume` runs none) give no result, so no
+    export: the script's first line still unsets an inherited marker."""
+    if identity is None or not identity.session_id:
+        return None
+    if any(result.ok and result.source.strip() == BUILTIN_LAUNCH_INFO
+           for result in injected.results):
+        return identity.session_id
+    return None
 
 
 def generator_environ(launch: Launch, identity: SessionIdentity | None) -> dict[str, str]:
@@ -893,7 +926,10 @@ def assemble(launch: Launch, minted: SessionIdentity | PaneMint | None) -> Launc
         builtins=context_builtins(agent=launch.agent.name or None,
                                   session_id=identity.session_id if identity else None,
                                   converse=converse),
-        env=generator_environ(launch, identity), cwd=launch.work_dir)
+        env=generator_environ(launch, identity), cwd=launch.work_dir,
+        # The test agentfile.load makes: a bare launch (no agent, or `-`)
+        # has no file, so an idle start gets no boot line.
+        agent_file=bool(launch.agent.file))
     declared = launch.agent_file.environment
     secrets: list[DeclaredSecret] = declared_secrets(declared.secrets)
     inherited = inherited_for(launch)
@@ -928,7 +964,8 @@ def assemble(launch: Launch, minted: SessionIdentity | PaneMint | None) -> Launc
         env_prelude=render_env_prelude(declared, secret_file=secret_path)
         + render_home_prelude(home) + render_birth_call(record),
         secret_file=secret_path, vendor_env=VENDORS[start.vendor].get("env"),
-        shebang=launch.in_tmux, pane_mint=pane_mint, record=record)
+        shebang=launch.in_tmux, pane_mint=pane_mint, record=record,
+        launch_info=launch_info_marker(injected, identity))
     return LaunchPlan(
         vendor=start.vendor, argv=argv, script=script, work_dir=launch.work_dir,
         work_dir_source=launch.work_dir_source, agent=launch.agent,
@@ -978,7 +1015,8 @@ def assemble_resume(launch: Launch, identity: SessionIdentity | None) -> LaunchP
     declared = launch.agent_file.environment
     warn_env_file_traps(declared, work_dir)
     message = resume_message(launch.message_words,
-                             converse=switch_enabled(launch.args.converse, start.converse))
+                             converse=switch_enabled(launch.args.converse, start.converse),
+                             agent_file=bool(launch.agent.file))
     # In temp, as the old launcher put a resume's: even a keyed resume's
     # fresh session dir is not where it looked.
     secrets: list[DeclaredSecret] = declared_secrets(declared.secrets)

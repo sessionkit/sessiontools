@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 from conftest import ANCHOR_SUMMER
+from settings_support import write_session_settings
 
 import sessiontools.account
 from sessiontools.account import cli
@@ -130,7 +131,7 @@ class World:
     def fetch(self, url: str) -> str:
         return ('claude_plan_usage_percent{account="default",window="5h"} 40\n'
                 'claude_plan_window_reset_timestamp_seconds{account="default",'
-                'window="5h"} 1893603600\n')
+                'window="5h"} 1907254800\n')
 
     @property
     def cfg(self) -> Path:
@@ -516,6 +517,36 @@ def test_help_names_the_token_file_route(world, capsys):
     assert capsys.readouterr() == ("", "")
 
 
+def test_help_says_a_session_start_seat_does_not_follow_the_token_file(world, capsys):
+    """The group's help says what a `session start` seat signs in as on a
+    token-file host, and how to carry the token."""
+    assert world.run("--help") == 0
+    out = " ".join(world.out.getvalue().split())
+    assert ("A seat `session start` launches does NOT follow the file unless its agent "
+            "file says inherit: [CLAUDE_CODE_OAUTH_TOKEN]") in out
+    assert "signs in from Claude's stored credentials, and `status` says so" in out
+    assert capsys.readouterr() == ("", "")
+
+
+def test_status_through_main_on_a_token_file_host_with_no_env_token(world, capsys):
+    """End to end through `main`: the setting puts the host on the file, the
+    env seam holds no token, and both renderings say the seat is not on it."""
+    world.add_three()
+    world.take()
+    write_session_settings(world.home, {"account": {"token_file": str(world.files["c"])}})
+    assert world.run("status") == 0
+    text = world.take()
+    assert text.splitlines()[0] == "host:  c (carol@example.com)  (token file, fp match)"
+    assert text.splitlines()[1].startswith("seat:  NOT on the token file")
+    assert "follows the host" not in text
+    assert world.run("status", "--json") == 0
+    data = json.loads(world.take())
+    assert data["host"]["name"] == "c"
+    assert data["seat"] == {"name": None, "via": st.VIA_NOT_FILE}
+    assert world.keychain.reads == 0
+    world.assert_no_leak(text, *capsys.readouterr())
+
+
 def test_use_without_a_witness_is_exit_2_through_main(world, capsys):
     world.add_three()
     assert world.run("use", "c") == 2
@@ -548,7 +579,7 @@ def test_status_flags_reach_status(world, capsys):
     assert found["host"] == {"name": "a", "email": "ai@example.com",
                              "via": st.VIA_KEYCHAIN}
     assert found["seat"]["via"] == st.VIA_FOLLOWS
-    assert "2030-01-02" in json.dumps(found["usage"])       # resets are the default
+    assert "2030-06-09" in json.dumps(found["usage"])       # resets are the default
     assert world.run("status", "--json", "--no-resets") == 0
     assert "resets" not in json.dumps(json.loads(world.take())["usage"])
     assert world.run("status", "--no-resets") == 0

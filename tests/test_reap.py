@@ -262,17 +262,17 @@ def test_a_task_with_no_status_is_keep(tmp_path):
 
 
 def test_a_status_yaml_reads_as_a_date_is_keep_named_and_still_renders(tmp_path):
-    """`status: 2030-12-12` is a date to YAML. It is not done, the reason
+    """`status: 2030-12-08` is a date to YAML. It is not done, the reason
     names it as written, and --json does not crash on it (it did, at 4e1924f)."""
     d = tmp_path / "T"
     d.mkdir()
-    (d / "README.md").write_text("---\ntask_id: ST-9\nstatus: 2030-12-12\n---\nbody\n")
+    (d / "README.md").write_text("---\ntask_id: ST-9\nstatus: 2030-12-08\n---\nbody\n")
     f = Fleet()
     f.seat(d)
     verdicts = f.plan()
-    assert only(verdicts).why == "task ST-9 is 2030-12-12 (not done)"
+    assert only(verdicts).why == "task ST-9 is 2030-12-08 (not done)"
     [row] = json.loads(reap.render_json(verdicts))
-    assert (row["verdict"], row["task_status"]) == ("KEEP", "2030-12-12")
+    assert (row["verdict"], row["task_status"]) == ("KEEP", "2030-12-08")
 
 
 def test_a_seat_with_no_task_is_keep(tmp_path):

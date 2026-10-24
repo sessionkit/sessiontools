@@ -12,11 +12,12 @@ Agent, repo, context used of the window, cost, plan usage, model.
 
 ## Install
 
-```console
-uv tool install sessiontools           # puts `session` on the PATH
-session statusline install --dry-run   # the plan; writes nothing
-session statusline install             # copy the script, set statusLine
-```
+- `uv tool install sessiontools` puts `session` on the PATH.
+- `session statusline install --dry-run` prints the plan and writes
+  nothing.
+- `session statusline install` copies the script and sets `statusLine`.
+
+Where it goes:
 
 - It installs into the `claude-code` tool's host layer, in the `tools`
   package's settings folder, `~/.sessionkit/tools/settings/` (the kit
@@ -247,11 +248,11 @@ $ session statusline install --force
 session statusline install: /tmp/demo-home/.sessionkit/tools/settings
   state O: another status line is set
 plan:
-  backup /tmp/demo-home/.sessionkit/tools/settings/claude-code.d/50-statusline.json → /tmp/demo-home/.sessionkit/tools/settings/claude-code.d/50-statusline.json.bak-20300102-170000
+  backup /tmp/demo-home/.sessionkit/tools/settings/claude-code.d/50-statusline.json → /tmp/demo-home/.sessionkit/tools/settings/claude-code.d/50-statusline.json.bak-20300609-170000
   create /tmp/demo-home/.sessionkit/tools/settings/statusline.sh (sessiontools 0.2.0)
   set statusLine in /tmp/demo-home/.sessionkit/tools/settings/claude-code.d/50-statusline.json: "statusLine": {"type": "command", "command": "~/.sessionkit/tools/settings/statusline.sh"}
     (was: {"type": "command", "command": "echo \"$(whoami) | $(date +%H:%M)\""})
-backed up: /tmp/demo-home/.sessionkit/tools/settings/claude-code.d/50-statusline.json.bak-20300102-170000
+backed up: /tmp/demo-home/.sessionkit/tools/settings/claude-code.d/50-statusline.json.bak-20300609-170000
 installed: /tmp/demo-home/.sessionkit/tools/settings/statusline.sh (sessiontools 0.2.0), statusLine runs ~/.sessionkit/tools/settings/statusline.sh; read back: both match; session start seats show it from their next launch
 ```
 

@@ -76,8 +76,8 @@ def test_core_rows_are_prompt_tools_and_mcp_tools_in_order():
 
 
 def test_the_time_is_read_and_rendered_in_any_zone():
-    snap = S.from_record(meta(REPORT, timestamp="2030-01-02T06:00:00.000Z"), line=7)
-    assert snap.at == datetime(2030, 1, 2, 6, 0, 0, tzinfo=UTC)
+    snap = S.from_record(meta(REPORT, timestamp="2030-06-09T06:00:00.000Z"), line=7)
+    assert snap.at == datetime(2030, 6, 9, 6, 0, 0, tzinfo=UTC)
     assert snap.line == 7
     assert snap.hhmm(UTC) == "06:00"
     assert snap.hhmm(timezone(timedelta(hours=11))) == "17:00"
@@ -90,4 +90,4 @@ def test_no_readable_time_is_none(value):
 
 
 def test_a_naive_timestamp_is_taken_as_utc():
-    assert S.parse_timestamp("2030-01-02T06:00:00").tzinfo is not None
+    assert S.parse_timestamp("2030-06-09T06:00:00").tzinfo is not None

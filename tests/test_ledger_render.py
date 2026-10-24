@@ -495,18 +495,18 @@ def test_gate_other_tools_one_row_in_long_and_json_keyed_by_tool_and_input(fx, c
 # The short report's budget. budget-200's paths and commands are at least as
 # long, on average, as design evidence budget.py's real sample of 133 paths
 # and 67 commands from the 60 latest transcripts on one Mac. Re-measured twice by
-# do-002 on 2030-08-14 (the sample moves as transcripts land):
+# do-002 on 2030-12-08 (the sample moves as transcripts land):
 # base names 10.02 / 10.13 chars, paths 116.4 / 117.2, commands 451.9 /
 # 430.5 (whitespace collapsed). The floors below are the larger of each.
 SAMPLE_BASE, SAMPLE_PATH, SAMPLE_CMD = 10.13, 117.2, 451.9
-#: Measured by do-002 (2030-08-14, one Mac) at width 16: 1,564 tokens
+#: Measured by do-002 (2030-12-08, one Mac) at width 16: 1,564 tokens
 #: for 200 items, so 21.8% headroom under 2,000 (design §5 measured 1,789 on
 #: its sample, 10.5%). Widths 20 and 24 gave 1,674 and 1,784. Re-measured by
-#: ST-144 fix-001 (2030-08-14, same host) after the fake store root
+#: ST-144 fix-001 (2030-12-08, same host) after the fake store root
 #: replaced the real one, same length: 1,542 tokens, 22.9% headroom.
 #: THE FIXTURE'S HEADROOM IS NOT THE REAL ONE. The real sample costs more per
 #: item: design evidence budget.py, re-run by the do-002 review on
-#: 2030-08-14 (the same Mac), gave 1,718 tokens at width 16 with `#k` tags, 14.1%
+#: 2030-12-08 (the same Mac), gave 1,718 tokens at width 16 with `#k` tags, 14.1%
 #: headroom, against this fixture's 1,564 (do-002 review R2). The gate holds
 #: on both; read 14.1% as the margin, 22.9% as this fixture's alone.
 BUDGET, MEASURED = 2_000, 1_542

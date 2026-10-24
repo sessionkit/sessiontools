@@ -25,15 +25,23 @@ seat: parked or not, clean or not, and why.
 - **`--check` writes nothing,** for any seat. Only `session park` writes,
   and only the seat's own record.
 
+The forms:
+
+- `session park --no-promises`: settle. It runs the checks, writes the
+  record and reports.
+- `session park --promise "send the summary"`: an open promise, so
+  `promises` FAILs.
+- `session park --handed-on <Message-ID>`: the promises were handed on,
+  in that mail.
+- `session park --letter <REF>`: the handover, a Message-ID or a path.
+- `session park --check`: this seat. Is it still parked, and clean?
+- `session park --check 8d71f3b6 --json`: another live seat, as JSON.
+
+A park can also carry a keep-until time and a reason:
+
 ```console
-session park --no-promises                 # settle: checks, record, report
-session park --promise "send the summary"  # an open promise: promises FAILs
-session park --handed-on <Message-ID>      # promises handed on, in that mail
-session park --letter <REF>                # the handover: a Message-ID or path
 session park --no-promises \
-  --keep-until 2030-01-02T17:00:00+11:00 --why "waiting on a verdict"
-session park --check                       # this seat: still parked? clean?
-session park --check 8d71f3b6 --json       # another live seat, as JSON
+  --keep-until 2030-06-09T17:00:00+11:00 --why "waiting on a verdict"
 ```
 
 ## The five checks
@@ -113,7 +121,7 @@ whatever it chains, so a chained re-park cannot move it.
 ## `--keep-until T --why R`
 
 - Records a request to be kept until T, with its reason. T is absolute:
-  ISO 8601 with an offset (`2030-01-02T17:00:00+11:00`) or `Z`, and in
+  ISO 8601 with an offset (`2030-06-09T17:00:00+11:00`) or `Z`, and in
   the future.
 - **Refused, exit 2, nothing written:** no offset, a date alone, a past T,
   a relative form (`+2h`), prose, no `--why` or a blank one, and `--why`
@@ -137,7 +145,7 @@ clean: no
   claim     PASS     no claim held in WEB-153
   mail      FAIL     2 unread: <1792...@host.session-mail>, <1792...@host.session-mail>
   promises  UNKNOWN  not declared (--no-promises, --promise TEXT, --handed-on REF)
-keep until: 2030-01-02T17:00:00+11:00 (why: waiting on a verdict)
+keep until: 2030-06-09T17:00:00+11:00 (why: waiting on a verdict)
 ```
 
 Not parked reads `parked: no (never parked)`, `parked: no (a turn started

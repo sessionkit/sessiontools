@@ -182,6 +182,29 @@ def test_a_token_shaped_value_is_refused_and_never_echoed(home):
         assert value not in message
 
 
+@pytest.mark.parametrize("value", [42, "", "relative/oauth", "/a\x00b", ["/a"], "/abs/oauth"])
+def test_a_set_value_is_the_token_file_route_whatever_it_holds(home, value):
+    """`token_file_is_set` answers the route, not the path: a value that
+    `token_file_setting` refuses is still set."""
+    setting(home, value)
+    assert tf.token_file_is_set(home=home) is True
+
+
+def test_unset_or_null_is_not_the_token_file_route(home):
+    assert tf.token_file_is_set(home=home) is False
+    setting(home, None)                            # JSON null: as if unset
+    assert tf.token_file_is_set(home=home) is False
+    write_session_settings(home, {"account": {"passage_prefix": "x"}})
+    assert tf.token_file_is_set(home=home) is False
+
+
+def test_token_file_is_set_refuses_an_unreadable_layer_as_exit_5(home):
+    write_session_settings(home, "{not json")
+    with pytest.raises(tf.TokenFileError) as caught:
+        tf.token_file_is_set(home=home)
+    assert caught.value.code == 5 and str(caught.value).startswith("settings:")
+
+
 def test_a_settings_file_the_reader_refuses_is_exit_5(home):
     write_session_settings(home, "{not json")
     with pytest.raises(tf.TokenFileError) as caught:

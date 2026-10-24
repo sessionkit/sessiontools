@@ -683,7 +683,8 @@ def test_packages_names_every_tool_and_no_other():
 def test_the_map_is_the_ruled_contract():
     assert settings.PACKAGES == {
         "session": "tools", "claude-code": "tools", "sounds": "tools",
-        "mail": "mail", "ears": "voice", "mouth": "voice", "view": "view"}
+        "mail": "mail", "ears": "voice", "mouth": "voice", "view": "view",
+        "phone": "phone"}
 
 
 def test_package_dir_is_package_first_under_the_kit_home():
@@ -698,6 +699,41 @@ def test_host_dir_is_its_packages_directory_and_a_pair_with_no_note():
     env = {"HOME": "/home-of-test"}
     for tool, package in settings.PACKAGES.items():
         assert settings.host_dir(tool, env) == (settings.package_dir(package, env), None)
+
+
+def test_phone_is_on_the_cascade_in_its_own_package():
+    """`phone` ships in the `phone` package: its host folder is
+    ~/.sessionkit/phone/settings/, and no variable names its file."""
+    env = {"HOME": "/home-of-test"}
+    assert "phone" in settings.TOOLS and settings.PACKAGES["phone"] == "phone"
+    assert settings.host_dir("phone", env) == (
+        Path("/home-of-test") / ".sessionkit" / "phone" / "settings", None)
+    assert "phone" not in settings.SETTINGS_FILE_ENV
+
+
+def test_phone_reads_its_host_file_and_drop_ins(tree):
+    """The host layer is phone.json, then phone.d/*.json in name order; a
+    session file still overrides it."""
+    folder = tree / ".sessionkit" / "phone" / "settings"
+    a = w(folder / "phone.json", {"bot": {"name": "a", "port": 1}, "voice": "x"})
+    b = w(folder / "phone.d" / "50-local.json", {"bot": {"port": 2}})
+    c = w(session(tree) / "phone.json", {"voice": "y"})
+    res = settings.resolve("phone", SID)
+    assert [(s.layer, s.path) for s in res.sources] == [
+        ("host", a), ("host", b), ("session", c)]
+    assert res.values == {"bot": {"name": "a", "port": 2}, "voice": "y"}
+    assert res.origins == {"bot.name": str(a), "bot.port": str(b), "voice": str(c)}
+    assert res.moved and res.notes == [] and res.problems == []
+
+
+def test_session_settings_lists_phone_from_its_host_file(tree, capsys):
+    w(tree / ".sessionkit" / "phone" / "settings" / "phone.json", {"voice": "x"})
+    assert settings.tools(SID) == ["phone"]
+    assert main(["settings", SID]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "phone  (host)"
+    line = next(ln for ln in out.splitlines() if ln.strip().startswith("voice"))
+    assert '"x"' in line and "~/.sessionkit/phone/settings/phone.json" in line
 
 
 def test_a_tool_the_map_does_not_name_has_no_directory_and_nothing_is_guessed(tree):
@@ -737,6 +773,7 @@ def test_every_tool_reads_and_writes_its_package_directory_and_never_the_old_pat
     birth does creates the pre-kit settings tree (settings_root, the
     deprecated name for it) or any directory of that name."""
     monkeypatch.delenv("EARS_CONF", raising=False)
+    monkeypatch.delenv("MOUTH_SETTINGS", raising=False)
     monkeypatch.delenv("VOICEMODE_MOUTH_SETTINGS", raising=False)
     env = {"HOME": str(tree)}
     for tool, package in settings.PACKAGES.items():
@@ -948,7 +985,8 @@ def test_override_file_of_any_name_is_the_host_layer(tree, monkeypatch):
     assert res.moved and res.notes == []
 
 
-@pytest.mark.parametrize("tool, variable", sorted(settings.SETTINGS_FILE_ENV.items()))
+@pytest.mark.parametrize("tool, variable", sorted(
+    (tool, name) for tool, names in settings.SETTINGS_FILE_ENV.items() for name in names))
 def test_override_beats_the_default_dir_and_a_note_names_both(tree, monkeypatch,
                                                               tool, variable):
     """ST-174 T2: the default file is not a source, and is named."""
@@ -1052,6 +1090,107 @@ def test_the_schema_and_host_layer_read_one_override(tree, monkeypatch):
     monkeypatch.setenv("EARS_CONF", str(mine))
     assert settings.schema_candidates("ears")[0].parent == settings.settings_file_override("ears").parent
     assert settings.settings_file_override("mail") is None
+
+
+# --- the mouth's settings file: the current name, then the old one ------------
+#
+# The mouth reads `$MOUTH_SETTINGS`, then the old `$VOICEMODE_MOUTH_SETTINGS`.
+# Presence picks the name: a current name set to "" is set, hides the old
+# one, and is no override (the default directory is read).
+
+def test_the_mouth_names_its_current_variable_first_and_ears_has_one():
+    assert settings.SETTINGS_FILE_ENV["mouth"] == ("MOUTH_SETTINGS", "VOICEMODE_MOUTH_SETTINGS")
+    assert settings.SETTINGS_FILE_ENV["ears"] == ("EARS_CONF",)
+
+
+@pytest.mark.parametrize("environ, want, variable", [
+    ({"MOUTH_SETTINGS": "/x/new.json"}, "/x/new.json", "MOUTH_SETTINGS"),
+    ({"VOICEMODE_MOUTH_SETTINGS": "/x/old.json"}, "/x/old.json", "VOICEMODE_MOUTH_SETTINGS"),
+    ({"MOUTH_SETTINGS": "/x/new.json", "VOICEMODE_MOUTH_SETTINGS": "/x/old.json"},
+     "/x/new.json", "MOUTH_SETTINGS"),
+    ({"MOUTH_SETTINGS": "", "VOICEMODE_MOUTH_SETTINGS": "/x/old.json"}, None, "MOUTH_SETTINGS"),
+    ({"VOICEMODE_MOUTH_SETTINGS": ""}, None, "VOICEMODE_MOUTH_SETTINGS"),
+    ({}, None, "MOUTH_SETTINGS"),
+], ids=["new-only", "old-only", "both-new-wins", "new-empty-hides-old", "old-empty", "neither"])
+def test_the_mouth_override_reads_the_current_name_then_the_old(environ, want, variable):
+    env = {"HOME": "/home-of-test", **environ}
+    got = settings.settings_file_override("mouth", env)
+    assert got == (Path(want) if want else None)
+    assert settings.settings_file_variable("mouth", env) == variable
+
+
+def test_the_variable_read_for_a_tool_outside_the_table_is_none():
+    assert settings.settings_file_variable("mail", {"MOUTH_SETTINGS": "/x"}) is None
+    assert settings.settings_file_variable("ears", {}) == "EARS_CONF"
+
+
+def test_the_mouth_override_reads_the_process_env_by_the_same_rule(tree, monkeypatch):
+    monkeypatch.setenv("VOICEMODE_MOUTH_SETTINGS", str(tree / "old" / "mouth.json"))
+    assert settings.settings_file_override("mouth") == tree / "old" / "mouth.json"
+    monkeypatch.setenv("MOUTH_SETTINGS", str(tree / "new" / "mouth.json"))
+    assert settings.settings_file_override("mouth") == tree / "new" / "mouth.json"
+    monkeypatch.setenv("MOUTH_SETTINGS", "")
+    assert settings.settings_file_override("mouth") is None
+
+
+def test_the_host_layer_and_schema_follow_the_current_name_over_the_old(tree, monkeypatch):
+    """Both names set: the host layer, its note and the schema all come from
+    the file the current name names; the old name's file is not read."""
+    new = tree / "voice" / "new"
+    old = tree / "voice" / "old"
+    mine = w(new / "mouth.json", {"voice": "new"})
+    w(old / "mouth.json", {"voice": "old"})
+    dot = w(new / ".mouth.schema.json", MOUTH_SCHEMA)
+    w(old / ".mouth.schema.json", MOUTH_SCHEMA_OLD)
+    w(host(tree, "mouth") / "mouth.json", {"voice": "default-dir"})
+    monkeypatch.setenv("MOUTH_SETTINGS", str(mine))
+    monkeypatch.setenv("VOICEMODE_MOUTH_SETTINGS", str(old / "mouth.json"))
+    res = settings.resolve("mouth", SID)
+    assert res.values == {"voice": "new"}
+    assert [s.path for s in res.sources] == [mine]
+    (note,) = res.notes
+    assert "$MOUTH_SETTINGS" in note and "VOICEMODE" not in note
+    assert settings.find_schema("mouth")[0] == dot
+    assert [k.variable for k in settings.env_keys("mouth")] == ["MOUTH_VOICE"]
+    assert str(old) not in json.dumps([str(c) for c in settings.schema_candidates("mouth")])
+    entries = _mouth_birth(tree, {"MOUTH_SETTINGS": str(mine),
+                                  "VOICEMODE_MOUTH_SETTINGS": str(old / "mouth.json"),
+                                  "MOUTH_VOICE": "af_sky", "MOUTH_VOICE_OLD": "nope"})
+    assert [e["event"] for e in entries] == ["env-at-birth"]
+    f = session(tree) / "mouth.d" / "50-env.json"
+    assert json.loads(f.read_text()) == {"voice": "af_sky"}
+
+
+def test_an_empty_current_name_hides_the_old_and_the_default_dir_is_read(tree, monkeypatch):
+    """`MOUTH_SETTINGS=""` with the old name set: no override at all, so the
+    host layer and schema come from host_dir(mouth), never the old file."""
+    old = tree / "voice" / "old"
+    w(old / "mouth.json", {"voice": "old"})
+    w(old / ".mouth.schema.json", MOUTH_SCHEMA_OLD)
+    default = w(host(tree, "mouth") / "mouth.json", {"voice": "default-dir"})
+    visible = w(host(tree, "mouth") / "mouth.schema.json", MOUTH_SCHEMA)
+    monkeypatch.setenv("MOUTH_SETTINGS", "")
+    monkeypatch.setenv("VOICEMODE_MOUTH_SETTINGS", str(old / "mouth.json"))
+    assert settings.settings_file_override("mouth") is None
+    res = settings.resolve("mouth", SID)
+    assert res.values == {"voice": "default-dir"} and res.origins == {"voice": str(default)}
+    assert res.notes == []
+    assert settings.find_schema("mouth") == (visible, [])
+    assert "mouth" in settings.tools(SID)
+
+
+def test_the_not_moved_line_names_the_variable_actually_read(tree, monkeypatch, capsys):
+    """Each name alone points at no file: the line names that name."""
+    gone = tree / "elsewhere" / "mouth.json"
+    for variable in settings.SETTINGS_FILE_ENV["mouth"]:
+        for name in settings.SETTINGS_FILE_ENV["mouth"]:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(variable, str(gone))
+        res = settings.resolve("mouth", SID)
+        assert f"${variable} names {gone}" in res.notes[0]
+        assert main(["settings", SID, "mouth"]) == 0
+        first = capsys.readouterr().out.splitlines()[0]
+        assert first.startswith("mouth  not moved") and f"~/elsewhere/mouth.json (${variable})" in first
 
 
 # --- two keys that join to one dotted path -----------------------------------

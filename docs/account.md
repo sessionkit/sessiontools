@@ -14,7 +14,10 @@ browser, no `/login` and no restart. It never prints a token.
   exports `CLAUDE_CODE_OAUTH_TOKEN` from a file, name that file in the
   `session` setting `account.token_file`. `use` then swaps the file and
   never touches the Keychain. Live seats keep their token until they
-  restart. See [Token-file hosts][token-file-hosts].
+  restart. A seat `session start` launches does NOT follow the file
+  unless its agent file says `inherit: [CLAUDE_CODE_OAUTH_TOKEN]`; without
+  it, the seat signs in from Claude's stored credentials. See
+  [Token-file hosts][token-file-hosts].
 - **The plan comes first, then the gates:** a named `--witness`, `--yes`,
   a token preflight before any write, and a 0600 backup. A failed write
   restores the backup.
@@ -22,15 +25,20 @@ browser, no `/login` and no restart. It never prints a token.
   copy of its screen, saves the token to passage, reads it back, and
   registers it. The token is never on screen or on argv. See `new` below.
 
-```console
-session account list                          # names, emails, sources; which one the host is on
-session account status [--json] [--no-resets] # host account, this seat's route, plan usage + resets
-session account use NAME --witness WHO        # the plan and its cost; writes nothing (exit 3)
-session account use NAME --witness WHO --yes  # move the host
-session account new NAME --email E            # sign in, save to passage, register
-session account add NAME --email E --source BACKEND:REF [--source ...] [--no-fp]
-session account remove NAME                   # unregister; deletes no token
-```
+The verbs:
+
+- `session account list`: names, emails and sources, and which one the
+  host is on.
+- `session account status [--json] [--no-resets]`: the host account,
+  this seat's route, plan usage and resets.
+- `session account use NAME --witness WHO`: the plan and its cost. It
+  writes nothing (exit 3).
+- `session account use NAME --witness WHO --yes`: move the host.
+- `session account new NAME --email E`: sign in, save to passage,
+  register.
+- `session account add NAME --email E --source BACKEND:REF [--source ...] [--no-fp]`:
+  register token sources that already exist.
+- `session account remove NAME`: unregister. It deletes no token.
 
 ## Blast radius
 
@@ -45,6 +53,12 @@ session account remove NAME                   # unregister; deletes no token
 - **On a token-file host, a live seat keeps the token it launched with.**
   The shell read the file at launch, so the swap reaches a seat only when
   it restarts. `use` names every live seat in its plan, and moves none.
+- **On a token-file host, a seat with no env token is NOT on the file.**
+  `session start` strips `CLAUDE_CODE_OAUTH_TOKEN` from the seats it
+  launches, unless the agent file says `inherit:
+  [CLAUDE_CODE_OAUTH_TOKEN]`. A seat without it signs in from Claude's
+  stored credentials, so `use` does not move it, even at a restart.
+  `status` says `NOT on the token file` for it, never `follows the host`.
 - **Moving one running seat by itself is not built.** It is a relaunch,
   which needs a respawn verb that does not exist.
 
@@ -108,7 +122,8 @@ host has). The path below is a placeholder:
 - **There is no default.** Unset, the host's route is the Keychain item.
   `use` never guesses the route from `CLAUDE_CODE_OAUTH_TOKEN` in its
   own environment, since `session start` strips that variable from the
-  seats it launches.
+  seats it launches. A seat that needs it names it under `inherit:`
+  ([credentials are never handed down][credentials]).
 - **Unset on a token-file host,** `use` finds no Keychain item and
   refuses (exit 5, nothing written). The message names the setting and
   where it lives, and says when this shell exports the variable.
@@ -139,14 +154,16 @@ use home (home@example.com): the host moves from work to home
   file:    token file ~/path/to/oauth-token
   keychain: not read: a seat that signs in from it does not move
   token:   passage:claude/oauth-tokens/home@example.com (preflight: runs before the write)
-  seats:   2 live seats keep the token they launched with until they restart: alpha, beta; new launches read the new file
+  seats:   2 live seats keep the token they launched with until they restart: alpha, beta; new launches from a shell that reads the file read the new file
+  session start: its seats do NOT follow the file unless their agent file has inherit: [CLAUDE_CODE_OAUTH_TOKEN]; without it they sign in from Claude's stored credentials
   this seat holds the old token: yes
   backup:  ~/.sessionkit/tools/accounts/token-file-backups/ (written before the write)
   witness: sam
 plan only: re-run with --yes to swap the file
 ```
 
-The `seats:` and `this seat` lines are printed again after `done:`. A
+The `seats:`, `session start:` and `this seat` lines are printed again
+after `done:`. A
 seat scan that fails is reported, never a gate.
 
 **The re-mint trap.** A new setup token for the same account has a new
@@ -266,7 +283,15 @@ number.
   `token file: unknown (not in registry)`, never a guess. A token file
   that is refused is `token file: unreadable (WHY)`. This seat's route:
   `env token: immune to use` on a Keychain host, `env token: from launch;
-  moves at restart` on a token-file host, or `follows the host`. Plan
+  moves at restart` on a token-file host. With no env token: `follows
+  the host` on a Keychain host; on a token-file host, `NOT on the token
+  file`, since such a seat signs in from Claude's stored credentials
+  (`--json`: `seat.via` is `no env token: not on the token file`,
+  `seat.name` null). That line names `inherit:
+  [CLAUDE_CODE_OAUTH_TOKEN]` as the way to carry the token, and notes
+  that a tool shell may strip the variable from a seat that has it. A
+  host whose `account.token_file` is set to a value that is refused is
+  still a token-file host for this line. Plan
   usage of the live account, from the exporter at
   `http://localhost:9103/metrics`, or `usage: unavailable`. When the
   exporter has no answer, the limits file, if the host names one (below).
@@ -300,7 +325,7 @@ default. Unset, `status` prints what it always has.
 
 ```console
 $ session account status
-usage: 5h 3% (resets 2030-01-02T17:00+00:00), 7d 1% (resets 2030-01-07T17:00+00:00)  (usage of the host account, limits file, 2m old)
+usage: 5h 3% (resets 2030-06-09T17:00+00:00), 7d 1% (resets 2030-12-08T17:00+00:00)  (usage of the host account, limits file, 2m old)
 ```
 
 - `--json` gives `usage.source` `limits_file`, the `file`, `written_at`,
@@ -360,11 +385,12 @@ That folder is not read any more, and nothing is written to it.
 
 The move is `python -m sessiontools.account.movehome`, run by the same
 Python that runs `session`. The stderr line prints that full command,
-because under `uv tool install` that Python is not on `PATH`:
+because under `uv tool install` that Python is not on `PATH`. The first
+line is a dry run, the second makes the move:
 
 ```console
-$ /path/to/python -m sessiontools.account.movehome           # a dry run
-$ /path/to/python -m sessiontools.account.movehome --apply   # the move
+$ /path/to/python -m sessiontools.account.movehome
+$ /path/to/python -m sessiontools.account.movehome --apply
 ```
 
 - **A dry run by default.** It lists each entry as `path mode size`, then
@@ -406,3 +432,4 @@ $ /path/to/python -m sessiontools.account.movehome --apply   # the move
   decision about the skill's size.
 
 [token-file-hosts]: #token-file-hosts
+[credentials]: session-start-launcher.md#credentials-are-never-handed-down

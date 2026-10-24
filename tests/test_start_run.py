@@ -164,7 +164,7 @@ def test_execute_writes_the_planned_files_then_execs_the_script(tmp_path, monkey
 
 def test_a_live_plan_puts_its_door_files_under_launch(tmp_path):
     """session-settings 4.6 (a review of 4.1,
-    2030-08-03): the prompt file, the first message and the agent plugin
+    2030-12-08): the prompt file, the first message and the agent plugin
     sit in `<session>/launch/`, beside the record, not at the dir's top."""
     plan = plan_for(tmp_path, "start:\n  context:\n    system-prompt:\n      - echo hi\n",
                     argv_tail=["w" * 10], flags=["--first-message-file-over", "4"])
@@ -380,7 +380,7 @@ def test_an_unkeyed_direct_launch_inside_a_keyed_seat_hands_the_agent_no_signing
     agent's git then reads the PARENT's signing key, gpg.ssh.program and
     commit.gpgsign. With the key handle (CLAUDE_SESSION_AGENT_SOCK) scrubbed,
     every commit and annotated tag it makes fails in the parent's shim
-    (findings/2030-08-12-repro-001.md R1, S1)."""
+    (findings/2030-12-08-repro-001.md R1, S1)."""
     parent = {**PARENT_SIGNING, **HERMETIC_GIT, "CLAUDE_SESSION_AGENT_SOCK": "/parent/agent.sock",
               "CLAUDE_SESSION_PUB": "/parent/session.pub", "CLAUDE_SESSION_ID": PARENT}
     result, record, _work = launch_e2e(tmp_path, "scout", extra_env=parent,
@@ -432,6 +432,28 @@ def test_direct_launch_idle_injects_only_the_boot_trigger(tmp_path):
     result, record, _work = launch_e2e(tmp_path, "--idle", "scout")
     assert result.returncode == 0, result.stderr
     assert any("Boot from your agent MD now" in arg for arg in recorded_argv(record))
+
+
+@pytest.mark.parametrize("bare", [(), ("-",)], ids=["no-agent", "dash"])
+def test_a_bare_idle_launch_injects_no_boot_line(tmp_path, bare):
+    result, record, _work = launch_e2e(tmp_path, "--idle", *bare)
+    assert result.returncode == 0, result.stderr
+    argv = recorded_argv(record)
+    for word in ("agent MD", "startup manifest"):
+        assert not any(word in arg for arg in argv), argv
+    sessions = tmp_path / "agents" / "sessions"
+    for path in sessions.rglob("*"):
+        if path.is_file():
+            text = path.read_text(errors="replace")
+            assert "agent MD" not in text and "startup manifest" not in text, path
+
+
+def test_a_bare_idle_launch_with_words_sends_only_the_words(tmp_path):
+    result, record, _work = launch_e2e(tmp_path, "--idle", "-", "stand", "by")
+    assert result.returncode == 0, result.stderr
+    argv = recorded_argv(record)
+    assert not any("agent MD" in arg for arg in argv), argv
+    assert any(arg.strip() == "stand by" for arg in argv), argv
 
 
 def test_idle_launches_with_the_agents_own_door_intact(tmp_path):

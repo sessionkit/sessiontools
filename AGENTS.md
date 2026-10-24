@@ -28,7 +28,8 @@ Three rules:
    `tests/test_cli.py` pins all of it. Nothing else is added without the
    maintainer's agreement. Dev tools live in the dev group.
 
-```console
-make install    # uv sync - a checkout you can import from and test
-make            # check, then test
-```
+To build and test:
+
+- `make install` runs `uv sync`: a checkout you can import from and
+  test.
+- `make` alone lists the targets; `make check` is lint, then test.

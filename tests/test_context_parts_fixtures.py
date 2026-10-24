@@ -1,7 +1,7 @@
 """context_parts' guards (ST-26 do-001): the committed fixtures are what
 build.py writes; the fold is a new module that window.py and settle.py never
 import, so the settle hook path cannot pull it in (design section 5's
-Wed 2030-08-14 amendment, which replaced the 100 ms settle latency gate); and
+Sun 2030-12-08 amendment, which replaced the 100 ms settle latency gate); and
 the package is stdlib-only.
 
 No guard here diffs a file against origin/master: that pins which files THIS

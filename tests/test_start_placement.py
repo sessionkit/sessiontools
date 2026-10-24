@@ -9,7 +9,7 @@ itself is pinned in test_start_secrets.py (slice 4).
 
 The e2e tests run a PRIVATE tmux server. `conftest.py` walls every test off
 (its own `TMUX_TMPDIR`, no `TMUX`, an empty `AGENTS_DIR`), and `private_env`
-refuses to start anything if that wall is missing: on 2030-07-30 an
+refuses to start anything if that wall is missing: on 2030-12-08 an
 `--in-tmux` test that inherited the developer's `$TMUX` placed two live
 keyed agents in the real server. The stub vendor records from INSIDE the
 pane - the only place the venv scrub, the identity env and the reap wiring
@@ -944,7 +944,7 @@ def test_window_is_named_and_automatic_rename_is_off(tmp_path):
     assert name == "scout"
 
 
-# SESH-1114, measured 2030-08-02 on a private server (tmux 3.7c,
+# SESH-1114, measured 2030-12-08 on a private server (tmux 3.7c,
 # default options; the herd's ~/.tmux.conf leaves allow-rename off):
 # `--tmux-target bob bob` gave window `bob` (automatic-rename 0,
 # allow-rename 0), still `bob` after the vendor printed both title escapes.

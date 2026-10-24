@@ -29,7 +29,7 @@ import re
 from typing import NamedTuple
 
 from sessiontools.start.args import RESUME_TOKENS
-from sessiontools.start.context import CONVERSE_SIGNAL
+from sessiontools.start.context import converse_signal
 
 #: The file a keyed session's directory holds, and an unkeyed one does not.
 KEYED_PUB_FILE = "session.pub"
@@ -103,7 +103,7 @@ def recover_resume_cwd(session_id: str, home: str | None = None) -> str | None:
 
 
 def resume_message(message_words: list | tuple = (), now: datetime.datetime | None = None,
-                   converse: bool = False) -> str:
+                   converse: bool = False, agent_file: bool = False) -> str:
     """The restart message a resume injects: the date first, the voice
     signal when converse is on, the user's own words LAST.
 
@@ -111,11 +111,13 @@ def resume_message(message_words: list | tuple = (), now: datetime.datetime | No
     old one silently discarded them). Voice is a launch-only fact: the
     resumed transcript is a typed one, so this message is the
     only channel that can tell a voice agent it can speak. `converse` is
-    the effective value, CLI flag OR front matter; the caller merges."""
+    the effective value, CLI flag OR front matter; the caller merges.
+    `agent_file` says an agent file is in play, and picks the voice line
+    as a fresh launch does."""
     stamp = (now or datetime.datetime.now().astimezone()).strftime(RESUME_STAMP_FORMAT)
     parts = [f"Session restarted. Current date and time: {stamp}"]
     if converse:
-        parts.append(CONVERSE_SIGNAL)
+        parts.append(converse_signal(agent_file))
     words = " ".join(message_words)
     if words:
         parts.append(words)

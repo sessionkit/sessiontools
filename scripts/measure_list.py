@@ -13,7 +13,7 @@ PRIVATE world under a fresh short directory in /tmp and points the code at it:
   `tmux -L st111-scratch`, `-L st111-scratch-2`, ..., each with its share of
   the N fixture panes (one `sleep` per pane). DEAD socket files (bound, then
   closed, so the file stays and a connect is refused) stand in for the
-  stale files a host collects: 1034 of them on one busy host (2030-08-11).
+  stale files a host collects: 1034 of them on one busy host (2030-12-08).
 - SESSION_SIDECAR_DIR holds one sidecar per pane: its pid is the pane's pid,
   its procStart is that pid's `ps` start, so `live()` keeps every one.
 - CLAUDE_PROJECTS_DIR holds one transcript per seat of --transcript-kb KB, so

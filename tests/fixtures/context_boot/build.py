@@ -78,7 +78,7 @@ CONTEXT_REPORT = """## Context Usage
 |------------|--------|--------|
 | worker | user | 54 |
 """
-CONTEXT_AT = "2030-01-02T06:00:00.000Z"
+CONTEXT_AT = "2030-06-09T06:00:00.000Z"
 
 
 def agent_name(name: str) -> dict:

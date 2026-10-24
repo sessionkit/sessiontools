@@ -1,6 +1,6 @@
 """Resume (R8 slice 3), the pure pieces: detection, CA-62 cwd recovery, the
 dated restart message, the keyed-resume warning. Ported from the old suite
-(session-20300729 `test_session_start.py` 2384-2395, 4052-4121, 4222-4236).
+(session-20300609 `test_session_start.py` 2384-2395, 4052-4121, 4222-4236).
 
 CA-62 tests always pass their own `home`: nothing here reads the
 developer's ~/.claude.
@@ -16,7 +16,7 @@ import pytest
 from conftest import ANCHOR
 
 from sessiontools.start import resume
-from sessiontools.start.context import CONVERSE_SIGNAL
+from sessiontools.start.context import BARE_CONVERSE_SIGNAL, CONVERSE_SIGNAL
 
 RESUME_SID = "11111111-2222-3333-4444-555555555555"
 FROZEN = ANCHOR.astimezone(datetime.timezone(datetime.timedelta(hours=10), "AEST"))
@@ -105,11 +105,24 @@ def test_resume_message_is_the_dated_restart_line():
 def test_resume_message_carries_the_speak_signal_when_converse_is_on():
     """Date line, THEN the voice signal, THEN the user's words last: the
     order the fresh path uses."""
-    speaking = resume.resume_message(["carry", "on"], now=FROZEN, converse=True)
+    speaking = resume.resume_message(["carry", "on"], now=FROZEN, converse=True,
+                                     agent_file=True)
     assert speaking == ("Session restarted. Current date and time: "
                         + FROZEN.strftime(resume.RESUME_STAMP_FORMAT)
                         + "\n\n" + CONVERSE_SIGNAL + "\n\ncarry on")
-    assert CONVERSE_SIGNAL not in resume.resume_message(["carry", "on"], now=FROZEN)
+    for agent_file in (True, False):
+        quiet = resume.resume_message(["carry", "on"], now=FROZEN, agent_file=agent_file)
+        assert CONVERSE_SIGNAL not in quiet and BARE_CONVERSE_SIGNAL not in quiet
+
+
+def test_a_bare_resume_carries_the_neutral_voice_line():
+    """No agent file: the neutral line, in the same place. It is the
+    default, as on the fresh path."""
+    speaking = resume.resume_message(["carry", "on"], now=FROZEN, converse=True)
+    assert speaking == ("Session restarted. Current date and time: "
+                        + FROZEN.strftime(resume.RESUME_STAMP_FORMAT)
+                        + "\n\n" + BARE_CONVERSE_SIGNAL + "\n\ncarry on")
+    assert CONVERSE_SIGNAL not in speaking
 
 
 # ---------- keyed_resume_warning -----------------------------------------------

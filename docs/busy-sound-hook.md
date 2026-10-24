@@ -15,6 +15,8 @@ through the settings cascade (`session settings <sid> sounds`):
 - It never breaks a turn: no python, a crash or a bad setting all end
   with no output and exit 0.
 - It never plays over the mouth (voicemode speaking).
+- An optional [stop sound](#the-stop-sound) plays once when the seat's
+  turn ends, queued behind any line the mouth is still speaking.
 
 ## Where the setting goes
 
@@ -30,7 +32,7 @@ through the settings cascade (`session settings <sid> sounds`):
 | --- | --- | --- |
 | PreToolUse | `arm` | first tool of a batch: arm the sound in a detached waiter, return at once |
 | PostToolBatch | `end` | stop the sound in every slot (a subagent's batch end is skipped) |
-| Stop | `stop` | stop anything left, in every slot; set the turn-ended mark when it is on |
+| Stop | `stop` | stop anything left, in every slot; then play the stop sound when it is set; set the turn-ended mark when it is on |
 | UserPromptSubmit, SessionEnd | `clear` | stop anything left, in every slot |
 
 ## The settings
@@ -56,11 +58,17 @@ through the settings cascade (`session settings <sid> sounds`):
 ## What it costs
 
 - **A seat without the setting** starts python once per session
-  (~40 ms), which stamps `<session dir>/sounds/busy/off`. After that it
-  pays a few `stat` calls per tool.
+  (~40 ms), which stamps `<session dir>/sounds/busy/off` and
+  `<session dir>/sounds/stop/off`. After that it pays a few `stat` calls
+  per tool and per Stop.
+- A seat whose first turn ends before any tool starts python once more,
+  at that Stop, to stamp `sounds/stop/off`.
+- **A seat with the stop sound set** starts python at every Stop, once a
+  turn; the play itself is detached.
 - A newer host- or session-layer `sounds` file is re-read at once.
 - A seat- or agent-layer switch-on takes effect at the next launch, or
-  after `rm <session dir>/sounds/busy/off`.
+  after `rm <session dir>/sounds/busy/off` (for the stop sound,
+  `sounds/stop/off`).
 
 ## Playing
 
@@ -68,8 +76,8 @@ through the settings cascade (`session settings <sid> sounds`):
   once, never loops, and runs in its own process group, which the batch
   end kills.
 - With `engine`, one resident process plays it instead, and the hooks
-  send it one datagram each with no python: see [the sound
-  engine][engine].
+  send it one datagram each with no python (a Stop still starts python
+  when a stop sound is set): see [the sound engine][engine].
 - A subagent's tool arms nothing. A foreground Agent call keeps the
   parent's sound going until it returns; a background one does not.
 
@@ -82,13 +90,45 @@ The speech guard lives in the waiter, so every trigger has it.
 - A sound that is playing is cut within 0.1 s of the mouth starting.
   The slot stays armed, so it does not replay in that batch.
 - Any session's speech counts.
-- "Speaking" is `playing.json` in the mouth dir
-  (`$VOICEMODE_MOUTH_DIR`, else `$VOICEMODE_BASE_DIR/mouth`, else
-  `~/.voicemode/mouth`), counted only while `player.pid` there names a
-  live process.
-- That file is voicemode's internal state, not yet a blessed contract,
+- "Speaking" is `playing.json` in the mouth dir, counted only while
+  `player.pid` there names a live process.
+- The mouth dir is found by sessionvoice's own rule, copied into
+  `busy.mouth_dir()`: `$MOUTH_DIR`, else `<home>/mouth`. The home is
+  `$SESSIONVOICE_HOME`, else `$VOICEMODE_BASE_DIR`, else
+  `~/.sessionvoice` if it holds a heard log, else `~/.voicemode` if it
+  holds one, else `~/.sessionvoice`. `$VOICEMODE_MOUTH_DIR` is still read
+  when `$MOUTH_DIR` is not set.
+- That file is the mouth's internal state, not yet a blessed contract,
   so it is read only through `busy.mouth_speaking()`.
 - No mouth dir: the guard does nothing.
+
+## The stop sound
+
+The seat's turn ended: the Stop hook plays one file, once. It is
+**silent unless set**, beside `busy` in the same settings:
+
+```json
+{"enabled": true, "stop": {"file": "~/sounds/done.aiff"}}
+```
+
+- `enabled` counts only as the boolean `true`, `stop` must be a map,
+  and `stop.file` a readable regular file (absolute or `~/`). Anything
+  else is silent, never a fallback.
+- It plays once per Stop, after the slots are cleared. A subagent's
+  Stop plays nothing.
+- It goes through the mouth's queue: `mouth play FILE` when `mouth` is
+  on `PATH`, so it lands after any line still speaking on the same
+  device. The mouth picks the device by its own rule.
+- `afplay FILE` plays it instead only when the mouth is absent, exits
+  non-zero (no device, say) or cannot be run. A mouth that does not
+  answer within 5 s, or is killed, is not followed by `afplay`: it may
+  have queued the sound, and it never plays twice.
+- The play runs in a detached process group, so the hook returns at
+  once. It is not a slot: no `end` or `clear` cuts it. Once queued it is
+  the mouth's, and `mouth stop` flushes it.
+- `SESSIONTOOLS_HOOK_BUSY=off` silences it with the busy sound.
+- Its OFF stamp, `<session dir>/sounds/stop/off`, follows the busy
+  sound's rule (see "What it costs").
 
 ## The signals: `session sound`
 

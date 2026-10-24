@@ -1,7 +1,7 @@
 """The Claude Code driver against sidecars shaped like the real ones.
 
 The specimen fields are those a real `~/.claude/sessions/<pid>.json`
-carried on a real host on 2030-07-18 (version 2.1.273): sessionId, pid,
+carried on a real host on 2030-06-09 (version 2.1.273): sessionId, pid,
 cwd, name, agent, status, updatedAt (epoch ms).
 """
 
@@ -29,7 +29,7 @@ def sidecars(tmp_path, monkeypatch):
     return write
 
 
-NOW = 1_893_564_000.0   # 2030-01-02T17:00:00+11:00, as an epoch
+NOW = 1_907_215_200.0   # 2030-06-09T17:00:00+11:00, as an epoch
 
 
 def test_busy_is_zero_whatever_the_clock_says(sidecars):

@@ -1,8 +1,8 @@
 """The `session` command is sessiontools' now, and that is the test.
 
-Since the 2030-07-29 cutover sessiontools provides `session`, same verbs,
+Since the 2030-06-09 cutover sessiontools provides `session`, same verbs,
 ported as package code. This replaces
-the 2030-07-18 pin that no console script was declared."""
+the 2030-06-09 pin that no console script was declared."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def test_the_runtime_dependencies_are_pyyaml_and_jsonschema():
     """sessionmail depends on this; a stranger installing sessionmail must be
     happy to pull them. PyYAML for agent front matter (`session start`
     pulls in the YAML library for itself alone). jsonschema since
-    2030-08-03, for `session settings` (no configuration library, jsonschema
+    2030-12-08, for `session settings` (no configuration library, jsonschema
     for the schema check, by design). Both imported lazily; the
     library stays stdlib. Dev tools live in the dev group."""
     assert runtime_dependencies() == ["pyyaml", "jsonschema"]
@@ -91,7 +91,7 @@ def current_docs() -> list[Path]:
 
 
 def test_every_dependency_count_in_the_docs_matches_pyproject():
-    """ST-138 G2: jsonschema came in at 414bad3 (2030-08-03) and CLAUDE.md,
+    """ST-138 G2: jsonschema came in at 414bad3 (2030-12-08) and CLAUDE.md,
     cli.py, pyproject.toml and this file went on saying ONE for ten days.
     Any count of runtime dependencies in a current doc must be the number
     pyproject.toml declares."""
@@ -176,7 +176,7 @@ def test_no_verb_prints_the_verbs(capsys):
     out = capsys.readouterr().out
     for verb in ("list", "get", "start"):
         assert f"  {verb} " in out
-    assert "send" not in out          # disabled: not even named (2030-07-30)
+    assert "send" not in out          # disabled: not even named (2030-12-08)
 
 
 def test_session_mail_is_retired_and_says_where_each_verb_went(capsys):
@@ -203,7 +203,7 @@ def test_start_calls_a_failed_import_a_broken_install(capsys, monkeypatch):
 
 
 def test_session_send_is_disabled_not_runnable(capsys, monkeypatch):
-    """By ruling (2030-07-30): not in the help, not runnable; the code
+    """By ruling (2030-12-08): not in the help, not runnable; the code
     kept. Nothing may be typed into any pane."""
     from sessiontools import send
     typed = []

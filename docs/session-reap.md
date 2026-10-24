@@ -29,12 +29,15 @@ re-checks each one at the act.
 - **Run it from the installed tool** (`uv tool install sessiontools`), not
   with `uv run` in a checkout ([limits][limits]).
 
-```console
-session reap                 # DRY RUN: every seat idle > 1h, CLOSE or KEEP, and why
-session reap --idle 45m      # another limit: <n>s, <n>m or <n>h (m is minutes)
-session reap --json          # the same rows as JSON
-session reap 8d71f3b6        # only this seat: a session-id prefix of one listed seat
-```
+The forms:
+
+- `session reap`: a DRY RUN. Every seat idle more than 1h, each CLOSE or
+  KEEP, and why.
+- `session reap --idle 45m`: another limit, as `<n>s`, `<n>m` or `<n>h`
+  (`m` is minutes).
+- `session reap --json`: the same rows as JSON.
+- `session reap 8d71f3b6`: only this seat, by a session-id prefix of one
+  listed seat.
 
 ## What it lists
 

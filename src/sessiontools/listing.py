@@ -3,7 +3,7 @@
 The rows are the library's `live()` sessions, each with its git repo and the
 tmux pane it runs in. The JSON keys and the table columns are the ones the
 callers were written against (`session-list` in the session repo,
-retired 2030-07-29): some read `agent` and `status`,
+retired 2030-06-09): some read `agent` and `status`,
 voicemode reads `session_id`, `pid` and `tmux_pane`, seat-hearing reads the
 table's first two columns after its two header lines.
 

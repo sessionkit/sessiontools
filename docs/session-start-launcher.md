@@ -5,13 +5,11 @@ coding-agent session from an agent file. The agent's front matter is
 the launch configuration; the command line overrides it. Trailing words
 are the first message.
 
-```console
-session start --list-agents          # the agents it can start
-session start --dry-run AGENT        # what would run; launches nothing
-session start --in-tmux AGENT        # in a new tmux window, not in place
-session start AGENT review the auth  # words after AGENT: the first message
-```
-
+- `session start --list-agents`: the agents it can start.
+- `session start --dry-run AGENT`: what would run. It launches nothing.
+- `session start --in-tmux AGENT`: in a new tmux window, not in place.
+- `session start AGENT review the auth`: the words after AGENT are the
+  first message.
 - Flags go BEFORE the agent name.
 - Exit codes: 0 ok, 1 launch failed, 2 usage or a refusal, 3 the agent
   is already held (see [the front door][door]).
@@ -31,8 +29,11 @@ session start AGENT review the auth  # words after AGENT: the first message
 ## Flags
 
 - `--dry-run`: show what would run; launch nothing.
-- `--idle`: boot self-directed; inject nothing.
-- `--converse`: speak the first response.
+- `--idle`: boot self-directed; run no context generators. With an
+  agent file, the first message is one line telling the agent to boot
+  from its file. With no agent file, nothing is injected.
+- `--converse`: tell the agent this session can speak. It is a
+  capability, not an order to speak first.
 - `--keyed [--key-label NAME]`: mint a fresh Ed25519 session key and
   derive the session id from it; `--key-label` labels the key instead
   of the agent name.
@@ -56,7 +57,7 @@ session start AGENT review the auth  # words after AGENT: the first message
   matched by exact name. The window is named exactly the agent unless
   WINDOW is given: `--tmux-target work reviewer` gives window
   `reviewer`.
-- The old `--window-name` is gone (since 2030-07-30): to name the window
+- The old `--window-name` is gone (since 2030-12-08): to name the window
   yourself, write `--tmux-target SESSION:WINDOW`.
 - `--switch` moves the tmux client to the new window; `--no-switch`
   never does, even from an interactive terminal inside tmux.
@@ -113,6 +114,27 @@ A session started from inside another does not inherit its account.
 `ANTHROPIC_AUTH_TOKEN` are dropped from every child of the launch,
 including a tmux server `session start` creates, and the launch script's
 first line unsets them. To pass one on, name it under `inherit:`.
+
+**A login by token needs this.** If Claude Code signs in from
+`CLAUDE_CODE_OAUTH_TOKEN` in the launcher's environment (a token from
+`claude setup-token`, exported by your shell), a session `session start`
+launches starts without that token unless its agent file carries:
+
+```yaml
+environment:
+  inherit:
+    - CLAUDE_CODE_OAUTH_TOKEN
+```
+
+The same goes for a login by `ANTHROPIC_API_KEY` or
+`ANTHROPIC_AUTH_TOKEN`: name that variable instead. A `/login` login,
+kept in the Keychain, is not affected: nothing here touches it.
+
+The default drops the token on purpose. A launcher's credential once
+reached every session it started, and every pane of a tmux server it
+created. Carrying one is opt-in, and by name. The dry run lists the
+name, `CLAUDE_CODE_OAUTH_TOKEN  <- the launcher's environment`, and
+reads no value.
 
 ## The host's model, effort and status line
 
@@ -241,6 +263,18 @@ start:
   `CONTEXT GENERATOR FAILED` block.
 - `informational-exit:` is a list of integers from 1 to 255. Anything
   else is refused, exit 2.
+
+### The launch-info marker
+
+When the `launch-info` built-in renders with a session id, the launch
+script exports `SESSIONTOOLS_LAUNCH_INFO=<that id>`, so the
+[session-info hook](session-info-hook.md) does not print the id again.
+Every other launch only unsets an inherited one, on the script's first
+line beside the session's identity: no `launch-info` entry, `--idle`, a
+resume, a session id minted in the tmux pane, or a `launch-info` that
+failed. The export comes before the declared environment, so an agent
+file that sets the variable under `variables:` wins. A dry run shows the
+line in the script it prints.
 
 ## From Python
 

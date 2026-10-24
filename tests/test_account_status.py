@@ -42,8 +42,8 @@ METRICS = """\
 claude_plan_usage_percent{account="default",window="5h"} 75
 claude_plan_usage_percent{account="default",window="7d"} 52.5
 # HELP claude_plan_window_reset_timestamp_seconds When the window resets.
-claude_plan_window_reset_timestamp_seconds{account="default",window="5h"} 1893603600
-claude_plan_window_reset_timestamp_seconds{account="default",window="7d"} 1893862800
+claude_plan_window_reset_timestamp_seconds{account="default",window="5h"} 1907254800
+claude_plan_window_reset_timestamp_seconds{account="default",window="7d"} 1922979600
 claude_session_context_tokens{session="x"} 123456
 """
 
@@ -204,8 +204,8 @@ def test_status_names_the_host_by_its_item_fp(world, capsys):
     assert lines[0] == "host:  c (carol@example.com)  (Keychain, fp match)"
     assert lines[1] == "seat:  follows the host"
     assert lines[2] == (
-        "usage: 5h 75% (resets 2030-01-02T17:00+00:00), "
-        "7d 52.5% (resets 2030-01-05T17:00+00:00)  (usage of the live account)")
+        "usage: 5h 75% (resets 2030-06-09T17:00+00:00), "
+        "7d 52.5% (resets 2030-12-08T17:00+00:00)  (usage of the live account)")
     assert world.keychain.reads == 1 and world.keychain.writes == []
     assert world.err.getvalue() == ""
     world.assert_no_leak(capsys)
@@ -220,9 +220,9 @@ def test_status_json_shape_is_design_section_5(world, capsys):
     assert data["usage"] == {
         "url": st.USAGE_URL, "label": "usage of the live account",
         "windows": [{"window": "5h", "account": "default", "percent": 75.0,
-                     "resets_at": "2030-01-02T17:00+00:00"},
+                     "resets_at": "2030-06-09T17:00+00:00"},
                     {"window": "7d", "account": "default", "percent": 52.5,
-                     "resets_at": "2030-01-05T17:00+00:00"}]}
+                     "resets_at": "2030-12-08T17:00+00:00"}]}
     world.assert_no_leak(capsys)
 
 
@@ -397,12 +397,12 @@ def test_usage_url_comes_from_the_config(world, capsys):
 def test_reset_times_are_shown_by_default_and_one_flag_hides_them(world, capsys):
     assert world.status() == 0
     assert world.out.getvalue().splitlines()[2] == (
-        "usage: 5h 75% (resets 2030-01-02T17:00+00:00), "
-        "7d 52.5% (resets 2030-01-05T17:00+00:00)  (usage of the live account)")
+        "usage: 5h 75% (resets 2030-06-09T17:00+00:00), "
+        "7d 52.5% (resets 2030-12-08T17:00+00:00)  (usage of the live account)")
     world.out = io.StringIO()
     data = world.json()
     assert [row["resets_at"] for row in data["usage"]["windows"]] == \
-        ["2030-01-02T17:00+00:00", "2030-01-05T17:00+00:00"]
+        ["2030-06-09T17:00+00:00", "2030-12-08T17:00+00:00"]
     world.out = io.StringIO()
     assert world.status(resets=False) == 0
     assert "resets" not in world.out.getvalue()
@@ -698,7 +698,7 @@ def test_a_token_file_host_is_named_by_the_file_fp(world, capsys):
     assert world.status() == 0
     lines = world.out.getvalue().splitlines()
     assert lines[0] == "host:  c (carol@example.com)  (token file, fp match)"
-    assert lines[1] == "seat:  follows the host"
+    assert lines[1].startswith("seat:  NOT on the token file")
     assert world.keychain.reads == 0 and world.keychain.writes == []
     world.out = io.StringIO()
     assert world.json()["host"] == {"name": "c", "email": "carol@example.com",
@@ -817,3 +817,213 @@ def test_no_token_shape_reaches_any_token_file_output(world, capsys):
     for run in (world.status, lambda: world.status(as_json=True), world.list):
         assert run() == 0
         no_shape_in(world, capsys)
+
+
+# --- this seat on a token-file host with no env token ----------------------------------------
+
+
+def test_on_a_token_file_host_no_env_token_is_not_on_the_file(world, capsys):
+    """No env token on a token-file host: the seat signs in from Claude's
+    stored credentials, not the file. It does NOT follow the host, and its
+    name is never the host's."""
+    on_file(world, "c")
+    world.env = {}
+    assert world.status() == 0
+    lines = world.out.getvalue().splitlines()
+    assert lines[0] == "host:  c (carol@example.com)  (token file, fp match)"
+    assert lines[1] == ("seat:  NOT on the token file: no CLAUDE_CODE_OAUTH_TOKEN here, so "
+                        "this seat signs in from Claude's stored credentials")
+    assert lines[2] == ("       an agent file with inherit: [CLAUDE_CODE_OAUTH_TOKEN] "
+                        "carries the token; a tool shell may strip the variable from a "
+                        "seat that has it")
+    assert lines[3].startswith("usage: 5h 75%")
+    assert "follows the host" not in world.out.getvalue()
+    assert world.keychain.reads == 0
+    world.out = io.StringIO()
+    data = world.json()
+    assert data["host"]["name"] == "c"
+    assert data["seat"] == {"name": None, "via": st.VIA_NOT_FILE}
+    assert st.VIA_NOT_FILE == "no env token: not on the token file"
+    assert st.VIA_NOT_FILE not in (st.VIA_FOLLOWS, st.VIA_ENV, st.VIA_ENV_FILE)
+    world.assert_no_leak(capsys)
+
+
+def test_on_a_token_file_host_a_blank_env_token_is_not_on_the_file(world, capsys):
+    on_file(world, "c")
+    world.env = {"CLAUDE_CODE_OAUTH_TOKEN": "  "}
+    assert world.json()["seat"] == {"name": None, "via": st.VIA_NOT_FILE}
+    world.assert_no_leak(capsys)
+
+
+def test_not_on_the_file_holds_with_host_read_false_and_an_unknown_host(world, capsys):
+    """The seat's route follows the setting, not the host read: the ledger
+    names the host, and the seat is still not given that name."""
+    on_file(world, "c")
+    world.config(host_read=False)
+    world.ledger({"to": "a"})
+    world.env = {}
+    data = world.json()
+    assert data["host"]["name"] == "a"
+    assert data["seat"] == {"name": None, "via": st.VIA_NOT_FILE}
+    world.out = io.StringIO()
+    on_file(world, "stranger")
+    world.config(host_read=True)
+    assert world.json()["seat"] == {"name": None, "via": st.VIA_NOT_FILE}
+    world.assert_no_leak(capsys)
+
+
+def test_on_a_token_file_host_an_env_token_is_unchanged(world, capsys):
+    on_file(world, "c")
+    world.env = {"CLAUDE_CODE_OAUTH_TOKEN": world.tokens["c"]}
+    assert world.json()["seat"] == {"name": "c", "via": st.VIA_ENV_FILE}
+    world.out = io.StringIO()
+    assert world.status() == 0
+    assert world.out.getvalue().splitlines()[1] == \
+        "seat:  c (carol@example.com)  (env token: from launch; moves at restart)"
+    assert "NOT on the token file" not in world.out.getvalue()
+    world.assert_no_leak(capsys)
+
+
+def test_on_a_keychain_host_no_env_token_still_follows_the_host(world, capsys):
+    world.env = {}
+    assert world.status() == 0
+    lines = world.out.getvalue().splitlines()
+    assert lines[1] == "seat:  follows the host"
+    assert "token file" not in world.out.getvalue()
+    world.out = io.StringIO()
+    assert world.json()["seat"] == {"name": "c", "via": st.VIA_FOLLOWS}
+    world.assert_no_leak(capsys)
+
+
+def test_seat_of_names_no_one_on_a_token_file_host_with_no_token():
+    host = st.Who("c", "carol@example.com", st.VIA_TOKEN_FILE)
+    registry = reg.Registry()
+    assert st.seat_of(registry, host, {}, token_file=True) == \
+        st.Who(None, None, st.VIA_NOT_FILE)
+    assert st.seat_of(registry, host, {}, token_file=False) == \
+        st.Who("c", "carol@example.com", st.VIA_FOLLOWS)
+
+
+@pytest.mark.parametrize("case", ["not-private", "missing", "two-lines", "relative"])
+def test_a_refused_token_file_with_no_env_token_is_still_not_on_the_file(world, case,
+                                                                          capsys):
+    """The seat's route follows the setting, not the file read: a token file
+    that is refused leaves the host unreadable, and a seat with no env token
+    is still NOT on the file. It never falls back to `follows the host`."""
+    path = on_file(world, "c", 0o644 if case == "not-private" else 0o600)
+    if case == "missing":
+        path.unlink()
+    elif case == "two-lines":
+        path.write_text(world.tokens["c"] + "\n" + world.tokens["a"] + "\n")
+    elif case == "relative":
+        write_session_settings(world.home, {"account": {"token_file": "relative/oauth"}})
+    world.env = {}
+    assert world.status() == 0
+    lines = world.out.getvalue().splitlines()
+    assert lines[0].startswith("host:  token file: unreadable (")
+    assert lines[1].startswith("seat:  NOT on the token file: no CLAUDE_CODE_OAUTH_TOKEN")
+    assert "follows the host" not in world.out.getvalue()
+    world.out = io.StringIO()
+    assert world.json()["seat"] == {"name": None, "via": st.VIA_NOT_FILE}
+    assert world.keychain.reads == 0
+    world.assert_no_leak(capsys)
+
+
+def test_no_token_shape_reaches_any_output_with_no_env_token_on_a_token_file_host(
+        world, capsys):
+    on_file(world, "c")
+    world.env = {}
+    for run in (world.status, lambda: world.status(as_json=True), world.list):
+        assert run() == 0
+        no_shape_in(world, capsys)
+    world.assert_no_leak(capsys)
+
+
+def test_not_on_the_file_text_is_two_lines_under_the_seat_label(world):
+    """The second line is indented under the first line's text, past `seat:  `."""
+    first, second = st.NOT_FILE_TEXT.split("\n")
+    assert first.startswith("NOT on the token file")
+    assert second.startswith(" " * len("seat:  ")) and not second.startswith(" " * 8)
+    assert "inherit: [CLAUDE_CODE_OAUTH_TOKEN]" in second
+    assert "tool shell may strip" in second
+    on_file(world, "c")
+    world.env = {}
+    assert world.status() == 0
+    assert world.out.getvalue().splitlines()[1:3] == ["seat:  " + first, second]
+
+
+@pytest.mark.parametrize("value", ["", 42, ["/a"]])
+def test_any_refused_setting_value_with_no_env_token_is_not_on_the_file(world, value,
+                                                                         capsys):
+    write_session_settings(world.home, {"account": {"token_file": value}})
+    world.keychain = kc.FakeKeychain(None)
+    world.env = {}
+    assert world.status() == 0
+    lines = world.out.getvalue().splitlines()
+    assert lines[0].startswith("host:  token file: unreadable (")
+    assert lines[1].startswith("seat:  NOT on the token file")
+    world.out = io.StringIO()
+    assert world.json()["seat"] == {"name": None, "via": st.VIA_NOT_FILE}
+    assert world.keychain.reads == 0
+    world.assert_no_leak(capsys)
+
+
+def test_a_refused_setting_value_with_an_env_token_moves_at_restart(world, capsys):
+    """A set but refused value is still the token-file route: an env token
+    there came from the file at launch, so it is never `immune to use`."""
+    write_session_settings(world.home, {"account": {"token_file": "relative/oauth"}})
+    world.keychain = kc.FakeKeychain(None)
+    world.env = {"CLAUDE_CODE_OAUTH_TOKEN": world.tokens["a"]}
+    assert world.json()["seat"] == {"name": "a", "via": st.VIA_ENV_FILE}
+    world.assert_no_leak(capsys)
+
+
+def test_an_unreadable_settings_layer_is_reported_and_still_exit_0(world, capsys):
+    """A layer the reader refuses leaves the route unknown; on_token_file
+    answers False, as documented, and the host line carries the refusal.
+    The seat line on this path is not pinned here: the route is unknown."""
+    write_session_settings(world.home, "{not json")
+    world.env = {}
+    assert st.on_token_file({}, world.home) is False
+    assert world.status() == 0
+    assert world.out.getvalue().splitlines()[0].startswith(
+        "host:  token file: unreadable (settings:")
+    world.assert_no_leak(capsys)
+
+
+# --- the docs say what the code says ---------------------------------------------------------
+
+DOCS_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _flat(path: Path) -> str:
+    return " ".join(path.read_text().split())
+
+
+def test_the_account_doc_example_plan_carries_the_session_start_notice():
+    """docs/account.md's token-file plan block is the code's line, verbatim."""
+    from sessiontools.account import use as u
+
+    lines = (DOCS_ROOT / "docs" / "account.md").read_text().splitlines()
+    assert u.START_NOTICE in lines
+    assert "The `seats:`, `session start:` and `this seat` lines are printed again" in \
+        _flat(DOCS_ROOT / "docs" / "account.md")
+
+
+@pytest.mark.parametrize("doc", ["README.md", "docs/account.md"])
+def test_each_doc_says_a_session_start_seat_does_not_follow_the_file(doc):
+    text = _flat(DOCS_ROOT / doc)
+    assert "does not follow the file unless its agent file says `inherit: " \
+           "[CLAUDE_CODE_OAUTH_TOKEN]`" in text.replace("does NOT", "does not")
+
+
+def test_the_account_doc_names_the_new_seat_reading_and_its_json():
+    text = _flat(DOCS_ROOT / "docs" / "account.md")
+    assert "`status` says `NOT on the token file` for it, never `follows the host`" in text
+    assert f"`seat.via` is `{st.VIA_NOT_FILE}`, `seat.name` null" in text
+
+
+def test_the_account_doc_says_a_refused_setting_is_still_the_token_file_route():
+    text = _flat(DOCS_ROOT / "docs" / "account.md")
+    assert ("A host whose `account.token_file` is set to a value that is refused is "
+            "still a token-file host for this line") in text

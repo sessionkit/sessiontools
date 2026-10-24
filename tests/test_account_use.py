@@ -349,6 +349,25 @@ def test_without_yes_the_plan_is_shown_and_nothing_is_written(world, capsys):
     world.assert_no_leak(capsys)
 
 
+def test_the_keychain_plan_and_done_say_nothing_of_session_start(world, capsys):
+    """The `session start` notice is the token-file route's alone: on a
+    Keychain host every seat follows the one item, so neither the plan nor
+    the done report says a seat might not."""
+    assert world.run(yes=False) == 3
+    plan = world.out.getvalue()
+    assert "plan only: re-run with --yes" in plan
+    world.out = io.StringIO()
+    assert world.run() == 0
+    done = world.out.getvalue()
+    assert "done: the host is on c" in done
+    for out in (plan, done):
+        assert u.START_NOTICE not in out
+        assert "session start:" not in out
+        assert "inherit: [CLAUDE_CODE_OAUTH_TOKEN]" not in out
+        assert "2 seats move within ~50 s" in out
+    world.assert_no_leak(capsys)
+
+
 def test_a_failing_seat_scan_shows_unknown_cost_and_never_gates(world, capsys):
     def boom():
         raise RuntimeError(world.token)         # its text is never shown

@@ -92,6 +92,18 @@ def dead_pid() -> int:
 
 
 @pytest.fixture
+def live_pid():
+    """A second live pid: not this process, and never 1, whoever started pytest.
+    A child that sleeps until teardown, then is killed and reaped by its handle."""
+    p = subprocess.Popen(["/bin/sleep", "600"])
+    try:
+        yield p.pid
+    finally:
+        p.kill()
+        p.wait()
+
+
+@pytest.fixture
 def world(tmp_path):
     """A private sessions root, a sound file, a mouth dir."""
     root = tmp_path / "sessions"
@@ -378,13 +390,17 @@ def test_several_records_the_live_pid_wins_over_a_newer_dead_one(engine, world):
     assert a["record"] == str(live) and a["pid"] == os.getpid()
 
 
-def test_several_live_records_the_newest_mtime_wins(engine, world):
+@pytest.mark.parametrize("parent_is_init", [False, True], ids=["any-parent", "parent-pid-1"])
+def test_several_live_records_the_newest_mtime_wins(engine, world, live_pid, monkeypatch,
+                                                    parent_is_init):
+    # parent-pid-1: an orphaned run, whose parent is pid 1, a pid no seat may hold.
+    if parent_is_init:
+        monkeypatch.setattr(os, "getppid", lambda: 1)
     other = world["tmp"] / "other.wav"
     other.write_bytes(b"x")
     me = os.getpid()
-    parent = os.getppid()                              # alive: it is running pytest
     record(world, pid=me, delay=0, mtime=1_000_000)
-    newest = record(world, pid=parent, delay=0, file=other, mtime=2_000_000)
+    newest = record(world, pid=live_pid, delay=0, file=other, mtime=2_000_000)
     log = script(engine, world, [arm(0)], until=2)
     (a,) = evs(log, "armed")
     assert a["record"] == str(newest) and a["file"] == str(other)

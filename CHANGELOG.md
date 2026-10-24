@@ -9,6 +9,223 @@ stamps this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-24
+
+### Added
+
+- **A stop sound, played once when a seat's turn ends** (ST-236). A
+  `stop` block in the `sounds` settings, beside `busy`, names one file:
+  `{"enabled": true, "stop": {"file": "~/sounds/done.aiff"}}`. The Stop
+  hook (`busy-sound stop`) clears the slots as before, then queues that
+  file once through the mouth (`mouth play FILE`), so it lands after any
+  line still speaking. `afplay` plays it instead only when the mouth is
+  absent, exits non-zero or cannot be run; a mouth that times out or is
+  killed by a signal is not followed by `afplay`, so it never plays twice. The play is detached and
+  the hook never waits. Unset, a bad value or a subagent's Stop is
+  silent, and `SESSIONTOOLS_HOOK_BUSY=off` silences it too. An OFF stamp,
+  `sounds/stop/off`, written by the first arm or the first Stop, keeps a
+  seat without it from starting python at Stop.
+
+- **The clock line: a PostToolBatch hook that says the time and the
+  context on every tool batch** (ST-237). `hooks/clock-hook` says
+  `[clock] 12:34 UTC | ctx 182K/1.00M (18%)`, from `window.scan` and
+  `window.resolve_window`, and a second line once the count reaches
+  `SESSION_CLOCK_WARN_AT` (tokens, or a percent of the window). Off by
+  default: `SESSIONTOOLS_HOOK_CLOCK=on` switches it on, and off starts no
+  python. An unknown window or no reading is said as `?`, never guessed.
+  No mail count. A subagent's batch is silent, and any failure exits 0
+  with no output. It runs beside the settle alert and shares no state
+  with it. See `docs/clock-line-hook.md`.
+
+- **`session default-model`: pin the model every new `claude` starts on**
+  (ST-234). Off until the `session` setting `model.default` names a
+  model; unset, it reads and writes nothing. Set, `enforce` puts the
+  top-level `"model"` in Claude Code's settings.json back when something
+  rewrote it or removed it: a raw-text edit of that one member, the old
+  file backed up first, the new one read back, every other byte kept.
+  `show` says whether it would; `list` names the models a pin may use,
+  the ones this release knows, not a live check of the account. Fable is
+  never pinned. `watch` enforces in the foreground on every change, and
+  `unit launchd|systemd` prints a launchd agent or systemd units that
+  do it; nothing installs or loads one. Run one pinner: unload any
+  other first.
+
+- **The session-info hooks** (ST-238). Two SessionStart plugin hooks, both
+  off by default: `SESSIONTOOLS_HOOK_TITLE=on` sets the session title to
+  the first 8 characters of the session id, never over a title the session
+  already has, and `SESSIONTOOLS_HOOK_SESSION_INFO=on` adds the session
+  id, working directory, source and transcript path to the context. On
+  startup the block leaves out a session id that `session start` already
+  injected: `session start` exports `SESSIONTOOLS_LAUNCH_INFO` with the id
+  its launch-info carries. `docs/session-info-hook.md` has the details.
+
+- **`session settings` reads `phone`.** The phone tool ships in the `phone`
+  package, so its host layer is `~/.sessionkit/phone/settings/phone.json`
+  and its `phone.d/` drop-ins. `host_dir("phone")` returns that folder
+  where it raised `SettingsError`, and `session settings` lists `phone`
+  once a file is there. No variable names its file.
+
+- **The README says what an install changes.** A new section, "What an
+  install changes", lists each place sessiontools writes on a Mac: the
+  `session` command on the PATH and its uv environment, the folders each
+  verb makes, the two launchd services and their plists, what the Claude
+  Code plugin adds to Claude Code's settings and plugin folders, the hooks
+  it brings, the status line's settings files, and the Keychain item or
+  token file `session account use` replaces. Each line names what puts it
+  there and what removes it. The Uninstall section now runs in order
+  (services, plugin, command) and says what stays behind.
+
+- **"What an install changes" lists three more things.** uv's own cache,
+  which the install fills: it is uv's, not sessiontools', and `uv cache
+  clean sessiontools` drops this package's entries. The
+  `settings/<tool>.d/50-env.json` drop-ins `session start` writes in a
+  session folder for each tool whose settings name a variable that is
+  set. And both services' `on` and `off`, which also retire a job an
+  older release set up under its old label.
+
+- **The docs say who needs `inherit: [CLAUDE_CODE_OAUTH_TOKEN]`.** A
+  login by token, `CLAUDE_CODE_OAUTH_TOKEN` in the launcher's
+  environment, gets sessions from `session start` that start without it,
+  since the launcher drops credentials by default. "Credentials are never
+  handed down" in the launcher doc now says who is affected (a `/login`
+  login is not), what happens without the header, the `environment:`
+  lines that carry it, and why the default drops it. The README's
+  account section and the token-file hosts section point to it. The
+  default is unchanged.
+
+### Changed
+
+- **`docs/session.md` is the `session` command's page** (it was
+  `docs/session-command-verbs.md`): what the command does, every verb with
+  its one-line purpose, then each verb's form with one example. The kit
+  imports it as its `session` page. The links to the old name point here.
+- **The synthetic dates fall on one of two days, 2030-06-09 and
+  2030-12-08**, in the docs, the help text, the code comments and the
+  tests. Where one came before another, the earlier one reads 2030-06-09
+  and the later one 2030-12-08, so the order holds. Clock times are
+  unchanged, and release headings keep their real dates. In the notes of
+  earlier releases, three sentences named a synthetic date for when
+  something happened; the date is dropped from each, and nothing else in
+  those notes changed.
+
+### Fixed
+
+- **`session account status` no longer says a seat with no env token
+  follows a token-file host** (ST-235). Such a seat signs in from Claude's
+  stored credentials, not the file: `session start` strips
+  `CLAUDE_CODE_OAUTH_TOKEN` unless the agent file inherits it. `status`
+  now says `NOT on the token file`, names `inherit:
+  [CLAUDE_CODE_OAUTH_TOKEN]` as the way to carry the token, and notes
+  that a tool shell may strip the variable from a seat that has it.
+  `--json` gives `seat.via` `no env token: not on the token file` and
+  `seat.name` null, never the host's name. On a token-file host `use`
+  says in its plan and its report that `session start` seats do not
+  follow the file. A set `account.token_file` whose value is refused
+  still counts as the token-file route here. The Keychain route is
+  unchanged.
+
+- **The `session start` package docstring says what `--converse` does.**
+  Its usage block still read "speak the first response", an order the flag
+  stopped giving when its help and the launcher doc were reworded. It now
+  reads "tell the agent this session can speak", like the help, and a test
+  holds all three to that wording.
+
+- **The settle alert counts the first tool turn.** PostToolBatch can start
+  the hook before Claude Code has written the batch's own assistant row, so
+  the hook read too early: the first tool turn had no count and was silent,
+  and later turns counted the turn before. The hook now waits for the row
+  that carries this batch's tool calls, at most 1 s, before it counts. A
+  payload that names no tool call is not waited for, and a row that never
+  lands is counted as the disk has it, as before.
+
+- **`session settings` reads the mouth's file from `$MOUTH_SETTINGS`.**
+  The mouth reads `$MOUTH_SETTINGS` first and keeps the old
+  `$VOICEMODE_MOUTH_SETTINGS` as an alias. sessiontools read only the old
+  name, so a host that set the new one had its mouth host layer and schema
+  read from the default folder instead of the file the mouth reads. Now
+  both are read in the mouth's order. The first name that is set wins,
+  even when it is set to an empty string. An empty value means no
+  override, so the default folder is read and the old name is ignored.
+  `SETTINGS_FILE_ENV` maps each tool to a tuple of names, current first.
+  `settings_file_variable(tool)` returns the name that was read, and the
+  notes and the "not moved" line name that variable. `$EARS_CONF` has no
+  old name and is read as before.
+- **The docs' shell lines paste safely into zsh.** zsh leaves
+  `interactivecomments` off at the prompt, so a pasted line with a
+  trailing `# comment` passed the comment to the command as arguments
+  (`session context --peak     # the high-water mark instead of now` failed
+  with `unrecognized arguments`), and a comment on a line of its own ran as
+  a command named `#`. What each comment said now lives in the prose: a
+  menu of commands is a list, each command with what it does, and the
+  completion lines are one block per shell. `AGENTS.md` now says that a
+  bare `make` lists the targets, as the Makefile does, not that it checks.
+  A test fails when any tracked Markdown file's bash, sh, zsh, shell or
+  console block holds a `#` comment on a command line; a `#` in quotes, in
+  a word or in a heredoc body is not one.
+- **The operator's derived address names this host, never a reverse-DNS
+  name.** With no `operator.address`, `session operator` and the Fable
+  gate's refusal derive `<operator.mailbox>@<host>`. The host came from
+  `socket.getfqdn()`, which on a host whose name has no forward DNS record
+  returns the loopback's PTR name (`1.0...0.ip6.arpa`), and the local mail
+  drop refused every message to that address as not on this host. The host
+  part now follows the drop's rule, in one helper both sites share
+  (`sessiontools.operator.host_part`): the FQDN when it is a name under the
+  short host (a tailnet name stays as it was), else the short host, taken
+  in the drop's order (`SESSIONMAIL_HOST`, `SESSION_MAIL_HOST`, the mail
+  tool's `host` setting, the hostname's first label). A `*.arpa` name is
+  never used. A host with no domain now derives `<mailbox>@<short host>`
+  where it derived nothing: the drop delivers to the bare short host, so
+  that address is real. A test copies the drop's on-this-host predicate
+  and checks the helper against it on a table of names.
+- **`session context` and `session list` know the 5.5 windows.**
+  `claude-sonnet-5-5` and `claude-haiku-5-5` were missing from the
+  window table, so `session context` said "no known window" and
+  `session list` showed `?` for a seat on either one. Both now resolve
+  to 1M, the figure the Anthropic model catalog gives; the catalog
+  confirms the 1M already mapped for `claude-opus-5-5`. There is still
+  no family or prefix rule for an id the table does not name: one family
+  can change its window between versions (`claude-haiku-4-5` is 200K,
+  `claude-haiku-5-5` is 1M), so such a rule would guess, and a wrong
+  percentage is worse than `?`. The status line's own
+  `context_window_size` is not used as a fallback either. It never
+  reaches the transcript these commands read; it lands on disk only in
+  the status line's optional log, which is written only when its config
+  directory exists, so wiring it in would add a new data path that is
+  absent on most hosts. An id the table does not name stays `?` until it
+  gets a row.
+- **`session start --idle` with no agent file injects nothing.** An idle
+  launch opened with a line telling the agent to boot from its agent file
+  and run its startup manifest, even when no agent file was in play (no
+  agent named, or `-`), where the line means nothing. That line now goes
+  only to an agent-file launch, unchanged. A bare idle launch carries the
+  converse signal and the user's words when given, and otherwise no first
+  message at all. Idle still runs no context generators either way. The
+  `--idle` help and `docs/session-start-launcher.md` now say so. Tests pin
+  both cases, in the context builder and end to end.
+- **`session start --converse` with no agent file gets a neutral voice
+  line.** The voice line a converse launch injects was written for agent
+  files: it pointed at wording only an agent file carries. A launch with no
+  agent file (no agent named, or `-`) got it too, idle or not, and on a
+  resume. Such a launch is now told only that the session can speak,
+  through the VoiceMode converse tool. An agent-file launch keeps its line
+  unchanged. Tests pin both cases for idle, non-idle and resume, in the
+  context builder and through the planner. The `--converse` help and
+  `docs/session-start-launcher.md` now say the session can speak, a
+  capability rather than an order to speak first.
+- **The busy sound finds the mouth where sessionvoice keeps it.** The
+  speech guard looked for the mouth by voicemode's old rule, so on a fresh
+  sessionvoice install it watched `~/.voicemode/mouth`, where no mouth
+  writes, and the busy sound could play over speech. `busy.mouth_dir()`
+  now follows sessionvoice's rule, copied, not imported: `$MOUTH_DIR`
+  (else the old `$VOICEMODE_MOUTH_DIR`), else `<home>/mouth`, where the
+  home is `$SESSIONVOICE_HOME` (else the old `$VOICEMODE_BASE_DIR`), else
+  `~/.sessionvoice` if it holds a heard log, else `~/.voicemode` if it
+  holds one, else `~/.sessionvoice`. It only looks: nothing is written
+  under any home. A table test holds it to a copy of sessionvoice's own
+  resolver under fake homes.
+
+## [0.2.0] - 2026-10-20
+
 ### Added
 
 - **`session completion bash|zsh`: shell completion for `session`.** It
@@ -721,7 +938,7 @@ stamps this file.
 ## [0.1.0] - 2026-10-10
 
 The session-settings work that landed between `v0.0.4` and `v0.1.0` (Sat 3
-to Sun 4 Aug) had no entry here. ST-138 (2030-08-14) added it from `git log
+to Sun 4 Aug) had no entry here. ST-138 added it from `git log
 v0.0.4..v0.1.0`. From the same log it added the licence, the scrub to
 neutral names and `make scan`. Those entries are marked *(from git log,
 ST-138)*. The commits that only touched `openspec/` (the paper trail, not
@@ -867,7 +1084,7 @@ the package) have none, and neither does a lint-only commit.
 
 Tag `v0.0.4` was cut without a section here: its changelog still had
 everything under `[Unreleased]`, and `0.1.0` took it all. This section was
-put back by ST-138 (2030-08-14). Its body is that `[Unreleased]` block as
+put back by ST-138. Its body is that `[Unreleased]` block as
 `git show v0.0.4:CHANGELOG.md` has it, with one later lint fix. The entries
 marked *(from git log, ST-138)* were added from `git log v0.0.3..v0.0.4`,
 for commits that had no entry anywhere, and one note is marked *(note:
@@ -1155,7 +1372,7 @@ ST-138)*.
 
 ### Added
 
-- sessiontools, born Thu 2030-07-18 with `new repo` and `new
+- sessiontools, born with `new repo` and `new
   package`.
 - The Claude Code driver: `sessions()`, `find()`, `idle_seconds()` and
   `Session`, reading the harness's own `~/.claude/sessions/<pid>.json`

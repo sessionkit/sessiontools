@@ -76,12 +76,15 @@ def build_parser() -> argparse.ArgumentParser:
              "generators do run: their output is the command)")
     parser.add_argument(
         "--idle", action="store_true",
-        help="inject no context: the agent boots self-directed and waits "
-             "(front matter: start: idle: true)")
+        help="run no context generators: the session boots self-directed "
+             "and waits; with an agent file, the first message is one line "
+             "telling the agent to boot from it, and with none, nothing is "
+             "injected (front matter: start: idle: true)")
     parser.add_argument(
         "--converse", action="store_true",
-        help="voice mode: instruct the agent to SPEAK its first response "
-             "(front matter: start: converse: true)")
+        help="voice mode: tell the agent this session can speak; a "
+             "capability, not an order to speak first (front matter: "
+             "start: converse: true)")
     parser.add_argument(
         "--keyed", action="store_true",
         help="mint a fresh Ed25519 session key and derive the session ID "

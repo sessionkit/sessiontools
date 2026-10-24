@@ -1,7 +1,7 @@
 """`session get`: read one property of a live seat.
 
 The properties and output are the session repo's `session-get` (retired
-2030-07-29). `model` reads the transcript (`sessiontools.window`: the last
+2030-06-09). `model` reads the transcript (`sessiontools.window`: the last
 real model id, never `<synthetic>`); the rest come from `session list`.
 Exit codes: 0 found; 1 unknown PROP; 2 no such seat, or no value for PROP.
 (argparse usage errors are 2.) A SEAT is matched by the `session send`

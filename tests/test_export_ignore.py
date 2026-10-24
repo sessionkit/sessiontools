@@ -1,6 +1,6 @@
 """The release tree leaves out the dev diary: `.gitattributes` export-ignore.
 
-D7, ruled (a) on 15 Aug 2030: the diary stays in tree and history and is
+D7, ruled (a) on 8 Dec 2030: the diary stays in tree and history and is
 export-ignored, and the public repo is built from `git archive` (SK-84).
 ST-149 carries sessiontools' share of SK-81's list: `/openspec` with
 `/openspec/**`, and the plugin-root `/CLAUDE.md`.

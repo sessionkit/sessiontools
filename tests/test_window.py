@@ -75,12 +75,25 @@ def test_windows_by_model_with_dated_snapshots():
     assert c.resolve_window("claude-haiku-4-5-20251001", 10, env={}) == 200_000
 
 
+@pytest.mark.parametrize("model", ["claude-sonnet-5-5", "claude-haiku-5-5"])
+def test_the_5_5_ids_have_their_catalog_window(model):
+    assert c.resolve_window(model, 10, env={}) == 1_000_000
+
+
+def test_a_family_does_not_carry_its_window_across_versions():
+    # The reason there is no prefix rule: one family, two windows.
+    assert c.WINDOWS["claude-haiku-4-5"] == 200_000
+    assert c.WINDOWS["claude-haiku-5-5"] == 1_000_000
+
+
 @pytest.mark.parametrize("model, used, env", [
     (None, 10, {}),                                   # no real model
     ("claude-opus-4-5", 10, {}),                      # legacy: publishes no window
     (OPUS, 10, {"CONTEXT_MAX": "lots"}),              # asserted but unreadable
     (OPUS, 10, {"CONTEXT_MAX": "0"}),
     ("claude-haiku-4-5", 250_000, {}),                # used above the window
+    ("claude-sonnet-5-6", 10, {}),                    # a known family is not a window
+    ("claude-haiku-5", 10, {}),
 ])
 def test_a_window_is_never_guessed(model, used, env):
     assert c.resolve_window(model, used, env=env) is None

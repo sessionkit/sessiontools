@@ -1,5 +1,5 @@
 """Shared helpers for the `session start` tests - ported from the old suite
-(session-20300729 `skills/session/scripts/test_session_start.py`), which
+(session-20300609 `skills/session/scripts/test_session_start.py`), which
 drove the launcher in-process and through a subprocess with a stub vendor.
 
 NEVER call `main()` in-process WITHOUT --dry-run and with a real agent: the

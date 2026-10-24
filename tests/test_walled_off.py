@@ -4,14 +4,14 @@ A wall no test checks is a wall a refactor removes. Three parts are pinned
 here: the environment a test sees, the dead key-init path a launch under
 test reaches (in-process and as a subprocess), and the teardown's kill,
 which must hit the private servers and nothing a test pointed `$TMUX` at
-(review of R8 slice 2, 2030-07-30: the old `tmux kill-server`
+(review of R8 slice 2, 2030-12-08: the old `tmux kill-server`
 passed os.environ through, and tmux follows `$TMUX` first).
 
 The kill tests start their servers the way the code under test does - no
 `-S`, just `TMUX_TMPDIR` - so the sockets sit where real ones do,
 `<dir>/tmux-<uid>/<name>`. A socket at the top of the folder let a kill
 that skipped `default`, didn't recurse, or stopped at the first socket
-pass (review of the slice-2 LOWs, 2030-07-30).
+pass (review of the slice-2 LOWs, 2030-12-08).
 """
 
 from __future__ import annotations

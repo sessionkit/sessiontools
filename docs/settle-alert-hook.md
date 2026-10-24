@@ -21,6 +21,15 @@ You're past 250K. At a good stopping point, settle: save what matters, then hand
   same number `session context` prints, read with
   `sessiontools.window.scan` on the transcript the hook payload names.
   It took 0.08 s on a 21.6 MB transcript.
+- **The count is this batch's own.** The hook can start before Claude
+  Code has written the batch's own assistant row, the one with its
+  `tool_use` block and its usage. Read at once, the count would be the
+  previous turn's, and the first tool turn would have none. So when the
+  payload names its tool calls (`tool_calls[].tool_use_id`), the hook
+  waits for that row: it reads the transcript's new tail every 10 ms and
+  stops when the row is there, tens of milliseconds as measured. It waits
+  1 s at most, then counts what is on disk. A payload with no tool calls
+  is not waited for.
 - It fires on **turns that call a tool**. PostToolBatch runs once per
   model response that made tool calls, so a reply with no tool call is
   not told. The next batch is.

@@ -3,7 +3,7 @@
 A vendor is a row in VENDORS, never a branch on its name; adding one is a
 table edit. The port ships the claude row only - no agent file declares
 `start: vendor:`, `codex:`, `pi:` or a `config:` map (17 MDs scanned,
-2030-07-29) - but keeps the table's whole shape, so the codex and
+2030-06-09) - but keeps the table's whole shape, so the codex and
 pi rows can come back as ten lines each.
 
 Every entry carries the same fields; `None` means the vendor has no such
@@ -224,7 +224,7 @@ def guard_computed_doors(vendor: str, launcher_args: list[str],
     claude keeps the LAST `--append-system-prompt-file` and supports only
     one, so a declared one would silently drop every injected context block
     while the launch reports success. REFUSE, do not pick a winner
-    (2030-06-06): front matter and CLI passthrough alike. Only doors
+    (2030-06-09): front matter and CLI passthrough alike. Only doors
     the launcher actually computed for this launch are guarded.
 
     One door is relaxed upstream, never here: a CLI passthrough `--settings`

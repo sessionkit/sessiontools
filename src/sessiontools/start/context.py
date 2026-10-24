@@ -59,8 +59,9 @@ CONTEXT_TIMEOUT_S = 60
 
 CONTEXT_MARKER = "<!-- source: %s -->"
 
-# Idle's entire injection. Wording kept from the old `--slim`: existing
-# agent manifests are written against it.
+# Idle's boot line, injected only when an agent file is in play. Wording
+# kept from the old `--slim`: existing agent manifests are written against
+# it. A bare launch has no manifest to boot from, so it gets no boot line.
 IDLE_BOOT_TRIGGER = (
     "Boot from your agent MD now: run your startup manifest (self-gather "
     "role, task context, date, machine -- nothing is injected)."
@@ -76,6 +77,14 @@ CONVERSE_SIGNAL = (
     "ears (a heard.state in its home) speaks through the mouth (`mouth "
     "say`), so Talk and the other seats hear it; any other seat uses the "
     "VoiceMode converse tool."
+)
+
+# The same launch-only fact for a launch with no agent file. CONVERSE_SIGNAL
+# is written for agent files (it points at their wording); a bare launch has
+# none, so it is told the capability and the tool, nothing more.
+BARE_CONVERSE_SIGNAL = (
+    "Voice: AVAILABLE -- this session can speak, through the VoiceMode "
+    "converse tool."
 )
 
 
@@ -231,23 +240,35 @@ def render_context(results: list[ContextResult]) -> str:
     return "\n\n".join(blocks) + "\n" if blocks else ""
 
 
+def converse_signal(agent_file: bool) -> str:
+    """The voice line a converse launch injects: CONVERSE_SIGNAL when an
+    agent file is in play, BARE_CONVERSE_SIGNAL when none is."""
+    return CONVERSE_SIGNAL if agent_file else BARE_CONVERSE_SIGNAL
+
+
 def build_injected_context(start: object, idle: bool = False, converse: bool = False,
                            message: str = "", builtins: dict | None = None,
                            env: dict | None = None, cwd: str | None = None,
                            timeout: int = CONTEXT_TIMEOUT_S,
                            announce: Callable[[str], None] | None = announce_to_stderr,
+                           agent_file: bool = False,
                            ) -> InjectedContext:
     """A launch's injected context from its parsed `start:` block. `idle`
     and `converse` are the EFFECTIVE values (CLI or front matter). The first
     message is the briefing, then the converse signal, then the user's own
-    words - last, because they are the request the session serves."""
+    words - last, because they are the request the session serves.
+
+    `agent_file` says an agent file is in play. Only then does an idle
+    launch open with IDLE_BOOT_TRIGGER; a bare idle launch carries just the
+    converse signal and the user's words, or no first message at all. It
+    also picks the converse signal, idle or not: see converse_signal."""
     if idle:
-        parts = [IDLE_BOOT_TRIGGER]
+        parts = [IDLE_BOOT_TRIGGER] if agent_file else []
         if converse:
-            parts.append(CONVERSE_SIGNAL)
+            parts.append(converse_signal(agent_file))
         if message:
             parts.append(message)
-        return InjectedContext("", "\n\n".join(parts) + "\n", [])
+        return InjectedContext("", ("\n\n".join(parts) + "\n") if parts else "", [])
     runner = {"builtins": builtins, "env": env, "cwd": cwd, "timeout": timeout,
               "announce": announce}
     system_results = run_context_entries(start.context.system_prompt, **runner)
@@ -257,7 +278,7 @@ def build_injected_context(start: object, idle: bool = False, converse: bool = F
     if briefing:
         parts.append(briefing)
     if converse:
-        parts.append(CONVERSE_SIGNAL)
+        parts.append(converse_signal(agent_file))
     if message:
         parts.append(message)
     return InjectedContext(

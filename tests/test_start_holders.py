@@ -1,7 +1,7 @@
 """The front door (SESH-497, ST-46 do-001): `session start <agent>` refuses a
 hand launch of an agent a live Claude Code session already holds.
 
-Re-measured on master b216a19 first (2030-08-02): a live sidecar
+Re-measured on master b216a19 first (2030-12-08): a live sidecar
 for `scout` beside `session start scout hello` - exit 0, the stub vendor
 ran. Every e2e test below that expects a refusal failed there.
 

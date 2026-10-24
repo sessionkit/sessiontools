@@ -55,6 +55,7 @@ says which package each command belongs to:
 | `mail` | `mail` | `~/.sessionkit/mail/settings/` |
 | `ears`, `mouth` | `voice` | `~/.sessionkit/voice/settings/` |
 | `view` | `view` | `~/.sessionkit/view/settings/` |
+| `phone` | `phone` | `~/.sessionkit/phone/settings/` |
 
 - **There is no other host folder.** No environment variable or flag
   moves it, and no older folder is read as a fallback.
@@ -94,10 +95,10 @@ the code, reader by reader.
 
 | Keys | Layers read today | Read by |
 | --- | --- | --- |
-| `session`: `operator.*`, `list.max_age`, `pane_state.*`, `account.*` | template and host only | `session operator`, `session list`, `session pane-state`, `session account` |
+| `session`: `operator.*`, `list.max_age`, `pane_state.*`, `account.*`, `model.default` | template and host only | `session operator`, `session list`, `session pane-state`, `session account`, `session default-model` |
 | `session`: `context.near_pct` | all five | `session context` |
 | `session`: `home`, `home_dir` | all five (session only once its id is known at launch) | `session start` |
-| `sounds`: every key | all five | the busy sound hook, `session sound` |
+| `sounds`: every key | all five | the busy sound hook (the busy sound and the stop sound), `session sound` |
 | `claude-code`: every key | all five (session only once its id is known at launch) | `session start` |
 | `claude-code`: `statusLine` | template and host only | `session statusline install` and `check` |
 
@@ -118,7 +119,7 @@ drop-in in `~/.sessionkit/tools/settings/session.d/`.
 | Key | Type | Default | What it does | Layers read today |
 | --- | --- | --- | --- | --- |
 | `operator.address` | string | none | The operator's full mail address, used as written. `AGENT_OPERATOR_ADDR` wins over it, and grants no privilege. | template and host |
-| `operator.mailbox` | string | none | The operator's local mail box name. With no `address`, the address is `<mailbox>@<this host's full name>`, when that box exists under `~/.mail/agents` (`SESSION_MAIL_ROOT` overrides) and the name has a dot. | template and host |
+| `operator.mailbox` | string | none | The operator's local mail box name. With no `address`, the address is `<mailbox>@<this host>`, when that box exists under `~/.mail/agents` (`SESSION_MAIL_ROOT` overrides). `<this host>` is the full name when it is under the short host, else the short host; never a reverse-DNS name. | template and host |
 | `operator.privileged` | list of strings | empty: the operator alone | Seat names or addresses that may act as administrators. The operator is always one. A list that is not a list is ignored. | template and host |
 | `list.max_age` | number (seconds) | `2` | How old a `session list` snapshot may be and still be served. `0` turns the cache off. `SESSION_LIST_MAX_AGE` wins over it. | template and host |
 | `pane_state.listeners` | list of strings | `["pager listen"]` | Commands that do not count as work, so a seat running only these reads FREE. An empty list: every tool shell is work. | template and host |
@@ -127,6 +128,7 @@ drop-in in `~/.sessionkit/tools/settings/session.d/`.
 | `account.token_file` | string (a path) | none | On a host that signs in from a token file, the file `session account use` swaps. Unset, the route is the Keychain. | template and host |
 | `account.limits_file` | string (a path) | none | The limits file `session account status` reads when no usage exporter answers. | template and host |
 | `account.passage_prefix` | string (a folder) | `claude/oauth-tokens` | The passage folder `session account new` saves a token under. | template and host |
+| `model.default` | string, a model `session default-model list` names | none: nothing is pinned | The model every new `claude` starts on. When set, `session default-model enforce` puts it back as the top-level `"model"` in Claude Code's settings.json if something rewrote it. Unset, or anything but a non-empty string, does nothing at all. A value off the list, or any Fable model, is refused and nothing is written ([the default model][default-model]). | template and host |
 | `home` | boolean | `false` | Give the session a home directory, exported to it as `SESSION_HOME`. Where depends on the layer that set it: the agent's, the seat's, or the session's own. | all five |
 | `home_dir` | string (a path) | none | The home directory itself. Setting it turns `home` on. `home: false` lower down turns it off again. | all five |
 
@@ -156,6 +158,7 @@ checks the keys against it.
 | `busy.auto_arm` | boolean | off | The batch trigger's switch: arm on every tool batch. Only `true` arms it. | all five |
 | `busy.file` | string (a path) | none | The sound file, absolute or under `~/`. Missing or unreadable is silent. | all five |
 | `busy.delay` | number (seconds), 0 or more | `batch`: none, so silent; `landed`, `finished`: `0` | Seconds before the sound starts. | all five |
+| `stop.file` | string (a path) | none | The stop sound: played once when the seat's turn ends, queued through the mouth (`afplay` when the mouth is absent or refuses). Absolute or under `~/`. Missing, unreadable or relative is silent. | all five |
 
 - **Unset is silent.** A seat with no `sounds` keys plays nothing.
 - No `sounds` key is read from the environment.
@@ -201,9 +204,10 @@ settings for you to set:
 
 ## Other tools
 
-`session settings` also reads `mail`, `ears` and `mouth`. Their keys
-belong to sessionmail and sessionvoice, and their own settings pages list
-them. The cascade itself is written down as a specification, the session
+`session settings` also reads `mail`, `ears`, `mouth` and `phone`.
+Their keys belong to sessionmail, sessionvoice and sessionphone, and
+their own settings pages list them. The cascade itself is written
+down as a specification, the session
 settings specification. Where the family's files live and how the layers
 stack: the Session Kit settings guide,
 [sessionkit's docs/settings.md][kit-settings].
@@ -213,3 +217,4 @@ stack: the Session Kit settings guide,
 [files]: #the-files
 [layers]: #who-reads-which-layers
 [written]: #written-for-you
+[default-model]: default-model.md

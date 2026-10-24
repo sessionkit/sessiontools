@@ -110,6 +110,18 @@ def dead_port() -> int:
     return port
 
 
+@pytest.fixture
+def live_pid():
+    """A second live pid: not this process, and never 1, whoever started pytest.
+    A child that sleeps until teardown, then is killed and reaped by its handle."""
+    p = subprocess.Popen(["/bin/sleep", "600"])
+    try:
+        yield p.pid
+    finally:
+        p.kill()
+        p.wait()
+
+
 def decode(data: bytes) -> tuple[str, str, float | None]:
     """(event, sid, t) of one /sound/event datagram, checking its framing."""
     def string(off):
@@ -407,6 +419,9 @@ def rig(tmp_path, monkeypatch, fake):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("SESSIONS_DIR", str(r.sessions))
     monkeypatch.setenv("VOICEMODE_MOUTH_DIR", str(r.mouth))
+    # An ambient MOUTH_DIR or SESSIONVOICE_HOME would win over the rig's dir.
+    for name in ("MOUTH_DIR", "SESSIONVOICE_HOME"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("PATH", f"{r.bin}:/usr/bin:/bin")
     monkeypatch.setenv(engine_client.PORT_ENV, str(fake.port))
     yield r
@@ -554,6 +569,38 @@ def test_after_the_first_arm_the_engine_path_starts_no_python(shim_rig, fake):
     assert shim_rig.players() == []
 
 
+def test_an_engine_seat_with_a_stop_sound_plays_it_and_the_record_survives(shim_rig, fake):
+    """ST-236 (design Test 11): on an engine seat the stop sound plays through
+    the mouth at Stop, the stop path never touches `sounds/busy/` (the engine's
+    record survives), and nothing is sent beyond the shim's own `stop`."""
+    path = shim_rig.settings()
+    done = shim_rig.root / "done.aiff"
+    done.write_text("FORM")
+    data = json.loads(path.read_text())
+    data["stop"] = {"file": str(done)}
+    stat_before = path.stat()
+    path.write_text(json.dumps(data))
+    os.utime(path, (stat_before.st_atime, stat_before.st_mtime))   # still old
+    log = shim_rig.root / "mouth.log"
+    mouth = shim_rig.bin / "mouth"
+    mouth.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexit 0\n')
+    mouth.chmod(0o755)
+    shim_rig.shim("arm")
+    assert shim_rig.python_runs() == 1 and shim_rig.record().exists()
+    assert not (shim_rig.session / "sounds" / "stop" / "off").exists()
+    assert events(fake) == [("arm", SID)]
+    record = shim_rig.record().read_bytes()
+    shim_rig.shim("stop", {"hook_event_name": "Stop"})
+    assert shim_rig.python_runs() == 2                    # ON: python at Stop
+    assert events(fake) == [("stop", SID)]
+    assert shim_rig.record().read_bytes() == record
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not log.exists():
+        time.sleep(0.02)
+    assert log.read_text().splitlines() == [f"play {done}"]
+    assert shim_rig.players() == []                       # no afplay
+
+
 def test_the_shim_sends_the_exact_76_byte_datagram(shim_rig, fake):
     shim_rig.settings()
     shim_rig.shim("arm")
@@ -608,9 +655,14 @@ def test_turn_mark_on_stop_still_sets_the_mark_and_sends_stop(shim_rig, fake):
     assert events(fake) == [("stop", SID)]
 
 
-def test_a_resumed_seat_a_new_claude_pid_re_resolves_its_own_record(shim_rig, fake):
+@pytest.mark.parametrize("parent_is_init", [False, True], ids=["any-parent", "parent-pid-1"])
+def test_a_resumed_seat_a_new_claude_pid_re_resolves_its_own_record(shim_rig, fake, live_pid,
+                                                                     monkeypatch, parent_is_init):
+    # parent-pid-1: an orphaned run, whose parent is pid 1, a pid no seat may hold.
+    if parent_is_init:
+        monkeypatch.setattr(os, "getppid", lambda: 1)
     shim_rig.settings()
-    first, resumed = os.getpid(), os.getppid()        # both alive
+    first, resumed = os.getpid(), live_pid             # both alive, both > 1
     shim_rig.shim("arm", CLAUDE_PID=str(first))
     assert shim_rig.record(first).exists()
     shim_rig.shim("arm", CLAUDE_PID=str(resumed))
@@ -661,13 +713,21 @@ def test_a_stale_record_beside_an_armed_afplay_slot_end_reaches_both(shim_rig, f
 
 
 def test_without_claude_pid_stop_and_clear_glob_for_a_record(shim_rig, fake):
+    """No arm came first (the record is written by hand), so the first Stop
+    starts python once to stamp the stop sound's `off` (it has no stamp yet);
+    the second Stop starts none. The datagrams are as before."""
     shim_rig.busy.mkdir(parents=True)
     shim_rig.record(424242).write_text("{}")
     shim_rig.shim("stop", CLAUDE_PID=None)
     shim_rig.shim("clear", CLAUDE_PID=None)
     shim_rig.shim("end", CLAUDE_PID="")
     assert [e for e, _ in events(fake)] == ["stop", "clear", "end"]
-    assert shim_rig.python_runs() == 0
+    assert shim_rig.python_runs() == 1
+    assert (shim_rig.session / "sounds" / "stop" / "off").exists()
+    shim_rig.shim("stop", CLAUDE_PID=None)
+    assert [e for e, _ in events(fake)] == ["stop"]
+    assert shim_rig.python_runs() == 1
+    assert busy.records(shim_rig.busy) != []
 
 
 def test_with_claude_pid_a_record_for_another_pid_is_not_this_seats(shim_rig, fake):

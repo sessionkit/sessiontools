@@ -1065,7 +1065,7 @@ again with no work since keeps it, so parking buys no time. Nothing here
 computes a deadline, kills, mails or writes config.
 
 --keep-until T --why R records a request to be kept until T, an absolute
-ISO 8601 time with an offset (2030-01-02T17:00:00+11:00, or Z). Nothing
+ISO 8601 time with an offset (2030-06-09T17:00:00+11:00, or Z). Nothing
 acts on it here. A park without it clears it.
 
 --check [SEAT] writes nothing. It reads the record and runs tree, work,

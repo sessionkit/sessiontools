@@ -48,10 +48,11 @@ prefix). Anything else fails closed to the human, or unset.
 from __future__ import annotations
 
 import os
-import socket
 import subprocess
 from collections.abc import Mapping
 from typing import NamedTuple
+
+from sessiontools import operator as _operator
 
 # The operator's ask address and its settings live in sessiontools.operator
 # (the one reader); these names stay here for existing callers.
@@ -74,7 +75,7 @@ FABLE_ALLOW_VALUES = frozenset(("1", "true", "yes", "on"))
 
 FABLE_MODEL_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_")
 
-# Provenance (2030-07-05): the gate exists so that an agent ASKS
+# Provenance (2030-06-09): the gate exists so that an agent ASKS
 # and the operator raises the model; no agent starts Fable on its own. The
 # refusal says that in the operator's terms and quotes no one.
 FABLE_REFUSAL_TEMPLATE = r"""REFUSING to launch model '%(model)s' - Fable is not enabled here.
@@ -106,15 +107,17 @@ def fable_allowed(environ: Mapping[str, str]) -> bool:
 
 
 def _resolve_operator_fqdn() -> str:
-    """The one seam between the derivation and the network (tests patch it)."""
-    return socket.getfqdn()
+    """This module's seam for the FQDN lookup (tests patch it); the lookup
+    itself is `sessiontools.operator`'s, the one place that asks."""
+    return _operator._resolve_fqdn()
 
 
 def operator_ask_address(environ: Mapping[str, str]) -> str | None:
     """The operator's ask address: AGENT_OPERATOR_ADDR if set; else the
-    setting `operator.address`; else `<operator.mailbox>@<FQDN>` only when
-    that mailbox is local AND the FQDN has a domain; else None - never a
-    look-alike address that delivers nowhere. Read by
+    setting `operator.address`; else `<operator.mailbox>@<host>` only when
+    that mailbox is local, where `<host>` is `sessiontools.operator.host_part`
+    (the name the mail drop takes as this host, never a PTR name); else
+    None - never a look-alike address that delivers nowhere. Read by
     `sessiontools.operator.read_operator`, the one reader."""
     return read_operator(environ, resolve_fqdn=_resolve_operator_fqdn).address
 

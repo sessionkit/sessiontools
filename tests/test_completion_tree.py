@@ -55,9 +55,14 @@ def test_mail_and_the_disabled_verbs_are_never_offered(root):
     (("pane-state",), {"show", "watch", "agent"}),
     (("pane-state", "agent"), {"on", "off", "status"}),
     (("statusline",), {"install", "check", "sample"}),
+    (("default-model",), {"show", "list", "enforce", "watch", "unit"}),
 ])
 def test_the_named_sub_verbs_are_offered(root, path, subs):
     assert subs <= set(at(root, *path).subs)
+
+
+def test_default_model_unit_offers_its_two_kinds(root):
+    assert set(at(root, "default-model", "unit").choices_at(0)) == {"launchd", "systemd"}
 
 
 def test_sound_engine_is_a_sub_verb_of_sound(root):

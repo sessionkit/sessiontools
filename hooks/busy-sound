@@ -1,9 +1,11 @@
 #!/bin/sh
 # busy-sound - the busy sound's hook: `busy-sound arm|end|stop|clear`,
 # the hook payload on stdin. PreToolUse arms, PostToolBatch ends, Stop stops,
-# UserPromptSubmit and SessionEnd clear (`stop` is `clear` to the sound). Silent
-# unless the `sounds` settings switch it on, and it fails SILENT whatever goes
-# wrong: a hook must never be the reason a turn breaks.
+# UserPromptSubmit and SessionEnd clear (`stop` is `clear` to the sound, then
+# the STOP SOUND: the `stop` block's file, queued once through the mouth, else
+# played by afplay, in a detached child). Silent unless the `sounds` settings
+# switch it on, and it fails SILENT whatever goes wrong: a hook must never be
+# the reason a turn breaks.
 #
 # It also keeps the TURN-ENDED MARK (contract v1: sessiontools.turn),
 # one hook set for both. DEFAULT OFF: only with SESSIONTOOLS_HOOK_TURN=on (or
@@ -42,6 +44,14 @@
 #                                      busy.SLOTS), because end and clear stop
 #                                      them all; two [ -e ]
 #                                      builtins a slot, still no python
+#   stop, as end|clear, and          exit 0, unless a host- or session-layer
+#     sounds/stop/off present and      sounds.json or sounds.d is newer than it:
+#     no sounds file newer             the stop sound resolved OFF. The arm's
+#                                      resolve stamps it too, so a seat that
+#                                      called a tool before its first Stop
+#                                      starts no python at Stop unless its stop
+#                                      sound is on. ON: python every Stop (once
+#                                      a turn), and the play is detached.
 #   no python, or older than 3.11    exit 0
 #   python crashes, or anything      exit 0, stderr to /dev/null
 #
@@ -54,10 +64,14 @@
 #                                      stdin (the turn mark's copy, when the mark
 #                                      read it), so a subagent's arm is not sent.
 #   end|stop|clear, a record         sound-event sends the verb, then the
-#     (engine.$CLAUDE_PID, or any      armed-slot check above runs as before.
-#     engine.* with no CLAUDE_PID)     `end` uses --hook and the payload; stop and
+#     (engine.$CLAUDE_PID, or any      armed-slot check above runs as before
+#     engine.* with no CLAUDE_PID)     (and, on stop, the stop sound's check).
+#                                      `end` uses --hook and the payload; stop and
 #                                      clear read no stdin. Stopping is always
 #                                      safe, so a stale record is fine here.
+#
+# So after the first arm the engine path starts no python, except at a Stop
+# when a stop sound is set (or before any arm has stamped sounds/stop/off).
 #
 # The sender is ${SESSIONTOOLS_SOUND_HOME:-~/.local/share/sessiontools/sound}
 # /bin/sound-event. Not executable means not installed, which counts as off: no
@@ -69,7 +83,8 @@
 #
 # `[ a -nt b ]` is false when `a` is missing, so an absent layer file never
 # forces a resolve. A seat- or agent-layer switch-ON takes effect at the next
-# launch, or at once after `rm <session dir>/sounds/busy/off`.
+# launch, or at once after `rm <session dir>/sounds/busy/off` (for the stop
+# sound, sounds/stop/off).
 #
 # The python, picked only here,
 # after every fast path, so the off path never pays for it. `pick` lives in
@@ -189,7 +204,13 @@ case "$verb" in
         fi
       fi
     fi
-    [ -n "$armed" ] || exit 0
+    sp=
+    if [ "$verb" = stop ]; then   # the stop sound: its OFF stamp, as busy's
+      o=$dir/sounds/stop/off
+      if ! [ -e "$o" ] || [ "$s/sounds.json" -nt "$o" ] || [ "$s/sounds.d" -nt "$o" ] ||
+        [ "$h/sounds.json" -nt "$o" ] || [ "$h/sounds.d" -nt "$o" ]; then sp=1; fi
+    fi
+    [ -n "$armed$sp" ] || exit 0
     ;;
   *) exit 0 ;;
 esac

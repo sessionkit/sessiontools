@@ -25,7 +25,7 @@ from sessiontools.procs import Proc
 
 SID = "5e1f0c2a-0000-4000-8000-0000000000bb"
 OTHER = "9a9a9a9a-0000-4000-8000-0000000000cc"
-START = "Fri Jul 26 01:00:00 2030"
+START = "Sun Jun  9 01:00:00 2030"
 T0 = procs.parse_ctime(START)
 
 PY = "/opt/homebrew/Cellar/python@3.14/3.14.8_2/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python"
@@ -76,13 +76,13 @@ def facts(*records: dict) -> park.Facts:
 
 
 def use(call_id: str, name: str, **tool_input) -> dict:
-    return {"type": "assistant", "timestamp": "2030-07-26T01:00:05.000Z",
+    return {"type": "assistant", "timestamp": "2030-06-09T01:00:05.000Z",
             "message": {"content": [{"type": "tool_use", "id": call_id, "name": name,
                                      "input": tool_input}]}}
 
 
 def done(call_id: str) -> dict:
-    return {"type": "user", "timestamp": "2030-07-26T01:09:00.000Z",
+    return {"type": "user", "timestamp": "2030-06-09T01:09:00.000Z",
             "origin": {"kind": "task-notification"},
             "message": {"content": f"<task-notification>\n<tool-use-id>{call_id}</tool-use-id>\n"
                                    "<status>completed</status>\n</task-notification>"}}
@@ -381,7 +381,7 @@ def claim(d: Path, slice_id: str, sid: str = SID, released: str | None = None) -
     (d / "harness" / ".claim").mkdir(parents=True, exist_ok=True)
     (d / "harness" / ".claim" / f"{slice_id}.json").write_text(json.dumps({
         "task_id": "WEB-9", "slice_id": slice_id, "session_id": sid,
-        "claimed_at": "2030-01-02T06:00:00+00:00", "released_at": released, "claim_history": []}))
+        "claimed_at": "2030-06-09T06:00:00+00:00", "released_at": released, "claim_history": []}))
 
 
 def slate(d: Path, *slices: dict, name: str = "slices.json", key: str = "slices") -> None:
@@ -424,7 +424,7 @@ def test_the_same_slice_from_both_sources_is_named_once(tmp_path):
 
 def test_released_claims_and_other_sessions_claims_pass(tmp_path):
     d = task_dir(tmp_path)
-    claim(d, "do-001", released="2030-01-02T06:05:00+00:00")
+    claim(d, "do-001", released="2030-06-09T06:05:00+00:00")
     claim(d, "do-003", sid=OTHER)
     slate(d, {"id": "do-003", "status": "in_progress", "claimed_by": f"worker.{OTHER}"},
           {"id": "do-004", "status": "in_progress", "claimed_by": f"worker.x{SID[1:]}"})
@@ -571,15 +571,15 @@ def test_read_marks_in_both_line_forms_make_mail_read(mail):
     mail.deliver("1.a@h")
     mail.deliver("2.a@h")
     mail.deliver("3.a@h")
-    mail.mark(f"2030-01-02T17:00:00+11:00 1.a@h read worker {SID}",           # ruled, empty reason
-              f"2030-01-02T17:01:00+11:00 <2.a@h> read worker {SID} opened",  # ruled, reason
-              f"3.a@h read {SID} 2030-06-11T00:00:00")                        # the old four fields
+    mail.mark(f"2030-06-09T17:00:00+11:00 1.a@h read worker {SID}",           # ruled, empty reason
+              f"2030-06-09T17:01:00+11:00 <2.a@h> read worker {SID} opened",  # ruled, reason
+              f"3.a@h read {SID} 2030-06-09T00:00:00")                        # the old four fields
     assert mail.check().word == park.PASS
 
 
 def test_a_seen_only_mark_is_still_unread(mail):
     mail.deliver("1.a@h")
-    mail.mark(f"2030-01-02T17:00:00+11:00 1.a@h seen ride {SID}")
+    mail.mark(f"2030-06-09T17:00:00+11:00 1.a@h seen ride {SID}")
     assert mail.check().why == "1 unread: <1.a@h>"
 
 
@@ -587,7 +587,7 @@ def test_a_draft_and_a_superseded_message_do_not_count(mail):
     mail.deliver("draft@h", sub="cur", info=":2,DS")
     mail.deliver("old@h")
     mail.deliver("new@h", supersedes="old@h")
-    mail.mark(f"2030-01-02T17:00:00+11:00 new@h read worker {SID}")
+    mail.mark(f"2030-06-09T17:00:00+11:00 new@h read worker {SID}")
     assert mail.check().word == park.PASS
 
 
@@ -636,7 +636,7 @@ def test_unread_in_the_own_box_beats_a_subscription(mail):
 def test_mail_reads_only_the_header_block(mail):
     p = mail.deliver("1.a@h")
     p.write_bytes(b"Message-ID: <1.a@h>\n\n" + b"\xff\xfe not text " * 10_000)
-    mail.mark(f"2030-01-02T17:00:00+11:00 1.a@h read worker {SID}")
+    mail.mark(f"2030-06-09T17:00:00+11:00 1.a@h read worker {SID}")
     assert mail.check().word == park.PASS
 
 
