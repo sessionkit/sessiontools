@@ -54,6 +54,11 @@ class TmuxPlacement(NamedTuple):
     window: str
     window_id: str        # tmux's own @id, the handle that cannot collide
     created_session: bool
+    #: The new pane's id (`%12`) and the pid of the process it runs, as
+    #: `new-window -P` printed them; "" and None when tmux printed none.
+    #: The default seat's claim is re-pointed at them.
+    pane_id: str = ""
+    pane_pid: int | None = None
 
 
 def parse_tmux_target(value: str | None) -> tuple[str, str]:
@@ -158,9 +163,9 @@ def place_in_tmux(plan: LaunchPlan, session: str, window: str, switch: bool,
             check_placeable(session, environ)
         # tmux hands a lone command argument to `sh -c`, so the path is quoted:
         # a space or `$` in AGENTS_DIR or TMPDIR would split or expand it.
-        window_id = run_tmux(["new-window", "-d", "-P", "-F", "#{window_id}",
-                              *target, "-n", window, shlex.quote(trampoline)],
-                             environ).strip()
+        printed = run_tmux(["new-window", "-d", "-P", "-F", NEW_WINDOW_FORMAT,
+                            *target, "-n", window, shlex.quote(trampoline)],
+                           environ).split()
     except BaseException:
         # The pane never ran: nothing will read these, so they go.
         discard_files(written)
@@ -173,6 +178,7 @@ def place_in_tmux(plan: LaunchPlan, session: str, window: str, switch: bool,
                 pass
         raise
     # ---- past the handover: the pane owns the files and the launch --------
+    window_id, pane_id, pane_pid = _parse_new_window(printed)
     after = [("automatic-rename off",
               ["set-window-option", "-t", window_id, "automatic-rename", "off"])]
     if switch:
@@ -184,7 +190,25 @@ def place_in_tmux(plan: LaunchPlan, session: str, window: str, switch: bool,
             # Degraded, not failed: the agent is running.
             print(f"{PROG}: placed, but could not {description} ({error})", file=sys.stderr)
     return TmuxPlacement(session=session, window=window, window_id=window_id,
-                         created_session=created)
+                         created_session=created, pane_id=pane_id, pane_pid=pane_pid)
+
+
+#: What `new-window -P` prints: the window's @id, then the new pane's id and
+#: the pid of its process (the default seat's claim names that pid).
+NEW_WINDOW_FORMAT = "#{window_id} #{pane_id} #{pane_pid}"
+
+
+def _parse_new_window(printed: list[str]) -> tuple[str, str, int | None]:
+    """`@7 %12 4242` -> ("@7", "%12", 4242). A field tmux did not print is
+    "" or None: the window id is what placement needs, the rest is the
+    seat's."""
+    window_id = printed[0] if printed else ""
+    pane_id = printed[1] if len(printed) > 1 and printed[1].startswith("%") else ""
+    try:
+        pane_pid = int(printed[2]) if len(printed) > 2 else None
+    except ValueError:
+        pane_pid = None
+    return window_id, pane_id, pane_pid
 
 
 def receipt(plan: LaunchPlan, placement: TmuxPlacement) -> str:
@@ -202,6 +226,7 @@ def receipt(plan: LaunchPlan, placement: TmuxPlacement) -> str:
 
 
 __all__ = [
+    "NEW_WINDOW_FORMAT",
     "TRAMPOLINE",
     "TmuxPlacement",
     "check_placeable",

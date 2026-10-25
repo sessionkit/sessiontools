@@ -8,6 +8,7 @@ package code, well structured, in the right place - not copied.
     session get [PROP [SEAT]] [--json]
     session context [SEAT] [--peak] [--max N] [--parts [--tools] | --startup | --boot | --hooks] [--json]
     session start ...        launch a session from an agent file
+    session agent default    the default seat's name (the vendor's word), one line
     session sound landed|given --session SID [--ref ID] [--json]
     session sound engine build|on|off|status   the sound engine
     session operator         the operator and the privileged seats, as JSON
@@ -49,6 +50,7 @@ VERBS = (
     ("get", "read one property of a live seat"),
     ("context", "how full a seat's context window is"),
     ("start", "launch a session from an agent file"),
+    ("agent", "the default seat's name, for scripts (default)"),
     ("settings", "a session's settings, each key with the file that set it"),
     ("sound", "signal the busy sound (landed|given); `sound engine` switches the engine"),
     ("operator", "who seats ask, and who is privileged (one line of JSON)"),
@@ -708,6 +710,58 @@ def _park(argv: list[str]) -> int:
     return park.main(argv)
 
 
+AGENT_USAGE = """Usage: session agent default
+
+  default   print the default seat's name, the vendor's own word, and nothing
+            else: one line on stdout, nothing on stderr, exit 0. Safe in a
+            shell substitution: message setup --box "$(session agent default)"
+"""
+
+AGENT_DEFAULT_EPILOG = """\
+Reads no host state: no ps, no box, no lock, no settings. The word comes
+from the launcher's vendor table, so it always agrees with the name a bare
+`session start` gives its seat. Exit 0, or 2 for a usage error."""
+
+
+def _agent_default_parser() -> argparse.ArgumentParser:
+    """`session agent default`'s parser: no options."""
+    return argparse.ArgumentParser(prog="session agent default", epilog=AGENT_DEFAULT_EPILOG,
+                                   formatter_class=argparse.RawDescriptionHelpFormatter,
+                                   description="Print the default seat's name (the vendor's "
+                                               "own word) and a newline, and nothing else.")
+
+
+#: `session agent`: its one sub-verb is dispatched by hand, as statusline's
+#: are, so completion and the dispatcher read the same table.
+AGENT = Group(subs={"default": "sessiontools.cli:_agent_default_parser"})
+
+
+def _agent(argv: list[str]) -> int:
+    """`session agent default`: the default seat's word, for the readers that
+    cannot import sessiontools (phone, the kit's setup, the wake word). The
+    word is imported here and nowhere else: `sessiontools.start` loads
+    PyYAML, and `import sessiontools.cli` never may (tests/test_cli.py)."""
+    if argv[:1] and argv[0] in AGENT.subs:
+        _agent_default_parser().parse_args(argv[1:])
+        try:
+            from sessiontools.start.default_seat import word
+        except ImportError as e:
+            missing = "PyYAML" if e.name == "yaml" else (e.name or "a module")
+            print(f"session agent: broken install - {missing} will not import ({e}); "
+                  "reinstall sessiontools with its dependencies: "
+                  "uv tool install --editable --reinstall CHECKOUT", file=sys.stderr)
+            return 1
+        sys.stdout.write(f"{word()}\n")
+        return 0
+    if argv[:1] in (["-h"], ["--help"]):
+        sys.stdout.write(AGENT_USAGE)
+        return 0
+    if argv:
+        print(f"session agent: unknown subcommand {argv[0]!r}", file=sys.stderr)
+    sys.stderr.write(AGENT_USAGE)
+    return 2
+
+
 COMPLETION_EPILOG = """install, one line per shell:
   zsh, in ~/.zshrc after compinit:
     eval "$(session completion zsh)"
@@ -753,11 +807,12 @@ def _completion(argv: list[str]) -> int:
     return 0
 
 
-HANDLERS = {"list": _list, "get": _get, "context": _context, "start": _start,
+HANDLERS = {"list": _list, "get": _get, "context": _context, "start": _start, "agent": _agent,
             "settings": _settings, "sound": _sound, "operator": _operator,
             "statusline": _statusline, "pane-state": _pane_state,
             "default-model": _default_model, "ledger": _ledger,
-            "account": _account, "reap": _reap, "park": _park, "completion": _completion}
+            "account": _account, "reap": _reap, "park": _park,
+            "completion": _completion}
 
 #: Each verb's parser, as a `sessiontools.verbs` reference: a builder, or a
 #: `Group` for a verb whose first word is dispatched by hand. Each handler
@@ -768,6 +823,7 @@ PARSERS = {"list": "sessiontools.cli:_list_parser",
            "get": "sessiontools.cli:_get_parser",
            "context": "sessiontools.cli:_context_parser",
            "start": "sessiontools.start.args:build_parser",
+           "agent": "sessiontools.cli:AGENT",
            "settings": "sessiontools.cli:_settings_parser",
            "sound": "sessiontools.cli:SOUND",
            "operator": "sessiontools.cli:_operator_parser",

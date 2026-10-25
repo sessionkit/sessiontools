@@ -72,7 +72,7 @@ class Session:
     agent: str | None = None
     raw_status: str | None = None   # the harness's own word, for the curious
     path: Path | None = None        # the sidecar it came from
-    proc_start: str | None = None   # the process's start, UTC ctime - liveness
+    proc_start: str | None = None   # the process's start as written - liveness (procs.parse_start)
     started_at: float | None = None  # epoch seconds, when the session began
     version: str | None = None      # the harness's version
     #: Where the harness says it runs: `<tmux session>:@window.%pane`, e.g.

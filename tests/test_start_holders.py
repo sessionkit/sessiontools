@@ -200,7 +200,7 @@ def test_a_plain_session_is_never_checked(tmp_path, sidecars):
 
 @pytest.mark.parametrize("dead", [
     {"pid": 99_999_999},                                  # no such process
-    {"proc": "Sat Dec  7 12:34:56 2030"},                 # the pid, reused
+    {"proc": "Sun Dec  8 12:34:56 2030"},                 # the pid, reused
 ])
 def test_a_dead_or_reused_sidecar_holds_nothing(tmp_path, sidecars, dead):
     write_sidecar(sidecars, **dead)
@@ -402,3 +402,160 @@ def test_survey_exempts_only_the_launchers_own_pane(sidecars, pane, tmux, held):
         env["TMUX_PANE"] = pane
     assert holders.survey("scout", env).held is held
 
+
+
+# ---------- the shared per-agent claim helpers (ST-256 do-003) -------------------
+# ST-260 calls these for any named agent (inputs/04, 07), so they are tested
+# here with a named agent and no seat word in sight.
+
+def _dead_pid() -> int:
+    """A pid that WAS running and is not now: a reaped child's."""
+    child = subprocess.Popen(["true"])
+    child.wait()
+    return child.pid
+
+
+def _state_env(tmp_path: Path, **extra: str) -> dict:
+    env = {"SESSION_STATE_DIR": str(tmp_path / "state"),
+           "SESSION_SIDECAR_DIR": str(tmp_path / "sidecars")}
+    env.update(extra)
+    return env
+
+
+def test_claim_paths_are_per_agent(tmp_path):
+    env = _state_env(tmp_path)
+    scout_lock, scout_claim = holders.claim_paths("scout", env)
+    seat_lock, seat_claim = holders.claim_paths("alice", env)
+    assert scout_lock == tmp_path / "state" / "holders" / "scout.lock"
+    assert scout_claim == tmp_path / "state" / "holders" / "scout.json"
+    assert {scout_lock, scout_claim}.isdisjoint({seat_lock, seat_claim})
+
+
+@pytest.mark.parametrize("name", ["", "a/b", "..", "a..b", ".hidden", "../up", "a\0b", "a\\b"])
+def test_claim_paths_refuse_a_name_that_could_leave_the_dir(tmp_path, name):
+    with pytest.raises(ValueError, match="cannot name a holder's claim"):
+        holders.claim_paths(name, _state_env(tmp_path))
+
+
+def test_a_read_creates_nothing(tmp_path):
+    """Read-only means no mkdir (r4 N4): the paths, a read and a liveness
+    check leave no `holders/` behind."""
+    env = _state_env(tmp_path)
+    holders.claim_paths("scout", env)
+    assert holders.read_claim("scout", env) is None
+    assert holders.live_claim("scout", procs.table(), env, direct=True) is None
+    assert not (tmp_path / "state").exists()
+
+
+def test_claim_round_trip_for_a_named_agent(tmp_path):
+    """Write, read live, read stale once the pid is dead: all through the
+    helper, 0600, for a named agent."""
+    env = _state_env(tmp_path)
+    table = procs.table()
+    me = os.getpid()
+    path = holders.write_claim("scout", {"sessionId": SID, "pid": me,
+                                         "procStart": holders.proc_start_of(me, table)}, env)
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    assert oct(path.parent.stat().st_mode & 0o777) == "0o700"
+    claim = holders.read_claim("scout", env)
+    assert claim["agent"] == "scout" and claim["v"] == 1 and claim["sessionId"] == SID
+    assert holders.live_claim("scout", table, env, direct=True) == claim
+    dead = _dead_pid()
+    holders.write_claim("scout", {"sessionId": SID, "pid": dead,
+                                  "procStart": holders.proc_start_of(me, table)}, env)
+    assert holders.live_claim("scout", procs.table(), env, direct=True) is None
+    assert not list(path.parent.glob("*.tmp"))
+
+
+def test_a_reused_pid_is_stale(tmp_path):
+    env = _state_env(tmp_path)
+    table = procs.table()
+    me = os.getpid()
+    hour_off = time.strftime(procs.CTIME, time.gmtime(table[me].started - 3600))
+    holders.write_claim("scout", {"pid": me, "procStart": hour_off}, env)
+    assert holders.read_claim("scout", env) is not None
+    assert holders.live_claim("scout", table, env, direct=True) is None
+
+
+@pytest.mark.parametrize("text", ["{not json", "[]", '{"pid": "12"}', '{"pid": true}', ""])
+def test_an_unparseable_claim_is_stale(tmp_path, text):
+    env = _state_env(tmp_path)
+    _lock, path = holders.claim_paths("scout", env)
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+    assert holders.read_claim("scout", env) is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0000 file")
+def test_an_unreadable_claim_is_a_failure_to_measure(tmp_path):
+    """Permission denied is not stale (r4 N4): it raises, and the caller
+    reads it as a check that could not run."""
+    env = _state_env(tmp_path)
+    _lock, path = holders.claim_paths("scout", env)
+    path.parent.mkdir(parents=True)
+    path.write_text("{}")
+    path.chmod(0)
+    try:
+        with pytest.raises(holders.ClaimUnreadable, match="could not be read"):
+            holders.read_claim("scout", env)
+    finally:
+        path.chmod(0o600)
+
+
+def test_locked_is_exclusive_and_bounded(tmp_path):
+    """A second taker waits at most WAIT and is told why; the first's exit
+    frees the lock at once."""
+    env = _state_env(tmp_path)
+    with holders.locked("scout", env) as first:
+        assert first.ok
+        lock, _claim = holders.claim_paths("scout", env)
+        assert oct(lock.stat().st_mode & 0o777) == "0o600"
+        began = time.monotonic()
+        with holders.locked("scout", env, wait=0.2) as second:
+            assert not second.ok and "held the lock" in second.why
+        assert time.monotonic() - began < 2
+    with holders.locked("scout", env, wait=0.2) as third:
+        assert third.ok
+
+
+def test_locked_says_why_when_the_state_dir_cannot_be_made(tmp_path):
+    blocker = tmp_path / "state"
+    blocker.write_text("a file where the state dir goes")
+    with holders.locked("scout", _state_env(tmp_path), wait=0.1) as lock:
+        assert not lock.ok and "could not be opened" in lock.why
+
+
+def _chain(*pids: int) -> dict:
+    """A process table where each pid's parent is the next one."""
+    table = {}
+    for pid, parent in zip(pids, (*pids[1:], 1), strict=True):
+        table[pid] = procs.Proc(pid, parent, 0.0)
+    return table
+
+
+def test_replacing_is_the_narrow_rule():
+    """True only on the direct path, in the own pane, for a holder that is
+    not the launcher or its ancestor."""
+    table = _chain(30, 20, 10)          # 30 (launcher) <- 20 <- 10
+    table[99] = procs.Proc(99, 1, 0.0)  # a stranger: e.g. the old claude respawn-pane -k kills
+    kw = {"launcher": 30}
+    assert holders.replacing(99, "s:@1.%4", "%4", table, direct=True, **kw)
+    assert holders.replacing(99, "%4", "%4", table, direct=True, **kw)      # a claim's pane
+    assert not holders.replacing(99, "s:@1.%4", "%4", table, direct=False, **kw)
+    assert not holders.replacing(20, "s:@1.%4", "%4", table, direct=True, **kw)   # an ancestor
+    assert not holders.replacing(30, "s:@1.%4", "%4", table, direct=True, **kw)   # itself
+    assert not holders.replacing(99, "s:@1.%5", "%4", table, direct=True, **kw)   # another pane
+    assert not holders.replacing(99, None, "%4", table, direct=True, **kw)        # no pane
+    assert not holders.replacing(99, None, None, table, direct=True, **kw)        # neither in tmux
+
+
+def test_survey_keeps_the_broad_rule_by_default(tmp_path, sidecars, monkeypatch):
+    """The front door is unchanged until ST-260: a holder in the launcher's
+    pane is exempt even when it is the launcher's ancestor - and the
+    narrow rule, passed in, holds it."""
+    write_sidecar(sidecars)                      # this pytest, in pane %4
+    env = {"SESSION_SIDECAR_DIR": str(sidecars), "TMUX_PANE": "%4"}
+    assert not holders.survey("scout", env).held
+    narrow = holders.survey("scout", env, exempt=lambda s, own, t: holders.replacing(
+        s.pid, s.tmux, own, t, direct=True))
+    assert narrow.held

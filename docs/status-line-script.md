@@ -378,7 +378,7 @@ LOG_MAX=${SESSIONTOOLS_STATUSLINE_LOG_MAX:-26214400}
   sample payload, with a made-up time in `t`:
 
   ```json
-  {"t":1893603600,"sid":"00000000-0000-0000-0000-000000000000","model":"claude-opus-5-5","cost":12.345,"ctx":{"input_tokens":1200,"cache_creation_input_tokens":20000,"cache_read_input_tokens":400000},"pct":42.7,"size":1000000,"tin":2400000,"tout":61000}
+  {"t":1907254800,"sid":"00000000-0000-0000-0000-000000000000","model":"claude-opus-5-5","cost":12.345,"ctx":{"input_tokens":1200,"cache_creation_input_tokens":20000,"cache_read_input_tokens":400000},"pct":42.7,"size":1000000,"tin":2400000,"tout":61000}
   ```
 
 - **Why it exists:** other tools read it for a session's running model,

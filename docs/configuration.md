@@ -30,7 +30,7 @@ own files. Nothing here needs setting.
 | `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Where the transcripts are read from. |
 | `CONTEXT_MAX` | unset | A ceiling on the context window, in tokens. It only lowers a known model's window, never makes one. Set but not a positive number: the window is unknown. |
 | `SESSIONS_DIR` | `~/.session/sessions` | The root of every session's folder. |
-| `SESSION_STATE_DIR` | `~/.session/state` | The state dir: the list snapshot, the pane signal's lock, `reap.log`, the default model's backups and log. |
+| `SESSION_STATE_DIR` | `~/.session/state` | The state dir: the list snapshot, the pane signal's lock, `reap.log`, the default model's backups and log, and the default seat's claim and lock (`holders/`). |
 | `SESSION_LIST_MAX_AGE` | `2` | Seconds a list snapshot may be served. Beats the `list.max_age` setting. `0` turns the cache off. |
 | `SESSION_LIST_FRESH` | unset | A true word (`1`, `true`, `yes`, `on`) computes now, as `--fresh` does. |
 
@@ -58,7 +58,8 @@ resolves two settings tools for it ([starting a session][start]).
   Claude Code as one `--settings` file. `~/.claude` is never written.
 - **Credentials are never handed down.** `CLAUDE_CODE_OAUTH_TOKEN`,
   `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are dropped, unless the
-  agent file names one under `environment: inherit:`.
+  agent file names one under `environment: inherit:`. When one is set and
+  dropped, `session start` says so on stderr and names the fix.
 
 | Name | Default | What it does |
 | --- | --- | --- |

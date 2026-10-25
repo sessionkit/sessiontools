@@ -142,8 +142,8 @@ def test_launch_info_reports_the_facts_only_the_launcher_knows():
     block = c.generate_launch_info(
         agent="scout", session_id="0198-abcd", converse=False,
         command=["claude", "--agent", "scout", "--effort", "max"],
-        now="Sunday, 2030-06-09 22:34:56 AEST", host="testhost")
-    for fact in ("# Launch Info", "Sunday, 2030-06-09 22:34:56 AEST", "testhost",
+        now="Sunday, 2030-06-09 12:34:56 UTC", host="testhost")
+    for fact in ("# Launch Info", "Sunday, 2030-06-09 12:34:56 UTC", "testhost",
                  "scout", "0198-abcd", "claude --agent scout --effort max"):
         assert fact in block
 

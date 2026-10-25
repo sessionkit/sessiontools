@@ -19,7 +19,7 @@ from sessiontools.start import resume
 from sessiontools.start.context import BARE_CONVERSE_SIGNAL, CONVERSE_SIGNAL
 
 RESUME_SID = "11111111-2222-3333-4444-555555555555"
-FROZEN = ANCHOR.astimezone(datetime.timezone(datetime.timedelta(hours=10), "AEST"))
+FROZEN = ANCHOR.astimezone(datetime.UTC)
 
 RESUME_CASES = [
     (["--resume", "abc"], "abc"),

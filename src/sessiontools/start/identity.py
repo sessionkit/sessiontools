@@ -95,9 +95,11 @@ def birth_settings(agent: Agent, seat: str | None = None) -> dict:
     data = {}
     if agent.name:
         data["agent"] = agent.name
-    if agent.name and agent.file:
+    if agent.name and agent.file and not agent.builtin:
         # Resolved, so the record names the real file, not a link a later
-        # tidy-up may remove.
+        # tidy-up may remove. Never the default seat's built-in: its path is
+        # the package's, which moves with the install, so a later read would
+        # call it gone; its settings layer is read by name.
         data["agent_file"] = os.path.realpath(agent.file)
     if seat:
         data["seat"] = seat

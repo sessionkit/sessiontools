@@ -498,7 +498,7 @@ def test_every_target_is_anchored_and_the_window_is_addressed_by_its_id(tmp_path
     assert placed.created_session and placed.window_id == "@9"
     assert calls[0] == ["new-session", "-d", "-s", "alpha"]
     new_window = calls[1]
-    assert new_window[:5] == ["new-window", "-d", "-P", "-F", "#{window_id}"]
+    assert new_window[:5] == ["new-window", "-d", "-P", "-F", placement.NEW_WINDOW_FORMAT]
     assert new_window[new_window.index("-t") + 1] == "=alpha:"
     assert new_window[new_window.index("-n") + 1] == "scout"
     assert new_window[-1] == trampoline_of(plan)

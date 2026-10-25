@@ -22,7 +22,7 @@ from sessiontools import cli, procs, reap, turn
 from sessiontools.listing import Row
 from sessiontools.procs import Proc
 
-START = "Wed Dec 11 01:00:00 2030"
+START = "Sun Dec  8 01:00:00 2030"
 T0 = procs.parse_ctime(START)
 NOW = T0 + 6 * 3600
 HOUR = 3600
@@ -34,7 +34,7 @@ MONITOR = f"{PY} /Users/alice/.local/bin/pager listen --monitor"
 def tool_shell(command: str) -> str:
     """A Bash tool call as Claude Code runs it (the shape test_pane_reading pins)."""
     return ("/opt/homebrew/bin/bash -c source /Users/alice/.claude/shell-snapshots/"
-            "snapshot-bash-1893603600000-zh6e7c.sh 2>/dev/null || true && eval '"
+            "snapshot-bash-1907254800000-zh6e7c.sh 2>/dev/null || true && eval '"
             + command + "' < /dev/null && pwd -P >| /tmp/claude-9096-cwd")
 
 

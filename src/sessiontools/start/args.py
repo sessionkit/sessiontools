@@ -39,21 +39,27 @@ def build_parser() -> argparse.ArgumentParser:
         prog=PROG,
         allow_abbrev=False,
         description="Launch a coding-agent session from an agent markdown "
-                    "file -- or, with no agent named, a plain vendor session.",
+                    "file -- or, with no agent named, the host's default seat "
+                    "when it is free, else a plain vendor session.",
         epilog=(
             "Launcher flags go BEFORE the agent name. Everything after the "
             "agent name is passed on verbatim: bare words become the initial "
             "message, vendor flags reach the vendor. With no agent at all, "
-            "`session start` launches a plain vendor session (a minted "
-            "session id, no agent file, no key); write the agent as `-` "
-            "when a message or vendor flags must follow it."
+            "`session start` takes the host's default seat, the one session "
+            "named for the vendor (`session agent default` prints the name), "
+            "when no live session holds it and it can hear (macOS, its box "
+            "found). Otherwise it launches a plain vendor session (a minted "
+            "session id, no agent file, no key) and says why on one line. "
+            "`-` is always plain: write the agent as `-` for that, or when a "
+            "message or vendor flags must follow it."
         ),
     )
     parser.add_argument(
         "agent", nargs="?", default=None,
         help="agent name, resolved to <agents-dir>/<name>.md or "
              "<agents-dir>/<name>/<name>.md (agents-dir: $AGENTS_DIR, else "
-             "~/.session/agents); omit it (or write `-`) for a plain vendor "
+             "~/.session/agents); omit it for the default seat (plain when "
+             "it is held or cannot hear), or write `-` for a plain vendor "
              "session with no agent file")
     parser.add_argument(
         "rest", nargs=argparse.REMAINDER, metavar="...",
@@ -67,7 +73,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-agents", action="store_true",
         help="print the agent names this launcher can resolve, one per "
              "line, and exit -- the same <agents-dir> `agent` resolves "
-             "from, so a picker cannot offer a name that will not start")
+             "from, so a picker cannot offer a name that will not start; "
+             "the default seat's built-in, when no file shadows it, reads "
+             "NAME<TAB>built in (the first field is always the name)")
     parser.add_argument(
         "--dry-run", action="store_true",
         help="print the full vendor command with per-flag provenance and "
@@ -112,7 +120,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="launch even though a live session already holds this agent: "
              "without it, a hand launch (no claude -n/--name) of "
              "an agent a live Claude Code session runs is refused, exit 3, "
-             "naming the holder and its age")
+             "naming the holder and its age; a named launch of the default "
+             "seat starts beside its holder and takes no claim (a bare start "
+             "ignores it)")
     # NOT --tmux: claude ships a --tmux flag, and the launcher never shadows
     # a vendor flag (tests/test_start_args.py holds the collision guard).
     parser.add_argument(
@@ -159,8 +169,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = build_parser()
     if argv is None:
         argv = sys.argv[1:]
-    # An empty argv is a launch, not an error: bare `session start` is a
-    # plain vendor session, by design.
+    # An empty argv is a launch, not an error: a bare `session start` takes
+    # the default seat, or starts plain with one line (`start.bare_start`).
     args = parser.parse_args(argv)
     owned = launcher_option_strings(parser) - {"-h", "--help"}
     for token in args.rest:

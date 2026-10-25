@@ -41,13 +41,13 @@ import os
 import secrets
 import shlex
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
 from typing import NamedTuple
 
+from sessiontools.operator import short_host
 from sessiontools.start.errors import PROG, AuthoringError
 from sessiontools.start.vendor import VENDORS
 
@@ -137,15 +137,22 @@ def generate_launch_info(agent: str | None = None, session_id: str | None = None
                          now: object = None, host: str | None = None) -> str:
     """The launch-info block: date, machine, agent, session id, voice, and
     the command when given. A field not supplied is OMITTED - "Session ID:
-    None" would be a fabricated fact. `now` and `host` are injectable."""
+    None" would be a fabricated fact. `now` and `host` are injectable; the
+    host defaults to `operator.short_host` (the mail host rule), and the
+    Machine line is omitted when no host is derived."""
     # Naive local time, as the old launcher printed it (its %Z is empty).
     stamp = now if now is not None else datetime.datetime.now()  # noqa: DTZ005
     if not isinstance(stamp, str):
         stamp = stamp.strftime("%A, %Y-%m-%d %H:%M:%S %Z").strip()
     lines = ["# Launch Info", ""]
     lines.append(f"- **Date/time**: {stamp}")
-    lines.append("- **Machine**: %s" % (host if host is not None
-                                        else socket.gethostname()))
+    if host is None:
+        # The ONE host rule: the pinned mail host, else the live short
+        # hostname, lowercased - the host a derived address uses, so this
+        # line and that address cannot disagree.
+        host = short_host(os.environ) or None
+    if host is not None:
+        lines.append(f"- **Machine**: {host}")
     if agent is not None:
         lines.append(f"- **Agent**: {agent}")
     if session_id is not None:
@@ -415,7 +422,10 @@ def agent_plugin_argv(vendor: str, agent: object, directory: str | None = None,
     sources, so a launch from a neutral cwd died with "--agent 'alice' not
     found". Not `--setting-sources user`
     (ruled out: it loads a 49-agent registry into every wake) and not
-    `--agents '<json>'` (argv is world-readable): a plugin dir, path-based."""
+    `--agents '<json>'` (argv is world-readable): a plugin dir, path-based.
+    The one exception is the default seat, whose word the vendor reserves
+    for its own built-in agent: its definition holds only shipped public
+    text, and `default_seat.definition_argv` carries it inline instead."""
     flag = VENDORS[vendor].get("agent_plugin_dir_arg")
     if flag is None or agent is None or not getattr(agent, "file", None):
         return [], None

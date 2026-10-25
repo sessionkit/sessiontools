@@ -1,0 +1,11 @@
+# Dependabot: a daily look for updates to sessiontools' Python dependencies.
+# uv reads pyproject.toml and uv.lock at the repository root. There is no
+# .github/workflows, so no github-actions entry; add one with the first
+# workflow. Alerts and security updates are repository settings, not this
+# file: the owner turns them on.
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "daily"

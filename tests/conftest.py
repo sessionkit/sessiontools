@@ -69,8 +69,8 @@ from sessiontools.account import registry as account_registry
 from sessiontools.settings import SETTINGS_FILE_ENV
 
 # Every typed test time is ANCHOR-relative (shell fixtures use ANCHOR=2030-06-09T12:34:56Z / ANCHOR_SUMMER=2030-12-08T12:34:56Z).
-ANCHOR = datetime(2030, 6, 9, 12, 34, 56, tzinfo=UTC)  # Sun; Melbourne/Sydney +10:00, no DST
-ANCHOR_SUMMER = datetime(2030, 12, 8, 12, 34, 56, tzinfo=UTC)  # Sun; +11:00, DST
+ANCHOR = datetime(2030, 6, 9, 12, 34, 56, tzinfo=UTC)  # Sun; mid-year
+ANCHOR_SUMMER = datetime(2030, 12, 8, 12, 34, 56, tzinfo=UTC)  # Sun; year-end, the other side of any DST change
 
 
 def pytest_terminal_summary(terminalreporter) -> None:

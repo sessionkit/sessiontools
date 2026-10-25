@@ -46,7 +46,9 @@ HELD = {"ledger": "ST-26 OQ3: teaching agents the verb waits on the maintainer",
         "completion": "a human's shell setup, not an agent's verb; the skill is at its "
                       "400-token cap",
         "default-model": "a host setting a human opts into, not an agent's verb; the skill "
-                         "is at its 400-token cap"}
+                         "is at its 400-token cap",
+        "agent": "a name query for scripts (phone, the kit's setup, the wake word), not an "
+                 "agent's verb; the skill is at its 400-token cap"}
 
 
 def front_matter(text: str) -> dict[str, str]:
@@ -86,11 +88,19 @@ def test_the_skill_teaches_exactly_the_verbs_session_lists():
 
 
 def test_a_held_verb_is_a_live_verb_the_skill_never_names():
+    """The skill never names a held verb AS A VERB: never `session <verb>`,
+    and never a bullet that teaches it ("- `<verb>"). It matches the verb
+    form, not the bare word, because a held verb can also be an ordinary
+    word the skill must use: `agent` is a `get` prop and the skill says
+    "launch an agent"."""
     text = SKILL.read_text()
+    taught = taught_verbs(text)
     for verb, why in HELD.items():
         assert why, verb
         assert verb in dict(cli.VERBS), f"{verb} is held but no longer a verb: strike it"
-        assert not re.search(rf"\b{re.escape(verb)}\b", text), f"the skill names held {verb}"
+        assert verb not in taught, f"the skill teaches held {verb}"
+        assert not re.search(rf"\bsession {re.escape(verb)}\b", text), \
+            f"the skill names held {verb}"
 
 
 def test_a_disabled_or_retired_verb_is_only_named_as_not_here():

@@ -1,6 +1,6 @@
 [project]
 name = "sessiontools"
-version = "0.3.0"
+version = "0.3.1"
 description = "The harness layer: sessions, status and idle, one driver per harness - a library first"
 readme = "README.md"
 license = "AGPL-3.0-or-later"

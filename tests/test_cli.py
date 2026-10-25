@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -422,3 +423,66 @@ def test_claude_md_readers_still_fail_on_a_dangling_symlink(tmp_path):
     result = run_claude_md_readers(tmp_path)
     assert result.returncode == 1, result.stdout + result.stderr
     assert "3 failed" in result.stdout, result.stdout
+
+
+# --- `session agent default`: the default seat's name, for scripts (ST-256) ----
+# Phone (PHONE-247), the kit's setup and its wake word (SK-206) read it in a
+# shell substitution, so its contract is pinned in a real subprocess: the word
+# and one newline on stdout, nothing on stderr, exit 0 (inputs/06).
+
+def _session(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, "-m", "sessiontools.cli", *args],
+                          capture_output=True, text=True, check=False, timeout=60)
+
+
+def test_session_agent_default_prints_the_vendor_word():
+    from sessiontools.start.default_seat import word
+    result = _session("agent", "default")
+    assert (result.stdout, result.stderr, result.returncode) == ("claude\n", "", 0)
+    assert result.stdout == f"{word()}\n"
+
+
+def test_session_agent_default_is_safe_in_a_shell_substitution():
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash here")
+    cmd = " ".join(shlex.quote(part) for part in
+                   (sys.executable, "-m", "sessiontools.cli", "agent", "default"))
+    result = subprocess.run([bash, "-c", f'printf "[%s]" "$({cmd})"'],
+                            capture_output=True, text=True, check=False, timeout=60)
+    assert (result.stdout, result.stderr, result.returncode) == ("[claude]", "", 0)
+
+
+def test_session_agent_is_a_verb_with_a_usage_row_and_one_sub_verb():
+    assert "agent" in dict(cli.VERBS)
+    assert cli.HANDLERS["agent"] is cli._agent
+    assert cli.PARSERS["agent"] == "sessiontools.cli:AGENT"
+    assert list(cli.AGENT.subs) == ["default"] and cli.AGENT.rest is None
+
+
+def test_session_agent_default_takes_no_arguments(capsys):
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["agent", "default", "extra"])
+    assert stop.value.code == 2
+    assert "unrecognized arguments: extra" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [["agent"], ["agent", "nope"]])
+def test_session_agent_without_its_sub_verb_is_usage(capsys, argv):
+    assert cli.main(argv) == 2
+    out, err = capsys.readouterr()
+    assert out == "" and "Usage: session agent default" in err
+    if argv[1:]:
+        assert "unknown subcommand 'nope'" in err
+
+
+def test_session_agent_help_is_exit_0_on_stdout(capsys):
+    assert cli.main(["agent", "--help"]) == 0
+    assert capsys.readouterr().out.startswith("Usage: session agent default")
+
+
+def test_session_agent_calls_a_failed_import_a_broken_install(capsys, monkeypatch):
+    monkeypatch.setitem(sys.modules, "sessiontools.start.default_seat", None)
+    assert cli.main(["agent", "default"]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and "session agent: broken install" in err

@@ -335,6 +335,33 @@ SESSION_IDENTITY_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 CREDENTIAL_VARS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
 
+def dropped_credential_lines(environment: Environment, environ: Mapping[str, str],
+                             agent_file: str) -> list[str]:
+    """One line per CREDENTIAL_VARS name the launch will drop without a word:
+    set (non-empty) in the launcher's `environ`, and not declared by the
+    agent file under `inherit:` (its own notice speaks), `secrets:` (a
+    backend supplies it) or `variables:` (the file sets it, and naming it
+    under `inherit:` too would be refused). A `files:` entry may set one
+    too, but that cannot be known without sourcing it, and the launcher's
+    value is dropped either way, so it still gets the line.
+
+    Reads each value's presence only: no line ever holds a value."""
+    declared = {*environment.inherit, *environment.secrets, *environment.variables}
+    where = agent_file or "the agent file"
+    return [f"{name} is set here but not handed down; to carry it, add "
+            f"`environment: inherit: [{name}]` to {where}"
+            for name in CREDENTIAL_VARS
+            if environ.get(name) and name not in declared]
+
+
+def warn_dropped_credentials(environment: Environment, environ: Mapping[str, str],
+                             agent_file: str) -> None:
+    """Print `dropped_credential_lines` to stderr, before the launch. A
+    note, never a refusal: the drop itself stands."""
+    for line in dropped_credential_lines(environment, environ, agent_file):
+        print(f"{PROG}: {line}", file=sys.stderr)
+
+
 def is_session_identity(name: str) -> bool:
     """Is NAME part of a session's identity: a SESSION_IDENTITY_VARS name,
     or one of the SESSION_IDENTITY_PREFIXES family? The ONE test every scrub

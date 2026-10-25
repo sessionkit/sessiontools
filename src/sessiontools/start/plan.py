@@ -36,7 +36,7 @@ from collections.abc import Mapping
 from typing import NamedTuple
 
 from sessiontools import settings as _settings
-from sessiontools.start import agentfile, claude_settings
+from sessiontools.start import agentfile, claude_settings, default_seat
 from sessiontools.start.agentfile import AgentFile, StartOptions, switch_enabled
 from sessiontools.start.agents import (
     Agent,
@@ -69,6 +69,7 @@ from sessiontools.start.environment import (
     host_environ,
     render_env_prelude,
     render_identity_unset,
+    warn_dropped_credentials,
     warn_env_file_traps,
     without_session_identity,
 )
@@ -227,6 +228,13 @@ def choose_work_dir(args: argparse.Namespace, start: StartOptions,
     return chosen, source
 
 
+#: The refusal of a keyed launch with no agent to label the key with.
+KEYED_NEEDS_AN_AGENT = (
+    "--keyed needs an agent: the key, its birth certificate and the "
+    "registry entry carry the agent name, and a plain session has "
+    "none. Name an agent, or launch unkeyed.")
+
+
 def resolve(args: argparse.Namespace, environ: Mapping[str, str] | None = None,
             work_dir: str | None = None) -> Launch:
     """argv + the agent file + the environment -> a Launch, or a refusal.
@@ -234,6 +242,11 @@ def resolve(args: argparse.Namespace, environ: Mapping[str, str] | None = None,
     environ = os.environ if environ is None else environ
     agent = resolve_agent_or_bare(args.agent, environ=environ)
     agent_file = agentfile.load(agent)
+    try:
+        # The default seat's file: only the keys its inline door can honour.
+        default_seat.check_front_matter(agent, agent_file)
+    except ValueError as error:
+        raise LaunchError(f"{agent_subject(agent)}: {error}", code=EXIT_USAGE) from error
     start = agent_file.start
     message_words, cli_args = split_rest(args.rest)
     # THE FABLE GATE: the earliest point the vendor, the argv and the
@@ -266,11 +279,10 @@ def resolve(args: argparse.Namespace, environ: Mapping[str, str] | None = None,
     if keyed and not agent.name:
         # session-key-init labels the key, birth cert and registry entry
         # with --agent-name; a plain session has none to give. Refuse
-        # rather than invent one.
-        raise LaunchError(
-            "--keyed needs an agent: the key, its birth certificate and the "
-            "registry entry carry the agent name, and a plain session has "
-            "none. Name an agent, or launch unkeyed.", code=EXIT_USAGE)
+        # rather than invent one. (`session start --keyed -` lands here; a
+        # bare `--keyed` is refused earlier, in `main`, because a bare start
+        # may resolve as the default seat, which has a name.)
+        raise LaunchError(KEYED_NEEDS_AN_AGENT, code=EXIT_USAGE)
     if keyed and resume is not None and not resume.session_id:
         raise LaunchError(
             "a keyed resume is a FORK into a fresh identity, and a fork "
@@ -282,6 +294,8 @@ def resolve(args: argparse.Namespace, environ: Mapping[str, str] | None = None,
                     work_dir_source=source, keyed=keyed, first_message_limit=limit,
                     in_tmux=in_tmux, resume=resume)
     rehearse_doors(launch)
+    # After every refusal above, so a refused launch does not warn first.
+    warn_dropped_credentials(agent_file.environment, environ, agent.file)
     return launch
 
 
@@ -306,8 +320,12 @@ def rehearse_doors(launch: Launch) -> None:
     session directory behind.)"""
     start = launch.start
     resuming = launch.resume is not None
-    injects = (not resuming and bool(start.context.system_prompt)
-               and not switch_enabled(launch.args.idle, start.idle))
+    # The default seat's file body opens the system-prompt door on any fresh
+    # launch, `--idle` too; a resume keeps the prompt it was born with.
+    injects = not resuming and (
+        bool(default_seat.carried_body(launch.agent, launch.agent_file))
+        or (bool(start.context.system_prompt)
+            and not switch_enabled(launch.args.idle, start.idle)))
     # An unkeyed resume computes no session id: the resumed one is claude's.
     stand_in = (None if resuming and not launch.keyed
                 else SessionIdentity("<rehearsal>", "", launch.keyed, {}, minted=False))
@@ -344,7 +362,7 @@ def rehearse_fold(launch: Launch) -> None:
     try:
         found = _settings.sources(claude_settings.TOOL, None, launch.agent.name or None,
                                   getattr(launch.args, "seat", None), launch.environ,
-                                  launch.agent.file or None)
+                                  default_seat.user_agent_file(launch.agent))
     except _settings.SettingsError:
         return
     if not found:
@@ -406,11 +424,13 @@ def build_annotated_argv(vendor: str, vendor_section: dict, agent: Agent | None 
                          pane_minted: bool = False,
                          claude_settings: dict | None = None,
                          claude_settings_source: str = "computed: claude-code settings",
+                         system_prompt_source: str = "computed: injected context (system prompt)",
                          ) -> tuple[list, list]:
     """THE ONE ASSEMBLY: ([(token, source), ...], files a live launch writes).
 
     Order: the command; the computed doors (session id, system prompt, the
-    carried definition); the identity door; the `claude:` section, one key
+    carried definition: the default seat's inline through the agents door,
+    any other agent's plugin dir); the identity door; the `claude:` section, one key
     at a time through the one rendering rule; the CLI passthrough with
     `{shortsid}` filled; then the separator and the first message. The
     settings door is the last computed door, and only when
@@ -433,13 +453,23 @@ def build_annotated_argv(vendor: str, vendor_section: dict, agent: Agent | None 
                          (ShellVar("CLAUDE_SESSION_ID"), source)]
     prompt_argv, prompt_file = system_prompt_argv(
         vendor, system_prompt_text, directory=directory, dry_run=dry_run)
-    computed += [(token, "computed: injected context (system prompt)")
-                 for token in prompt_argv]
-    plugin_argv, plugin_dir = agent_plugin_argv(vendor, agent, directory=directory,
-                                                dry_run=dry_run)
-    carried = ("computed: the agent's own definition, so --agent resolves "
-               "from any directory")
-    computed += [(token, carried) for token in plugin_argv]
+    computed += [(token, system_prompt_source) for token in prompt_argv]
+    seat_argv = default_seat.definition_argv(vendor, agent)
+    if seat_argv is not None:
+        plugin_dir = None
+        carried = (f"computed: the default seat's definition, inline ({vendor} "
+                   "reserves the name for its own agent): the shipped description "
+                   "and an empty prompt")
+        if not getattr(agent, "builtin", False):
+            carried += ("; the shadowing file's own description: is not carried, "
+                        "and its body rides the system-prompt file door")
+        computed += [(token, carried) for token in seat_argv]
+    else:
+        plugin_argv, plugin_dir = agent_plugin_argv(vendor, agent, directory=directory,
+                                                    dry_run=dry_run)
+        carried = ("computed: the agent's own definition, so --agent resolves "
+                   "from any directory")
+        computed += [(token, carried) for token in plugin_argv]
     door_argv, settings_file = settings_argv(vendor, claude_settings, directory=directory,
                                              dry_run=dry_run)
     computed += [(token, claude_settings_source) for token in door_argv]
@@ -713,7 +743,7 @@ def resolve_home(launch: Launch, identity: SessionIdentity | None) -> _settings.
     seat = getattr(launch.args, "seat", None)
     try:
         res = _settings.resolve("session", sid, agent, seat, env=launch.environ,
-                                agent_file=launch.agent.file or None)
+                                agent_file=default_seat.user_agent_file(launch.agent))
         return _settings.session_home(res, sid, agent, seat, env=launch.environ)
     except _settings.SettingsError as error:
         raise LaunchError(f"{agent_subject(launch.agent)}: settings: {error}",
@@ -803,7 +833,7 @@ def resolve_claude_settings(launch: Launch, identity: SessionIdentity | None,
     seat = getattr(launch.args, "seat", None)
     try:
         res = _settings.resolve(claude_settings.TOOL, sid, agent, seat, env=launch.environ,
-                                agent_file=launch.agent.file or None)
+                                agent_file=default_seat.user_agent_file(launch.agent))
     except _settings.SettingsError as error:
         raise LaunchError(f"{agent_subject(launch.agent)}: settings: {error}",
                           code=EXIT_USAGE) from error
@@ -929,7 +959,7 @@ def assemble(launch: Launch, minted: SessionIdentity | PaneMint | None) -> Launc
         env=generator_environ(launch, identity), cwd=launch.work_dir,
         # The test agentfile.load makes: a bare launch (no agent, or `-`)
         # has no file, so an idle start gets no boot line.
-        agent_file=bool(launch.agent.file))
+        agent_file=bool(default_seat.user_agent_file(launch.agent)))
     declared = launch.agent_file.environment
     secrets: list[DeclaredSecret] = declared_secrets(declared.secrets)
     inherited = inherited_for(launch)
@@ -938,12 +968,20 @@ def assemble(launch: Launch, minted: SessionIdentity | PaneMint | None) -> Launc
                                 launch.dry_run) if secrets or declared.inherit else None)
     rendered = resolve_claude_settings(launch, identity)
     door_settings = settings_door_kwargs(rendered, launch.environ)
+    # The default seat's file body leads the one system-prompt file (Q2).
+    body = default_seat.carried_body(launch.agent, launch.agent_file)
+    prompt_source = "computed: injected context (system prompt)"
+    if body:
+        prompt_source = ("computed: the default seat's file body"
+                         + (", then injected context" if injected.system_prompt else "")
+                         + " (system prompt)")
     try:
         annotated, files = build_annotated_argv(
             start.vendor, launch.agent_file.vendor_section, agent=launch.agent,
             identity=identity, cli_args=folded_cli_args(launch.cli_args, rendered),
             initial_message=injected.initial,
-            system_prompt_text=injected.system_prompt,
+            system_prompt_text=default_seat.prompt_text(body, injected.system_prompt),
+            system_prompt_source=prompt_source,
             directory=door_dir, dry_run=launch.dry_run,
             message_source="initial message (words after the agent name + "
                            "injected context)",
@@ -1016,7 +1054,7 @@ def assemble_resume(launch: Launch, identity: SessionIdentity | None) -> LaunchP
     warn_env_file_traps(declared, work_dir)
     message = resume_message(launch.message_words,
                              converse=switch_enabled(launch.args.converse, start.converse),
-                             agent_file=bool(launch.agent.file))
+                             agent_file=bool(default_seat.user_agent_file(launch.agent)))
     # In temp, as the old launcher put a resume's: even a keyed resume's
     # fresh session dir is not where it looked.
     secrets: list[DeclaredSecret] = declared_secrets(declared.secrets)

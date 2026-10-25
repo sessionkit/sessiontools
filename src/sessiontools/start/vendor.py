@@ -14,6 +14,11 @@ door:
     agent_plugin_dir_arg    carries the agent's definition (NOT a door:
                             --plugin-dir is repeatable, and both live agents
                             declare their own)
+    agents_door             defines agents INLINE (claude: --agents '<json>');
+                            used only for the default seat, whose word the
+                            vendor reserves for its own built-in agent, so
+                            no plugin dir can carry it. Its JSON
+                            holds shipped public text only, never a body
     system_prompt_door      appends INLINE system-prompt text
     system_prompt_file_door appends system-prompt text held in a FILE -
                             preferred: a context block runs to tens of
@@ -49,6 +54,7 @@ VENDORS: dict[str, dict] = {
         "cmd": "claude",
         "identity_door": "--agent",
         "agent_plugin_dir_arg": "--plugin-dir",
+        "agents_door": "--agents",
         "system_prompt_door": "--append-system-prompt",
         "system_prompt_file_door": "--append-system-prompt-file",
         "session_id_flag": "--session-id",
@@ -185,10 +191,16 @@ DOOR_ESCAPES = {
         "--idle): the launcher then injects nothing and the door is yours",
     "system_prompt_file_door":
         "to own the system prompt outright, set `start: idle: true` (or pass "
-        "--idle): the launcher then injects nothing and the door is yours",
+        "--idle): the launcher then injects nothing and the door is yours -- "
+        "except for the default seat's own file, whose body rides this door "
+        "even then: put the text in that file's body instead",
     "session_id_flag":
         "the launcher owns the session id -- it IS the session's identity, "
         "minted and persisted before launch -- so remove the declaration",
+    "agents_door":
+        "the launcher carries the default seat's definition through this door, "
+        "so remove the declaration; to change the seat, shadow it with your own "
+        "file of its name in the agents folder, or start with `session start -`",
     "identity_door":
         "this door carries the agent named on the command line, so remove the "
         "declaration and launch the other agent by name instead",

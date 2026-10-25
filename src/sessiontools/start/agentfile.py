@@ -289,6 +289,10 @@ class AgentFile(NamedTuple):
     vendors: dict
     start: StartOptions
     environment: Environment
+    #: The markdown after the front matter. A named agent's body reaches the
+    #: vendor in the copy its plugin dir carries; the default seat's rides
+    #: the system-prompt file door instead (`default_seat`).
+    body: str = ""
 
     @property
     def vendor_section(self) -> dict:
@@ -312,7 +316,7 @@ def load(agent: Agent) -> AgentFile:
     except OSError as error:
         raise LaunchError(f"{agent_subject(agent)}: cannot read the agent file: {error}")
     try:
-        front_matter, _body = parse_agent_markdown(text)
+        front_matter, body = parse_agent_markdown(text)
         parts = partition_front_matter(front_matter)
         start = parse_start(parts.start)
         environment = parse_environment(parts.environment)
@@ -324,5 +328,6 @@ def load(agent: Agent) -> AgentFile:
         raise LaunchError(f"{agent_subject(agent)}: {error}",
                           code=EXIT_USAGE)
     return AgentFile(front_matter=front_matter, native=parts.native,
-                     vendors=parts.vendors, start=start, environment=environment)
+                     vendors=parts.vendors, start=start, environment=environment,
+                     body=body)
 

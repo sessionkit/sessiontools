@@ -12,7 +12,7 @@ The record helpers are context_parts/build.py's (loaded by path, not copied).
                batch, call 24 only answers. So 24 tool batches (1-24), and
                these hooks (the hand sums are in the test):
   - pager-hook        the SAME line every batch: exact repeats, steady.
-  - notifications     `[clock] 13:MM AEDT`, only the minutes change: templated
+  - notifications     `[clock] 13:MM+0000`, only the minutes change: templated
                       repeats, steady by its form. It shares each batch's
                       toolUseID with pager-hook: each line joins its own.
   - posttool-clock    a PostToolUse line per tool call, seconds differ; every
@@ -57,7 +57,7 @@ TAIL_LINE = "nobody read this"
 
 
 def clock_line(k: int) -> str:
-    return f"[clock] 13:{k:02d} AEDT"                         # 18 chars
+    return f"[clock] 13:{k:02d}+0000"                         # 18 chars
 
 
 def posttool_line(s: int) -> str:

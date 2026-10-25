@@ -116,7 +116,7 @@ def test_session_id_never_touches_the_disk(monkeypatch, tmp_path):
 
 # ── current() ────────────────────────────────────────────────────────────
 
-NOW_MS = int(ANCHOR.timestamp() * 1000)   # 2030-06-09T22:34+10:00, epoch ms
+NOW_MS = int(ANCHOR.timestamp() * 1000)   # 2030-06-09T12:34:56Z, epoch ms
 
 
 def _sidecar(directory: Path, pid: int, sid: str, status: str = "busy") -> Path:

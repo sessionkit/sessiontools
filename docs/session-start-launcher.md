@@ -5,6 +5,9 @@ coding-agent session from an agent file. The agent's front matter is
 the launch configuration; the command line overrides it. Trailing words
 are the first message.
 
+- `session start`: no agent named; it takes [the default seat][seat]
+  when it is free, and starts plain when it is not.
+- `session start -`: always plain, with no agent.
 - `session start --list-agents`: the agents it can start.
 - `session start --dry-run AGENT`: what would run. It launches nothing.
 - `session start --in-tmux AGENT`: in a new tmux window, not in place.
@@ -12,7 +15,8 @@ are the first message.
   first message.
 - Flags go BEFORE the agent name.
 - Exit codes: 0 ok, 1 launch failed, 2 usage or a refusal, 3 the agent
-  is already held (see [the front door][door]).
+  is already held (see [the front door][door], and [the default
+  seat][seat] for `session start claude`).
 
 ## Where agent files live
 
@@ -72,6 +76,100 @@ are the first message.
 - The front door reads the live sessions every call, never the
   [`session list` cache][cache].
 
+## The default seat: one per host
+
+A bare `session start` takes the default seat, the one session per host
+named for the vendor (`claude` today), when it can hear and no live
+session holds it. Otherwise it starts plain with one stderr line. What
+it means for you, shadowing included, is in
+[the default seat][seat-user]. This section covers how it is decided.
+
+- **The order:**
+  1. The gates, before anything is locked or written: macOS (sessionmail
+     cannot yet read Linux start times), then `message box path claude`,
+     given 5 s.
+     Exit 2 means the box is missing; no `message`, a timeout or any
+     other exit means it could not be checked.
+  2. Under the seat's lock, who holds it: a live claim first, then a
+     live Claude Code session named `claude`, from one process-table read.
+  3. Free: the claim is written before the launch execs, and the launch
+     goes on as the seat.
+  4. With the lock let go, [the home-folder offer](#the-offer-start-in-work-instead)
+     when it applies, then the mint. A question waits on a person, so it
+     is never asked under the lock; the claim already holds the seat.
+- **The claim:** `holders/claude.json` in the state dir
+  (`~/.session/state`, or `$SESSION_STATE_DIR`), beside its lock
+  `holders/claude.lock`. It records the session id, the pid, that pid's
+  start time, the tmux pane and how it was taken. Nothing releases it.
+  It goes stale when the pid ends or the pid's start time differs (a
+  reused pid), and the next start takes it over. A claim that does not
+  parse is stale too; one that exists and cannot be read fails closed.
+- **Fail closed:** when the process table or the claim cannot be read,
+  the lock stays busy for 10 s or the claim cannot be written, a bare
+  start runs plain
+  with the `UNSURE` line. A wrong "free" would be a second session
+  hearing the seat's mail.
+- **Your own pane:** a direct start typed in the holder's own tmux pane
+  replaces it (`respawn-pane -k`), unless the holder is the launcher or
+  one of its ancestors (a start nested inside the seat is held). A start
+  with `--in-tmux` never replaces anything.
+- **tmux:** with `--in-tmux` the claim first names the launcher, then
+  moves to the new pane's process once the window is up. If that move
+  fails, one line says so, and the seat reads free until the new
+  session is running. A keyed seat mints its id in the pane, so its
+  claim has no id until then: the held line says `id minted in the
+  pane`.
+- **The definition goes inline.** Claude Code keeps the name `claude` for
+  its own built-in agent, so the seat is passed as
+  `--agents '{"claude": {"description": ..., "prompt": ""}}' --agent
+  claude`, with no plugin dir. The prompt is empty, and the description
+  is always the shipped one.
+- **Reads as bare:** the built-in counts as no agent file for `--idle`,
+  `--converse` and the settings layer. The session's birth settings
+  record `agent: claude` and no agent file. A shadowing file counts as an
+  agent file.
+- **A bare `--keyed`** is still refused, exit 2, before any gate runs.
+  `--allow-second-holder` does nothing on a bare start.
+- **The dry run** takes no lock and writes nothing. It prints one `seat:`
+  line after `mode:` saying what a live launch would do.
+
+### A named launch of the seat word
+
+`session start claude`, fresh or with `--resume ID` or `--continue`,
+meets the seat's own check, never [the front door][door] alone. The
+front door misses a holder that has claimed the seat but not yet
+started.
+
+- The gates decide only the line. A failed gate is followed by a
+  check that reads and writes nothing.
+- **Free:** it takes the seat under the lock, gate or no gate.
+- **Held:** a hand launch is refused, exit 3, with the front door's line.
+  `--allow-second-holder` starts beside it with the front door's line
+  and takes nothing. A spawner's `-n` starts plain with `HELD`. Only the
+  holder's line prints, never the gate's too.
+- **Not checkable:** it launches as named with the named `UNSURE` line,
+  and takes nothing. Beside a failed gate, both lines print.
+
+### The lines
+
+Each is one stderr line after `session start: `; the exit code does not
+change. HOLDER reads like `session 37f09460-1111-2222-3333-444455556666
+(pid 78996, tmux %4, live 23m)`, or `a session (id not known yet)` before
+the id is.
+
+| name | when | the line |
+| --- | --- | --- |
+| `TAKEN` | it took the seat | `this session is claude, the default seat on this host (box claude)` |
+| `HELD` | a live session holds it | `starting plain: the default seat claude is held by HOLDER, so this session will NOT hear Delta messages or calls; that one does` |
+| `NO_BOX` | box `claude` is missing | `starting plain: box claude is missing, so this session will NOT hear Delta messages or calls; repair: message setup --box claude` |
+| `UNBOXED` | the box could not be checked | `starting plain: could not check box claude (WHY), so this session will NOT hear Delta messages or calls` |
+| `LINUX` | not macOS | `starting plain: the default seat claude is macOS-only for now: sessionmail cannot yet read Linux start times, so this session will NOT hear Delta messages or calls` |
+| `UNSURE` | the holder could not be checked | `starting plain: could not check who holds the default seat claude (WHY), so this session will NOT hear Delta messages or calls` |
+| `RESUMED` | `session start - --resume ID` of a session born as the seat | `resuming plain: session 37f09460 was started as claude, the default seat, and a resume through '-' does not take it, so this session will NOT hear Delta messages or calls; 'session start claude --resume ID' takes it back while it is free`; when the seat is held, the tail is `the default seat claude is held now by HOLDER` |
+| named, cannot hear | a named launch took the seat but a gate failed | `this session is claude and holds the default seat, but cannot hear yet:` then the gate's reason (`may not hear yet` when the box only could not be checked) |
+| named `UNSURE` | a named launch could not check the holder | `this session is claude: could not check who holds the default seat claude (WHY), so it takes no claim and may be a second holder` |
+| moved | the tmux claim could not move to the pane | `placed, but the default seat claude's claim could not move to the new pane (WHY); the seat reads free until that session writes its sidecar` |
+
 ## The declared environment
 
 Nothing reaches a session's environment that its agent file did not
@@ -129,6 +227,18 @@ environment:
 The same goes for a login by `ANTHROPIC_API_KEY` or
 `ANTHROPIC_AUTH_TOKEN`: name that variable instead. A `/login` login,
 kept in the Keychain, is not affected: nothing here touches it.
+
+The launcher says when it drops one. If one of these names is set in its
+environment and the agent file does not declare it under `inherit:`,
+`secrets:` or `variables:`, it prints one line on stderr before the
+launch, a dry run included, naming the variable and the fix:
+
+```text
+session start: CLAUDE_CODE_OAUTH_TOKEN is set here but not handed down; to carry it, add `environment: inherit: [CLAUDE_CODE_OAUTH_TOKEN]` to /path/to/agent.md
+```
+
+The line never shows the value. The token is still dropped, and the exit
+code does not change.
 
 The default drops the token on purpose. A launcher's credential once
 reached every session it started, and every pane of a tmux server it
@@ -276,6 +386,81 @@ failed. The export comes before the declared environment, so an agent
 file that sets the variable under `variables:` wins. A dry run shows the
 line in the script it prints.
 
+## Starting in your home folder
+
+On macOS, a session that starts in your home folder gets one line on
+stderr before the launch:
+
+```text
+session start: starting in your home folder; macOS may ask for access to Desktop, Downloads, Photos and Media Library. Start in a project folder to avoid this.
+```
+
+- Why: the agent reads the folder it starts in. Desktop, Downloads,
+  Photos and Media Library sit directly in the home folder, and macOS
+  guards each one with a privacy prompt. In a project folder there are
+  none.
+- What to do: start in a project folder (`cd` there first, or pass
+  `--directory DIR`).
+- The folder checked is the one the session runs in: `--directory`, the
+  agent's `start: directory:`, or a resume's recorded folder, not the
+  one you typed the command in. Symlinks are followed. A folder inside
+  the home folder is silent.
+- Other systems are silent, as is a launch with `HOME` unset. A dry run
+  prints the line too.
+
+### The offer: start in `~/work` instead
+
+At a terminal, the line is followed by one question. If `~/work` is a
+folder already:
+
+```text
+session start: start in ~/work instead? [Y/n]
+```
+
+If nothing is there yet:
+
+```text
+session start: make ~/work and start there? [Y/n]
+```
+
+- Yes is the default: press Enter, or type `y` or `yes`. The session
+  starts in `~/work`, exactly as if `--directory ~/work` had named it,
+  and one line says so (`starting in ~/work`, or `made ~/work; starting
+  there`). A folder it makes gets the usual permissions for a new
+  folder (your umask), like `mkdir`.
+- Anything else is a no: `n`, `no`, a typo, or the end of input. The
+  session starts in the home folder, and nothing more is printed.
+- Ctrl-C at the question stops the launch with exit code 130, before
+  any session or folder is created. A launch that was taking the default
+  seat leaves the seat's claim behind: it names the stopped launcher, so it
+  is stale at once and the next start takes the seat.
+- If `~/work` exists but is not a folder (a file, or a link to nothing),
+  there is no question: one line says
+  `~/work is not a folder; starting in your home folder`. If the folder
+  cannot be made, one line says why, and the session starts in the home
+  folder. The exit code is unchanged either way.
+- It never moves, renames or deletes anything. The only thing it ever
+  creates is `~/work`, and only after a yes.
+
+The question is asked only when all of these hold:
+
+- the session would start in the home folder itself, on macOS, with
+  `HOME` set;
+- the folder is the one you typed the command in: not from
+  `--directory` or the agent's `start: directory:`, and not a resume;
+- it is not a dry run;
+- both stdin and stderr are a terminal. Scripts, pipes and launches
+  from another program get the warning line only, and start in the home
+  folder as before.
+
+A bare `session start` is asked too, after the default seat is decided
+(taken, or held and starting plain), and so is a named launch of the
+seat word. A launch refused for the seat (exit 3) is asked nothing,
+like a launch the front door refuses.
+
+To start in the home folder on purpose, without the question, name it:
+`session start --directory ~ <agent>`.
+
 ## From Python
 
 `sessiontools.start` is library first: `prepare(args)` returns a
@@ -295,4 +480,6 @@ plan = prepare(parse_args(["--dry-run", "AGENT"]))
 
 [cache]: list-snapshot-cache.md
 [door]: #the-front-door-one-holder
+[seat]: #the-default-seat-one-per-host
+[seat-user]: session.md#the-default-seat
 [upgrading]: settings.md#upgrading-from-010

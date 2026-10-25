@@ -19,7 +19,7 @@ from sessiontools.start.identity import SessionIdentity
 from sessiontools.start.plan import build_annotated_argv, build_vendor_argv
 
 CONFIG_VENDOR = {   # the old codex row's shape: a config door and no other
-    "cmd": "acme", "identity_door": None, "agent_plugin_dir_arg": None,
+    "cmd": "acme", "identity_door": None, "agent_plugin_dir_arg": None, "agents_door": None,
     "system_prompt_door": None, "system_prompt_file_door": None,
     "session_id_flag": None, "prompt_separator": None, "config_door": "-c",
     "settings_door": None, "env": {}}
@@ -36,7 +36,8 @@ def acme(monkeypatch):
 # ---------- the table stays data ----------------------------------------------
 
 def test_vendor_table_is_data_with_one_schema():
-    fields = {"cmd", "identity_door", "agent_plugin_dir_arg", "system_prompt_door",
+    fields = {"cmd", "identity_door", "agent_plugin_dir_arg", "agents_door",
+              "system_prompt_door",
               "system_prompt_file_door", "session_id_flag", "prompt_separator",
               "config_door", "settings_door", "env"}
     for vendor, table in v.VENDORS.items():

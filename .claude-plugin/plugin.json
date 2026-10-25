@@ -1,6 +1,6 @@
 {
   "name": "sessiontools",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "The session command for coding agents: list the live sessions, read a seat's properties and context, start one from an agent file.",
   "author": {
     "name": "Mike Bailey",

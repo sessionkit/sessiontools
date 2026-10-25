@@ -7,6 +7,8 @@ turns it into a `session start:` line and an exit code.
 Exit codes: 0 ok, 1 launch failed, 2 usage or a refusal, 3 the agent is
 already held by a live session (`holders`): its own code, so a
 caller can tell "someone holds this agent" from a failure or a usage error.
+130 is Ctrl-C at the home-folder question (`homefolder`), before anything
+is minted: the shell's own code for an interrupt.
 (The old header's "a real launch exits 3" was stale; nothing ever returned
 3 until the front door took it.)
 """
@@ -19,6 +21,7 @@ EXIT_OK = 0
 EXIT_LAUNCH_FAILED = 1
 EXIT_USAGE = 2
 EXIT_HELD = 3
+EXIT_INTERRUPTED = 130
 
 
 class LaunchError(Exception):

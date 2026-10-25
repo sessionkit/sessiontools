@@ -403,7 +403,7 @@ def test_park_writes_only_its_record_and_check_writes_nothing(home, capsys):
 # --- design §10 test 12: keep-until -----------------------------------------------------------
 
 def test_keep_until_is_written_and_shown(home, capsys):
-    t = "2030-12-08T17:00:00+11:00"
+    t = "2030-12-08T17:00:00+00:00"
     code, out = run(home, capsys, "--no-promises", "--keep-until", t, "--why", "the verdict",
                     now=datetime.fromisoformat(t).timestamp() - 3600)
     assert code == park.EXIT_CLEAN, out

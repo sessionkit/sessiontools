@@ -41,7 +41,7 @@ A park can also carry a keep-until time and a reason:
 
 ```console
 session park --no-promises \
-  --keep-until 2030-06-09T17:00:00+11:00 --why "waiting on a verdict"
+  --keep-until 2030-06-09T17:00:00+00:00 --why "waiting on a verdict"
 ```
 
 ## The five checks
@@ -121,7 +121,7 @@ whatever it chains, so a chained re-park cannot move it.
 ## `--keep-until T --why R`
 
 - Records a request to be kept until T, with its reason. T is absolute:
-  ISO 8601 with an offset (`2030-06-09T17:00:00+11:00`) or `Z`, and in
+  ISO 8601 with an offset (`2030-06-09T17:00:00+00:00`) or `Z`, and in
   the future.
 - **Refused, exit 2, nothing written:** no offset, a date alone, a past T,
   a relative form (`+2h`), prose, no `--why` or a blank one, and `--why`
@@ -145,7 +145,7 @@ clean: no
   claim     PASS     no claim held in WEB-153
   mail      FAIL     2 unread: <1792...@host.session-mail>, <1792...@host.session-mail>
   promises  UNKNOWN  not declared (--no-promises, --promise TEXT, --handed-on REF)
-keep until: 2030-06-09T17:00:00+11:00 (why: waiting on a verdict)
+keep until: 2030-06-09T17:00:00+00:00 (why: waiting on a verdict)
 ```
 
 Not parked reads `parked: no (never parked)`, `parked: no (a turn started

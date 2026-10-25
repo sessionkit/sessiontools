@@ -30,7 +30,7 @@ from sessiontools.window import Fullness
 def a_row(sid="73f2f616-aaaa", fullness=None) -> Row:
     s = Session(id=sid, harness="claude-code", busy=False, updated_at=1000.0, pid=100,
                 cwd="/w/repo", name="bob-f1", agent="bob", raw_status="shell",
-                path=Path("/s/100.json"), proc_start="Wed Jan  2 17:00:00 2030",
+                path=Path("/s/100.json"), proc_start="Sun Jun  9 17:00:00 2030",
                 started_at=900.0, version="2.1.283", tmux="default:@1.%11")
     return Row(session=s, repo="repo", tmux_socket="default", tmux_pane="%11",
                started=900.0, fullness=fullness)

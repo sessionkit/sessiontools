@@ -40,7 +40,7 @@ CAFFEINATE = "caffeinate -i -t 300"
 def tool_shell(command: str) -> str:
     """A Bash tool call as Claude Code runs it (measured shape)."""
     return ("/opt/homebrew/bin/bash -c source /Users/alice/.claude/shell-snapshots/"
-            "snapshot-bash-1893603600000-zh6e7c.sh 2>/dev/null || true && shopt -u extglob "
+            "snapshot-bash-1907254800000-zh6e7c.sh 2>/dev/null || true && shopt -u extglob "
             "2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- "
             "'unsetenv'; } >/dev/null 2>&1 || true && eval '" + command + "' < /dev/null "
             "&& pwd -P >| /tmp/claude-9096-cwd")

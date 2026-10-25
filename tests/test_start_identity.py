@@ -17,6 +17,7 @@ import pytest
 from start_support import STUB_SID, make_agents_root, write_key_init_stub
 
 from sessiontools.start import agents as ag
+from sessiontools.start import default_seat
 from sessiontools.start import identity as idn
 from sessiontools.start.errors import EXIT_USAGE, LaunchError
 
@@ -87,8 +88,11 @@ def test_list_agents_mirrors_resolution(tmp_path):
     (root / "dir" / "dir.md").write_text("x")
     (root / "broken").mkdir()               # no broken.md: resolve refuses it
     (root / ".hidden.md").write_text("x")
-    assert ag.list_agents(root=str(root)) == ["dir", "flat"]
-    assert ag.list_agents(root=str(tmp_path / "nowhere")) == []
+    # The default seat's word resolves to the package's built-in whatever the
+    # folder holds, so it is always listed (ST-256).
+    seat = default_seat.word()
+    assert ag.list_agents(root=str(root)) == sorted(["dir", "flat", seat])
+    assert ag.list_agents(root=str(tmp_path / "nowhere")) == [seat]
 
 
 # ---------- where sessions live -----------------------------------------------

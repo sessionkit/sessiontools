@@ -40,11 +40,20 @@ check: lint test  ## lint, then test
 build:  ## wheel + sdist into dist/
 	@uv build
 
+# release.py is stdlib-only, so python3 runs it: a plain `uv run` would re-lock
+# the project before the script starts.
 release:  ## bump (BUMP=patch|minor|major) or set (VERSION=X.Y.Z), then mirror, changelog, commit, tag
-	@uv run python scripts/release.py $(or $(VERSION),$(BUMP))
+	@python3 scripts/release.py $(or $(VERSION),$(BUMP))
 
-push:  ## push the branch and the tags to origin (release never pushes; this is the line it printed)
-	@git push origin HEAD && git push origin --tags
+# Push the release tag BY NAME. `git push --tags` sent every local tag,
+# the ready/ and approved/ merge-queue tags among them, to whatever origin was.
+# The version is pyproject.toml's, read the way scripts/release.py reads it.
+# A missing tag is refused before anything is pushed, the branch included.
+push:  ## push the branch, then the ONE release tag vX.Y.Z by name (pyproject's version); refuses if that tag is not here
+	@version="$$(uv version --short)" && [ -n "$$version" ] || { echo "push: could not read the version from pyproject.toml (uv version --short) - nothing pushed" >&2; exit 1; }; \
+	tag="v$$version"; \
+	git rev-parse -q --verify "refs/tags/$$tag" >/dev/null || { echo "push: tag $$tag is not in this repository - run 'make release' first; nothing pushed" >&2; exit 1; }; \
+	git push origin HEAD && git push origin "$$tag"
 
 # THE TOKEN NEVER TOUCHES A COMMAND LINE. argv is readable by every process
 # on the machine (`ps`); a child's environment only by its own user. So the

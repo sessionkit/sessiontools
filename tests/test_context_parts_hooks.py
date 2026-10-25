@@ -106,7 +106,7 @@ def test_calls_and_batches():
 def test_two_hooks_under_one_batch_id_join_their_own_commands():
     r = rows()
     assert r["pager-hook"].top[0].example == build.STEADY_LINE
-    assert r["notifications"].top[0].form == "[clock] #:# AEDT"
+    assert r["notifications"].top[0].form == "[clock] #:#+#"
 
 
 def test_boot_chars_are_the_part_the_first_call_read():
@@ -168,7 +168,7 @@ def test_session_totals():
 
 
 @pytest.mark.parametrize("line, form", [
-    ("[clock] 13:07 AEDT", "[clock] #:# AEDT"),
+    ("[clock] 13:07 UTC", "[clock] #:# UTC"),
     ("ctx 42% of 1000000", "ctx #% of #"),
     ("no digits", "no digits"),
     ("v2.1.296", "v#.#.#"),

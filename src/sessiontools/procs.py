@@ -4,7 +4,10 @@ Liveness is one rule, the one `session list` always used (and sessionmail's
 doorbell uses since 2030-06-09): a sidecar's session is live when its pid is
 running AND that process started within SAME_PROCESS_SECONDS of the
 sidecar's `procStart`. A pid the OS has handed to something else is not the
-session. `ps` is asked in UTC because `procStart` is UTC ctime.
+session. `procStart` comes in two encodings (`parse_start`): on macOS it is
+`ps lstart` in UTC ctime, so `ps` is asked in UTC; on Linux it is the
+process's start in clock ticks since boot, which becomes a wall-clock time
+by the rule `ps` itself uses for `lstart`.
 
 `table(commands=True)` adds each process's command line: the pane
 signal sorts a seat's tool shells by what runs under them. Callers that do
@@ -33,6 +36,60 @@ def parse_ctime(text: str | None) -> float | None:
     except ValueError:
         return None
     return when.timestamp()
+
+
+#: Linux's kernel statistics, whose `btime` line is the boot time in epoch
+#: seconds. A module constant so a test can point it at a file of its own.
+PROC_STAT = "/proc/stat"
+
+#: Clock ticks per second when the system cannot say. Linux reports process
+#: start times in USER_HZ, 100 on every mainstream architecture.
+DEFAULT_CLOCK_TICKS = 100
+
+
+def boot_time() -> int | None:
+    """The `btime` line of PROC_STAT: when the system booted, in epoch
+    seconds. None where there is no such file (macOS) or no such line."""
+    try:
+        with open(PROC_STAT, encoding="ascii", errors="replace") as f:
+            for line in f:
+                name, _, value = line.partition(" ")
+                if name == "btime":
+                    return int(value) if value.strip().isdigit() else None
+    except OSError:
+        return None
+    return None
+
+
+def clock_ticks() -> int:
+    """Clock ticks per second (`SC_CLK_TCK`), DEFAULT_CLOCK_TICKS when the
+    system cannot say."""
+    try:
+        hz = os.sysconf("SC_CLK_TCK")
+    except (AttributeError, ValueError, OSError):
+        return DEFAULT_CLOCK_TICKS
+    return hz if hz > 0 else DEFAULT_CLOCK_TICKS
+
+
+def parse_start(text: str | None) -> float | None:
+    """A sidecar's `procStart` -> epoch seconds; None when it is not one.
+
+    Two encodings, told apart by their shape, never by the platform:
+    - UTC ctime (`Sun Jun  9 17:00:00 2030`), what Claude Code writes on
+      macOS: `parse_ctime`.
+    - Bare digits (`88300`), what it writes on Linux: the process's start
+      in clock ticks since boot (field 22 of `/proc/<pid>/stat`). It
+      becomes `btime + ticks // HZ`, the rule procps uses to print
+      `lstart`, so it lands on the second the process table shows. With no
+      boot time to add (no PROC_STAT) it is None: not provably live.
+      The kernel prints starttime as an unsigned 64-bit number, at most 20
+      digits; a longer run of digits is not one, and is None too."""
+    if text and text.isascii() and text.isdigit():
+        if len(text) > 20:
+            return None
+        boot = boot_time()
+        return None if boot is None else float(boot + int(text) // clock_ticks())
+    return parse_ctime(text)
 
 
 @dataclass(frozen=True)
@@ -103,7 +160,7 @@ def same_process(pid: int | None, proc_start: str | None, procs: dict[int, Proc]
     proc = procs.get(pid) if pid is not None else None
     if proc is None or proc.started is None:
         return False
-    claimed = parse_ctime(proc_start)
+    claimed = parse_start(proc_start)
     return claimed is not None and abs(proc.started - claimed) <= SAME_PROCESS_SECONDS
 
 

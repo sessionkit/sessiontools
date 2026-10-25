@@ -52,6 +52,16 @@ eval "$(session completion bash)"
   whether a pin keeps it there. Off until you set `model.default`.
 - `session --help`: every verb.
 
+## Requirements
+
+- [x] macOS (tested on macOS 27, Apple silicon)
+- [ ] Linux
+- [ ] WSL
+- [ ] Windows
+
+What sessiontools depends on, what needs each one, and how to upgrade
+it: [dependencies][dependencies].
+
 ## Switching accounts
 
 `session account use NAME` moves this Mac to another Claude account from
@@ -227,6 +237,8 @@ and the kit's other packages keep their files in it too.
 - [The default model][default-model]: `session default-model`, opt-in,
   puts settings.json's `"model"` back when something rewrites it
 - [The Python library][library]: `from sessiontools import sessions`
+- [Dependencies][dependencies]: what sessiontools needs, what needs each
+  one, and how to upgrade it
 - [Building and testing][building]: make targets, specs, releases
 - [CHANGELOG][changelog]; licence AGPL-3.0-or-later ([LICENSE][license])
 
@@ -295,6 +307,7 @@ Follow one as it grows with `tail -F`, for example
 [default-model]: docs/default-model.md
 [library]: docs/python-library-api.md
 [building]: docs/building-and-testing.md
+[dependencies]: docs/dependencies.md
 [changelog]: CHANGELOG.md
 [license]: LICENSE
 [configuration]: docs/configuration.md

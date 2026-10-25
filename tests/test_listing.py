@@ -12,7 +12,7 @@ from sessiontools import get as get_mod
 from sessiontools import listing, procs, send, tmux, window
 from sessiontools.procs import Proc
 
-START = "Wed Jan  2 17:00:00 2030"
+START = "Sun Jun  9 17:00:00 2030"
 T0 = procs.parse_ctime(START)
 NOW = T0 + 3600
 # The seats' cwd: short, absolute, and naming no directory. A transcript dir
@@ -209,6 +209,33 @@ def test_session_context_without_a_transcript_is_exit_1(fleet, monkeypatch, caps
 def test_no_one_live_says_so(monkeypatch, tmp_path):
     monkeypatch.setenv("SESSION_SIDECAR_DIR", str(tmp_path))
     assert listing.render_table(listing.rows()) == "No running sessions found."
+
+
+def test_a_linux_session_is_listed(monkeypatch, tmp_path, capsys):
+    """Inside a session on Linux: one sidecar whose procStart is clock ticks
+    since boot, the way Claude Code writes it there. `session list` shows
+    that session, not "No running sessions found." Runs anywhere: /proc/stat
+    is the test's own file."""
+    lstart = "Sun Jun  9 17:00:00 2030"
+    boot = int(procs.parse_ctime(lstart)) - 883
+    stat = tmp_path / "stat"
+    stat.write_text(f"cpu  1 2 3 4\nbtime {boot}\n")
+    monkeypatch.setattr(procs, "PROC_STAT", str(stat), raising=False)
+    monkeypatch.setattr(procs, "clock_ticks", lambda: 100, raising=False)
+    cars = tmp_path / "sessions"
+    cars.mkdir()
+    monkeypatch.setenv("SESSION_SIDECAR_DIR", str(cars))
+    started = procs.parse_ctime(lstart)
+    (cars / "5182.json").write_text(json.dumps({
+        "pid": 5182, "sessionId": "0e24c0cd-dddd", "status": "idle", "cwd": CWD,
+        "updatedAt": (started + 60) * 1000, "startedAt": (started + 1) * 1000,
+        "procStart": "88300", "version": "2.1.310"}))
+    table = {5182: Proc(5182, 5154, started), 5154: Proc(5154, 1, started), 1: Proc(1, 0, started)}
+    monkeypatch.setattr(procs, "table", lambda: table)
+    monkeypatch.setattr(tmux, "pane_index", dict)
+    assert [r.short for r in listing.rows()] == ["0e24c0cd"]
+    code, out, _ = _run(["list", "--no-context"], capsys)
+    assert code == 0 and "No running sessions found." not in out and "0e24c0cd" in out
 
 
 @pytest.mark.parametrize("secs, text", [(45, "45s"), (3540, "59m"), (38940, "10h49m"), (123062, "1d10h")])

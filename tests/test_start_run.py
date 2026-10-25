@@ -105,13 +105,16 @@ def test_list_agents_answers_before_anything_else(tmp_path, monkeypatch, capsys)
     root = make_agents_root(tmp_path)
     monkeypatch.setenv("AGENTS_DIR", root)
     assert start.main(["--list-agents", "--in-tmux"]) == EXIT_OK
-    assert capsys.readouterr().out == "scout\n"
+    # The default seat's built-in is listed beside the folder's (ST-256).
+    assert capsys.readouterr().out.splitlines()[-1] == "scout"
 
 
 def test_help_exits_zero_and_marks_the_agent_optional(capsys):
     assert start.main(["-h"]) == EXIT_OK
     out = capsys.readouterr().out
     assert "[agent]" in out and "plain vendor session" in out
+    flat = " ".join(out.split())                  # argparse wraps the epilog
+    assert "default seat" in flat and "`-` is always plain" in flat   # ST-256
     assert "--identity-from-env" not in out and "--window-name" not in out
 
 

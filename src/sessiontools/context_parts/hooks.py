@@ -13,7 +13,7 @@ carried context, else the hook's event name. Per command:
   window holds it again:
   - EXACT: the same text;
   - TEMPLATED: the same once every digit run is one `#` (DIGITS), and not
-    exact: `[clock] 13:07 AEDT` then `[clock] 13:08 AEDT`.
+    exact: `[clock] 13:07 UTC` then `[clock] 13:08 UTC`.
   The first copy of a line is never a repeat. IN-BATCH is the part of those
   repeats whose earlier copy came in the SAME batch: a PostToolUse hook
   firing once per tool call of one batch (the prototype's `dup` + `templ`).

@@ -35,7 +35,7 @@ MONITOR = f"{PY} /Users/u/.local/bin/pager listen --monitor"
 def tool_shell(command: str) -> str:
     """A Bash tool call as Claude Code runs it (the shape test_pane_reading pins)."""
     return ("/opt/homebrew/bin/bash -c source /Users/u/.claude/shell-snapshots/"
-            "snapshot-bash-1893603600000-zh6e7c.sh 2>/dev/null || true && eval '"
+            "snapshot-bash-1907254800000-zh6e7c.sh 2>/dev/null || true && eval '"
             + command + "' < /dev/null && pwd -P >| /tmp/claude-9096-cwd")
 
 
@@ -571,15 +571,15 @@ def test_read_marks_in_both_line_forms_make_mail_read(mail):
     mail.deliver("1.a@h")
     mail.deliver("2.a@h")
     mail.deliver("3.a@h")
-    mail.mark(f"2030-06-09T17:00:00+11:00 1.a@h read worker {SID}",           # ruled, empty reason
-              f"2030-06-09T17:01:00+11:00 <2.a@h> read worker {SID} opened",  # ruled, reason
+    mail.mark(f"2030-06-09T17:00:00+00:00 1.a@h read worker {SID}",           # ruled, empty reason
+              f"2030-06-09T17:01:00+00:00 <2.a@h> read worker {SID} opened",  # ruled, reason
               f"3.a@h read {SID} 2030-06-09T00:00:00")                        # the old four fields
     assert mail.check().word == park.PASS
 
 
 def test_a_seen_only_mark_is_still_unread(mail):
     mail.deliver("1.a@h")
-    mail.mark(f"2030-06-09T17:00:00+11:00 1.a@h seen ride {SID}")
+    mail.mark(f"2030-06-09T17:00:00+00:00 1.a@h seen ride {SID}")
     assert mail.check().why == "1 unread: <1.a@h>"
 
 
@@ -587,7 +587,7 @@ def test_a_draft_and_a_superseded_message_do_not_count(mail):
     mail.deliver("draft@h", sub="cur", info=":2,DS")
     mail.deliver("old@h")
     mail.deliver("new@h", supersedes="old@h")
-    mail.mark(f"2030-06-09T17:00:00+11:00 new@h read worker {SID}")
+    mail.mark(f"2030-06-09T17:00:00+00:00 new@h read worker {SID}")
     assert mail.check().word == park.PASS
 
 
@@ -636,7 +636,7 @@ def test_unread_in_the_own_box_beats_a_subscription(mail):
 def test_mail_reads_only_the_header_block(mail):
     p = mail.deliver("1.a@h")
     p.write_bytes(b"Message-ID: <1.a@h>\n\n" + b"\xff\xfe not text " * 10_000)
-    mail.mark(f"2030-06-09T17:00:00+11:00 1.a@h read worker {SID}")
+    mail.mark(f"2030-06-09T17:00:00+00:00 1.a@h read worker {SID}")
     assert mail.check().word == park.PASS
 
 

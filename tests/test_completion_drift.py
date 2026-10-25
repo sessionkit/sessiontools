@@ -271,6 +271,7 @@ def test_parsers_and_handlers_hold_the_same_verbs():
     (("account",), ["list", "status", "use"]),
     (("pane-state",), ["show", "watch", "agent"]),
     (("default-model",), ["show", "list", "enforce", "watch", "unit"]),
+    (("agent",), ["default"]),
 ])
 def test_the_named_sub_verbs(script, path, subs):
     [got] = complete(script, [(*path, "")])

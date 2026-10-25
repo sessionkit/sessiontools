@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SHIM = ROOT / "hooks" / "busy-sound"
 HOOKS = ROOT / "hooks" / "hooks.json"
 
-START = "Mon Dec  9 09:00:00 2030"
+START = "Sun Dec  8 09:00:00 2030"
 T0 = procs.parse_ctime(START)
 NOW = T0 + 3600
 SID = "16550ac1-0000-4000-8000-000000000001"

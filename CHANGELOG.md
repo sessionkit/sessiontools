@@ -9,6 +9,55 @@ stamps this file.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-25
+
+### Added
+
+- **A bare `session start` takes the host's default seat** (ST-256), the
+  one session named for the vendor (`claude`), when no live session
+  holds it and it can hear; otherwise it starts plain with one line
+  saying why. `session start -` is always plain, and `session agent
+  default` prints the name. See `docs/session.md`.
+- **`session start` in the home folder offers to start in `~/work`
+  instead** (ST-254). At a terminal on macOS, after the home-folder
+  warning, one question offers to start in `~/work`, or to make it
+  first when it is missing. Yes is the default and starts the session
+  there, as if `--directory` had named it. A no starts in the home
+  folder as before. A `~/work` that is not a folder is refused in one
+  line. It asks nothing with `--directory`, `start: directory:`, a
+  resume, `--dry-run` or no terminal, and never moves or deletes
+  anything. Ctrl-C at the question exits 130. See
+  `docs/session-start-launcher.md`.
+- **`session start` warns once when it starts in the home folder on
+  macOS** (ST-247). The agent reads the folder it starts in, and the
+  home folder holds Desktop, Downloads, Photos and Media Library, each
+  behind a macOS privacy prompt. One stderr line says so and suggests a
+  project folder. It checks the folder the session runs in
+  (`--directory`, `start: directory:` and a resume's recorded folder
+  included), follows symlinks, and stays silent in subfolders, on other
+  systems and with `HOME` unset. It never refuses, prompts or changes
+  the exit code, and a dry run shows it too. See
+  `docs/session-start-launcher.md`.
+- **`docs/dependencies.md`: what sessiontools depends on** (ST-252). One
+  entry per dependency, the outside tools and the two Python packages:
+  what needs it, by command, whether it is required or optional, how it
+  gets onto the Mac and how to upgrade it. Homebrew and tmux are marked
+  pending a ruling. The README gains a short `## Requirements`, the
+  operating systems and a link to the page, and `.github/dependabot.yml`
+  looks for updates to the Python dependencies daily. The page lists the
+  direct dependencies and the tools a user meets, and links `uv.lock` for
+  the full resolved set.
+
+### Fixed
+
+- `make push` and the line `scripts/release.py` prints push the release tag by name, `git push origin vX.Y.Z`, never `--tags`; a missing tag is refused and nothing is pushed (ST-243).
+- A release changes no dependency pin: `scripts/release.py` runs `uv version --frozen`, dry and real, and writes the new version onto `uv.lock`'s root `sessiontools` line as text, refusing a lock without exactly one such line before it writes anything; `make release` runs it with `python3`, not a re-locking `uv run` (ST-243, SK-180).
+- `scripts/release.py` refuses an existing `vX.Y.Z` tag, a changelog with no `[Unreleased]` and a manifest with no version before any write, so a refused run leaves the tree clean (ST-243, ST-240).
+- `session start` names a credential it drops (set here, not declared by the agent file) and the `inherit:` fix, on stderr, never the value (ST-246).
+- `session list` on Linux shows the live session it runs in, instead of "No running sessions found." There, Claude Code records a session's process start in clock ticks since boot rather than as a date, and the liveness check now reads both forms. Every check that asks whether a session is still running gains the same fix (ST-250).
+- The example times in `docs/session-park.md`, `docs/status-line-script.md` and two docstrings are written in UTC (ST-253).
+- The launch info's Machine line shows the mail host: the pinned host when one is set (`SESSIONMAIL_HOST`, `SESSION_MAIL_HOST`, or the `mail` tool's `host` setting), else the hostname's first label, lowercased. It used to print the raw hostname, which could differ from the host in the seat's own address (ST-258).
+
 ## [0.3.0] - 2026-10-24
 
 ### Added
