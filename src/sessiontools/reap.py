@@ -8,7 +8,8 @@ or KEEP, and the reason. By default it is a DRY RUN and closes nothing.
 re-read at the act, the pane signal once more just before the kill, then
 `close_seat` kills the seat's PANE by id (never the window), and `verify`
 proves the pane, the pid and its descendants gone. A survivor is named,
-never killed. One line per act goes to `reap.log` in the state dir.
+never killed. One line per act goes to `reap.log` in the log dir
+(`~/.sessionkit/tools/log/`, settings.log_dir).
 
 THE ONE IDEA: never try to detect "waiting on the user". CLOSE
 only on POSITIVE evidence, on both sides, and every unknown is KEEP:
@@ -741,19 +742,20 @@ def act(v: Verdict, limit: int, w: World) -> Act:
 
 
 def log_act(a: Act, now: float | None = None, env: Mapping[str, str] | None = None) -> None:
-    """One line per act in `reap.log` in the state dir: time,
+    """One line per act in `reap.log` in the tools log dir
+    (settings.log_dir; the state dir is not used): time,
     short, name, task, pane, outcome and why, tab-separated. Best effort: a
     log that cannot be written never undoes or blocks an act."""
     from datetime import datetime
 
-    from sessiontools import snapshot
+    from sessiontools import settings
     r = a.verdict.row
     task = a.verdict.task.task_id if a.verdict.task else "-"
     when = datetime.fromtimestamp(time.time() if now is None else now).astimezone()
     fields = [when.isoformat(timespec="seconds"), r.short, r.name, task,
               f"{r.tmux_socket}:{r.tmux_pane}", a.outcome, " ".join(a.why.split())]
     try:
-        d = snapshot.state_dir(env)
+        d = settings.log_dir(settings.PACKAGES["session"], env)
         d.mkdir(parents=True, exist_ok=True)
         with open(d / "reap.log", "a") as f:
             f.write("\t".join(fields) + "\n")
@@ -828,7 +830,7 @@ the server the seat was read from. A close is verified: the pane gone and the se
 its line up to the pane and every descendant dead; a read that fails is
 "not verified", exit 1. A survivor is named, never killed. A pane's last
 kill closes its window, and a session's last its session: a human attached
-there sees it end. Each act is one line in reap.log in the state dir.
+there sees it end. Each act is one line in ~/.sessionkit/tools/log/reap.log.
 
 Exit 0: a clean read, and every act closed and verified. 1: a --yes act was
 refused at a gate, or a close did not verify. 2: a usage error, including a

@@ -64,7 +64,7 @@ Name the model in the `session` tool's host settings,
 
 ```console
 $ session default-model enforce
-default-model: model "sonnet" -> "opus" in ~/.claude/settings.json (backup ~/.session/state/default-model/backups/settings.json.20300609-170000)
+default-model: model "sonnet" -> "opus" in ~/.claude/settings.json (backup ~/.sessionkit/tools/state/default-model/backups/settings.json.20300609-170000)
 ```
 
 ## The list is what this release knows
@@ -98,12 +98,17 @@ tool's host settings, so a change to the pin takes effect at once.
   into `~/Library/LaunchAgents/` would leave an empty plist there.
 
 On macOS, a launchd agent (`WatchPaths`), with its log in
-`~/Library/Logs/sessiontools/default-model.log`:
+`~/.sessionkit/tools/log/default-model.log`. Before 0.3.2 the agent
+logged to `~/Library/Logs/sessiontools/default-model.log`; that file is
+left in place, and an agent installed then keeps writing it until you
+unload it (the `launchctl bootout` line in [Turn it off](#turn-it-off))
+and run these steps again. `bootstrap` refuses an agent that is still
+loaded:
 
 ```sh
 session default-model unit launchd > dev.sessionkit.tools.default-model.plist &&
     mv dev.sessionkit.tools.default-model.plist ~/Library/LaunchAgents/
-mkdir -p ~/Library/Logs/sessiontools
+mkdir -p ~/.sessionkit/tools/log
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.sessionkit.tools.default-model.plist
 ```
 
@@ -166,11 +171,14 @@ systemctl --user daemon-reload
   `"model"` nested inside another key is never touched.
 - **Changed while we read it:** the pass starts again, up to three
   times, and then refuses. The next change retries.
-- **Backups:** `~/.session/state/default-model/backups/settings.json.<stamp>`,
+- **Backups:** `default-model/backups/settings.json.<stamp>` in the state
+  dir (`session path state`),
   each read back after it is written, the newest 10 kept, mode `0600`.
-- **The log:** `~/.session/state/default-model/log.jsonl`, one line per
+- **The log:** `default-model/log.jsonl` in the state dir, one line per
   write: the file, the old and new value, the backup.
-- `SESSION_STATE_DIR` moves both, in place of `~/.session/state`.
+- The state dir is `~/.sessionkit/tools/state/` on a fresh host, the old
+  `~/.session/state/` while it is still there, and `SESSION_STATE_DIR`
+  when set.
 
 ## Exit codes
 

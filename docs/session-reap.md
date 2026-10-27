@@ -173,8 +173,10 @@ What a close takes with it:
 - Claude Code saves its transcript as it goes, so a done seat loses
   nothing else.
 
-Each act is one tab-separated line in `reap.log`, in the state dir
-(`$SESSION_STATE_DIR`, else `~/.session/state`). The fields are time,
+Each act is one tab-separated line in `reap.log`, in the tools log dir
+`~/.sessionkit/tools/log/`, under `HOME` (`SESSION_STATE_DIR` does not
+move it). Before 0.3.2 it was in the state dir (`$SESSION_STATE_DIR/reap.log`,
+else `~/.session/state/reap.log`); that file is left in place. The fields are time,
 short, name, task, `socket:pane`, outcome and why. The log is best effort:
 if it cannot be written, the act is neither blocked nor undone.
 

@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 import pytest
-from start_support import STUB_SID, clean_env, session_cmd
+from start_support import STUB_SID, at_a_terminal, clean_env, pretend_a_terminal
 from test_start_singleton import (
     HEAR,
     NO_BOX_STDERR,
@@ -444,6 +444,7 @@ def test_a_live_named_refusal_exits_3_through_main(tmp_path, macos, work, monkey
     write_seat_claim(env)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
+    pretend_a_terminal(monkeypatch)
     assert st.main([SEAT]) == EXIT_HELD
     assert f"session start: {SEAT} {REFUSE}" in capsys.readouterr().err
 
@@ -581,7 +582,7 @@ def race(tmp_path: Path, launches: list[tuple[list[str], dict]]) -> tuple[list, 
     barrier = tmp_path / "go"
     runs = []
     for argv, extra in launches:
-        command = " ".join(f"'{part}'" for part in session_cmd(*argv))
+        command = " ".join(f"'{part}'" for part in at_a_terminal(*argv))
         script = f'while [ ! -e "{barrier}" ]; do sleep 0.01; done; exec {command}'
         runs.append(subprocess.Popen(["sh", "-c", script], cwd=tmp_path / "work",
                                      env={**base, **extra}, stdout=subprocess.PIPE,

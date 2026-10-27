@@ -26,6 +26,15 @@ from sessiontools.start.errors import LaunchError
 
 SID = "11111111-2222-3333-4444-555555555555"
 TOOL = "claude-code"
+#: The launcher's default when nothing names Claude's renderer: these test
+#: HOMEs have no ~/.claude, so every door carries it.
+TUI = {"tui": "default"}
+LAUNCHER_TUI = "tui from the launcher default (no settings file sets it)"
+
+
+def chose_a_renderer(home: Path) -> None:
+    """The user ran `/tui fullscreen`: their own file names `tui`."""
+    w(home / ".claude" / "settings.json", {"tui": "fullscreen"})
 
 
 def w(path: Path, obj) -> Path:
@@ -148,7 +157,25 @@ def settings_door(argv: list) -> str | None:
     return argv[argv.index("--settings") + 1] if "--settings" in argv else None
 
 
-def test_no_claude_code_file_anywhere_no_door(tmp_path, scratch, capsys):
+def test_no_claude_code_file_anywhere_the_door_holds_the_tui_default(tmp_path, scratch,
+                                                                    capsys):
+    """A fresh host: no `claude-code` file and no renderer chosen. The door
+    exists for the launcher's `tui` default alone, and nothing is said."""
+    p = plan(tmp_path, scratch)
+    sources = [src for token, src in p.provenance if token == "--settings"]
+    assert sources == [f"computed: claude-code settings: {LAUNCHER_TUI}"]
+    assert capsys.readouterr().err.count("claude-code") == 0
+    (tmp_path / "live").mkdir()
+    live = plan(tmp_path / "live", scratch, dry_run=False)
+    item = next(f for f in live.files if isinstance(f, PlannedFile)
+                and f.path == settings_door(live.argv))
+    assert json.loads(item.text) == TUI
+
+
+def test_no_claude_code_file_and_a_renderer_chosen_no_door(tmp_path, scratch, capsys):
+    """The user's own settings name `tui`: the door would outrank them, so
+    with nothing else to render there is no door, as before."""
+    chose_a_renderer(scratch)
     p = plan(tmp_path, scratch)
     assert "--settings" not in p.argv
     assert capsys.readouterr().err.count("claude-code") == 0
@@ -161,7 +188,7 @@ def test_a_host_file_reaches_the_settings_door_with_its_origin(tmp_path, scratch
     sources = [src for token, src in p.provenance if token == "--settings"]
     assert sources == [("computed: claude-code settings: model from host "
                         f"{kit_short()}, effortLevel "
-                        f"from host {kit_short()}")]
+                        f"from host {kit_short()}, {LAUNCHER_TUI}")]
     assert p.files == ()                                   # a dry run plans no file
 
 
@@ -173,7 +200,7 @@ def test_a_live_plan_names_a_0600_file_holding_model_and_effort_only(tmp_path, s
     (item,) = [f for f in p.files if isinstance(f, PlannedFile) and f.path == path]
     assert os.path.basename(path).startswith(SETTINGS_PREFIX) and path.endswith(".json")
     assert os.path.dirname(path) == os.path.join(p.identity.session_dir, "launch")
-    assert json.loads(item.text) == {"effortLevel": "fake-e", "model": "fake-host"}
+    assert json.loads(item.text) == {"effortLevel": "fake-e", "model": "fake-host", **TUI}
     target = tmp_path / "written.json"
     materialize(PlannedFile(str(target), item.text))
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
@@ -188,7 +215,7 @@ def test_a_seat_overrides_the_host_and_a_cli_model_stays_after_the_door(tmp_path
              dry_run=False)
     item = next(f for f in p.files if isinstance(f, PlannedFile)
                 and f.path == settings_door(p.argv))
-    assert json.loads(item.text) == {"effortLevel": "fake-e", "model": "fake-seat"}
+    assert json.loads(item.text) == {"effortLevel": "fake-e", "model": "fake-seat", **TUI}
     # claude: a CLI --model beats --settings (ST-150 p15); the launcher keeps it.
     assert p.argv.index("--settings") < p.argv.index("--model")
     assert p.argv[p.argv.index("--model") + 1] == "fake-cli"
@@ -224,6 +251,7 @@ def test_an_agent_rule_cut_inside_brackets_is_said_on_stderr(tmp_path, scratch, 
 
 
 def test_only_extra_keys_no_door(tmp_path, scratch, capsys):
+    chose_a_renderer(scratch)               # else the door holds the tui default
     w(kit(scratch) / "claude-code.json", {"theme": "fake"})
     p = plan(tmp_path, scratch)
     assert "--settings" not in p.argv
@@ -279,6 +307,7 @@ def test_a_live_launch_writes_the_file_and_never_the_user_file(tmp_path):
     argv = recorded_argv(record)
     path = Path(settings_door(argv))
     assert path.parent.name == "launch"
-    assert json.loads(path.read_text()) == {"effortLevel": "fake-e", "model": "fake-host"}
+    assert json.loads(path.read_text()) == {"effortLevel": "fake-e", "model": "fake-host",
+                                            **TUI}
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not (home / ".claude").exists()

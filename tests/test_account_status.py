@@ -23,9 +23,11 @@ import secrets as pysecrets
 import socket
 import subprocess
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from conftest import ANCHOR
 from settings_support import write_session_settings
 
 from sessiontools.account import keychain as kc
@@ -148,8 +150,11 @@ class World:
         return self.metrics
 
     def status(self, **overrides) -> int:
+        # A fixed clock: whether a window's reset has passed is told by it, so
+        # the fixtures' resets (ANCHOR-relative) never go stale against the real one.
         kwargs = {"keychain": self.keychain, "fetch": self.fetch, "env": self.env,
-                  "home": self.home, "out": self.out, "err": self.err}
+                  "home": self.home, "clock": lambda: ANCHOR,
+                  "out": self.out, "err": self.err}
         kwargs.update(overrides)
         return st.status(**kwargs)
 
@@ -205,7 +210,8 @@ def test_status_names_the_host_by_its_item_fp(world, capsys):
     assert lines[1] == "seat:  follows the host"
     assert lines[2] == (
         "usage: 5h 75% (resets 2030-06-09T17:00+00:00), "
-        "7d 52.5% (resets 2030-12-08T17:00+00:00)  (usage of the live account)")
+        "7d 52.5% (resets 2030-12-08T17:00+00:00)  "
+        "(usage of the live account, age not reported by the exporter)")
     assert world.keychain.reads == 1 and world.keychain.writes == []
     assert world.err.getvalue() == ""
     world.assert_no_leak(capsys)
@@ -213,15 +219,17 @@ def test_status_names_the_host_by_its_item_fp(world, capsys):
 
 def test_status_json_shape_is_design_section_5(world, capsys):
     data = world.json()
-    assert set(data) == {"host", "seat", "usage"}
+    assert set(data) == {"host", "seat", "usage", "profile"}
     assert data["host"] == {"name": "c", "email": "carol@example.com",
                             "via": "Keychain, fp match"}
     assert data["seat"] == {"name": "c", "via": "follows the host"}
     assert data["usage"] == {
         "url": st.USAGE_URL, "label": "usage of the live account",
         "windows": [{"window": "5h", "account": "default", "percent": 75.0,
+                     "expired": False, "stale": False, "age_seconds": None,
                      "resets_at": "2030-06-09T17:00+00:00"},
                     {"window": "7d", "account": "default", "percent": 52.5,
+                     "expired": False, "stale": False, "age_seconds": None,
                      "resets_at": "2030-12-08T17:00+00:00"}]}
     world.assert_no_leak(capsys)
 
@@ -398,7 +406,8 @@ def test_reset_times_are_shown_by_default_and_one_flag_hides_them(world, capsys)
     assert world.status() == 0
     assert world.out.getvalue().splitlines()[2] == (
         "usage: 5h 75% (resets 2030-06-09T17:00+00:00), "
-        "7d 52.5% (resets 2030-12-08T17:00+00:00)  (usage of the live account)")
+        "7d 52.5% (resets 2030-12-08T17:00+00:00)  "
+        "(usage of the live account, age not reported by the exporter)")
     world.out = io.StringIO()
     data = world.json()
     assert [row["resets_at"] for row in data["usage"]["windows"]] == \
@@ -415,11 +424,13 @@ def test_reset_times_are_shown_by_default_and_one_flag_hides_them(world, capsys)
 def test_a_window_with_no_reset_series_shows_no_reset(tmp_path, capsys):
     world = make_world(tmp_path, metrics='claude_plan_usage_percent{window="5h"} 10\n')
     assert world.status() == 0
-    assert world.out.getvalue().splitlines()[2] == "usage: 5h 10%  (usage of the live account)"
+    assert world.out.getvalue().splitlines()[2] == \
+        "usage: 5h 10%  (usage of the live account, age not reported by the exporter)"
     assert "resets" not in world.out.getvalue()
     world.out = io.StringIO()
     assert world.json()["usage"]["windows"] == \
-        [{"window": "5h", "account": None, "percent": 10.0, "resets_at": None}]
+        [{"window": "5h", "account": None, "percent": 10.0, "expired": False, "stale": False,
+          "age_seconds": None, "resets_at": None}]
     world.assert_no_leak(capsys)
 
 
@@ -441,8 +452,9 @@ def test_parse_metrics_skips_what_it_cannot_read():
             'garbage line with spaces\n'
             'plain_metric 7\n')
     assert st.parse_metrics(text) == [
-        ("claude_plan_usage_percent", {"window": "5h", "note": 'a "quoted" \\ b'}, 3.0),
-        ("plain_metric", {}, 7.0)]
+        ("claude_plan_usage_percent", {"window": "5h", "note": 'a "quoted" \\ b'}, 3.0,
+         1922963696),
+        ("plain_metric", {}, 7.0, None)]
 
 
 @pytest.mark.parametrize("bad", ["NaN", "+Inf", "-Inf"])
@@ -454,12 +466,13 @@ def test_a_non_finite_sample_is_skipped_never_a_crash_or_bad_json(tmp_path, bad,
         f'claude_plan_window_reset_timestamp_seconds{{account="default",window="7d"}} {bad}\n'))
     assert world.status() == 0
     assert world.out.getvalue().splitlines()[2] == \
-        "usage: 7d 40%  (usage of the live account)"
+        "usage: 7d 40%  (usage of the live account, age not reported by the exporter)"
     world.out = io.StringIO()
     assert world.status(as_json=True) == 0
     data = json.loads(world.out.getvalue(), parse_constant=lambda c: pytest.fail(c))
     assert data["usage"]["windows"] == [
-        {"window": "7d", "account": "default", "percent": 40.0, "resets_at": None}]
+        {"window": "7d", "account": "default", "percent": 40.0, "expired": False,
+         "stale": False, "age_seconds": None, "resets_at": None}]
     world.assert_no_leak(capsys)
 
 
@@ -474,7 +487,7 @@ def test_only_non_finite_usage_is_unavailable(tmp_path, capsys):
 def test_a_token_shaped_label_value_is_redacted():
     token = synthetic_token()
     text = f'claude_plan_usage_percent{{account="{token}",window="5h"}} 9\n'
-    [(_, labels, _)] = st.parse_metrics(text)
+    [(_, labels, _, _)] = st.parse_metrics(text)
     assert labels["account"] == "(redacted)"
     usage = st.usage_of("http://x", lambda url: text)
     assert token not in st.usage_line(usage) and token not in json.dumps(usage.to_json())
@@ -513,6 +526,152 @@ def test_the_real_fetcher_on_a_closed_port_is_unavailable():
         port = sock.getsockname()[1]
     url = f"http://127.0.0.1:{port}/metrics"
     assert st.usage_of(url, REAL_FETCH).unavailable == f"no exporter at {url}"
+
+
+# --- status: STALE past a reset, and each figure's age ---------------------------------
+
+NOW = ANCHOR.timestamp()
+
+
+def fixed_clock() -> datetime:
+    return datetime.fromtimestamp(NOW, UTC)
+
+
+#: Two account-labelled series, as one exporter reported them: `work`'s 7d
+#: window ended a week before the clock, and the exporter sent no sample
+#: timestamps. Its 97 is a used-percent of a window that is over.
+TWO_ACCOUNTS_ONE_WINDOW_OVER = f"""\
+claude_plan_usage_percent{{account="work",window="5h"}} 12
+claude_plan_usage_percent{{account="work",window="7d"}} 97
+claude_plan_window_reset_timestamp_seconds{{account="work",window="5h"}} {NOW + 3 * 3600:.0f}
+claude_plan_window_reset_timestamp_seconds{{account="work",window="7d"}} {NOW - 7 * 86400:.0f}
+claude_plan_usage_percent{{account="default",window="5h"}} 30
+claude_plan_usage_percent{{account="default",window="7d"}} 40
+claude_plan_window_reset_timestamp_seconds{{account="default",window="5h"}} {NOW + 3600:.0f}
+claude_plan_window_reset_timestamp_seconds{{account="default",window="7d"}} {NOW + 2 * 86400:.0f}
+"""
+
+
+def _stale_world(tmp_path, metrics: str) -> World:
+    return make_world(tmp_path, metrics=metrics)
+
+
+def _line(world: World, **overrides) -> str:
+    world.out = io.StringIO()
+    overrides.setdefault("clock", fixed_clock)
+    assert world.status(**overrides) == 0, world.err.getvalue()
+    return world.out.getvalue().splitlines()[2]
+
+
+def _json(world: World, **overrides) -> dict:
+    world.out = io.StringIO()
+    overrides.setdefault("clock", fixed_clock)
+    return world.json(**overrides)
+
+
+def test_an_exporter_window_whose_reset_passed_is_stale_and_its_figure_withheld(
+        tmp_path, capsys):
+    world = _stale_world(tmp_path, TWO_ACCOUNTS_ONE_WINDOW_OVER)
+    line = _line(world)
+    assert line == (
+        f"usage: work 5h 12% (resets {st._iso(NOW + 3 * 3600)}), "
+        f"work 7d STALE: window ended {st._iso(NOW - 7 * 86400)} (7d ago), "
+        "figure not shown, "
+        f"default 5h 30% (resets {st._iso(NOW + 3600)}), "
+        f"default 7d 40% (resets {st._iso(NOW + 2 * 86400)})  "
+        "(usage of the live account, age not reported by the exporter)")
+    assert "97" not in line
+    windows = _json(world)["usage"]["windows"]
+    over = windows[1]
+    assert over == {"window": "7d", "account": "work", "percent": None, "expired": True,
+                    "stale": True, "age_seconds": None,
+                    "resets_at": st._iso(NOW - 7 * 86400)}
+    assert all(w["expired"] is False and w["stale"] is False
+               for i, w in enumerate(windows) if i != 1)
+    assert [w["percent"] for w in windows] == [12.0, None, 30.0, 40.0]
+    world.assert_no_leak(capsys)
+
+
+def test_a_stale_window_is_said_even_with_no_resets(tmp_path, capsys):
+    world = _stale_world(tmp_path, TWO_ACCOUNTS_ONE_WINDOW_OVER)
+    line = _line(world, resets=False)
+    assert "work 7d STALE: window ended" in line and "figure not shown" in line
+    assert "(resets" not in line and "97" not in line
+    over = _json(world, resets=False)["usage"]["windows"][1]
+    assert over["stale"] is True and over["percent"] is None and "resets_at" not in over
+    world.assert_no_leak(capsys)
+
+
+def test_an_exporter_reset_exactly_now_has_passed(tmp_path, capsys):
+    world = _stale_world(tmp_path, (
+        'claude_plan_usage_percent{window="5h"} 9\n'
+        f'claude_plan_window_reset_timestamp_seconds{{window="5h"}} {NOW:.0f}\n'))
+    assert _line(world).startswith("usage: 5h STALE: window ended ")
+    assert _json(world)["usage"]["windows"][0]["expired"] is True
+    world.assert_no_leak(capsys)
+
+
+def test_usage_of_uses_the_now_it_is_given():
+    text = ('claude_plan_usage_percent{window="7d"} 5\n'
+            f'claude_plan_window_reset_timestamp_seconds{{window="7d"}} {NOW:.0f}\n')
+    [before] = st.usage_of("http://x", lambda url: text, NOW - 1).windows
+    [after] = st.usage_of("http://x", lambda url: text, NOW + 1).windows
+    assert (before.expired, before.percent) == (False, 5.0)
+    assert (after.expired, after.percent) == (True, None)
+
+
+def test_exporter_sample_timestamps_give_each_figure_its_age(tmp_path, capsys):
+    ms = int((NOW - 180) * 1000)
+    world = _stale_world(tmp_path, (
+        f'claude_plan_usage_percent{{account="default",window="5h"}} 75 {ms}\n'
+        f'claude_plan_usage_percent{{account="default",window="7d"}} 52.5 {ms - 3_600_000}\n'
+        f'claude_plan_window_reset_timestamp_seconds{{account="default",window="5h"}} '
+        f'{NOW + 3600:.0f} {ms}\n'))
+    assert _line(world) == (
+        f"usage: 5h 75% (resets {st._iso(NOW + 3600)}, 3m old), 7d 52.5% (1h old)  "
+        "(usage of the live account)")
+    assert _line(world, resets=False) == \
+        "usage: 5h 75% (3m old), 7d 52.5% (1h old)  (usage of the live account)"
+    windows = _json(world)["usage"]["windows"]
+    assert [w["age_seconds"] for w in windows] == [180, 3780]
+    world.assert_no_leak(capsys)
+
+
+def test_a_figure_with_no_timestamp_beside_one_with_says_so_on_its_own(tmp_path, capsys):
+    ms = int((NOW - 120) * 1000)
+    world = _stale_world(tmp_path, (
+        f'claude_plan_usage_percent{{window="5h"}} 75 {ms}\n'
+        'claude_plan_usage_percent{window="7d"} 50\n'))
+    assert _line(world) == \
+        "usage: 5h 75% (2m old), 7d 50% (age not reported)  (usage of the live account)"
+    assert [w["age_seconds"] for w in _json(world)["usage"]["windows"]] == [120, None]
+    world.assert_no_leak(capsys)
+
+
+def test_no_timestamps_say_age_not_reported_once_never_a_guess(tmp_path, capsys):
+    world = _stale_world(tmp_path, METRICS)
+    line = _line(world)
+    assert line.count("age not reported") == 1
+    assert line.endswith("(usage of the live account, age not reported by the exporter)")
+    assert " old" not in line
+    assert [w["age_seconds"] for w in _json(world)["usage"]["windows"]] == [None, None]
+    world.assert_no_leak(capsys)
+
+
+@pytest.mark.parametrize("stamp", ["soon", "1.5e12", str(int((NOW + 3600) * 1000))])
+def test_a_timestamp_that_is_not_a_time_or_is_ahead_is_unknown(tmp_path, stamp, capsys):
+    world = _stale_world(tmp_path, f'claude_plan_usage_percent{{window="5h"}} 75 {stamp}\n')
+    assert _line(world) == \
+        "usage: 5h 75%  (usage of the live account, age not reported by the exporter)"
+    assert _json(world)["usage"]["windows"][0]["age_seconds"] is None
+    world.assert_no_leak(capsys)
+
+
+def test_a_little_exporter_clock_jitter_reads_as_zero_seconds_old(tmp_path, capsys):
+    world = _stale_world(tmp_path,
+                         f'claude_plan_usage_percent{{window="5h"}} 75 {int((NOW + 30) * 1000)}\n')
+    assert _line(world) == "usage: 5h 75% (0s old)  (usage of the live account)"
+    world.assert_no_leak(capsys)
 
 
 # --- status: refusals ------------------------------------------------------------------

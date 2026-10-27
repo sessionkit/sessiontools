@@ -64,7 +64,7 @@ CLAUDE_CONFIG_DIR and SESSION_STATE_DIR when they are set.
 
     session default-model unit launchd > LABEL.plist &&
         mv LABEL.plist ~/Library/LaunchAgents/
-    mkdir -p ~/Library/Logs/sessiontools
+    mkdir -p ~/.sessionkit/tools/log
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/LABEL.plist
 
     mkdir -p ~/.config/systemd/user

@@ -1,12 +1,25 @@
 # Switching Claude accounts: `session account`
 
+- **Available:** the accounts you registered with `new` or `add`, kept in
+  `~/.sessionkit/tools/accounts/accounts.json`: each one's name, email
+  and where its token lives. Never the token itself.
+- **In use:** `status` and `list` fingerprint the host's token (the
+  Keychain item, or the file the `session` setting `account.token_file`
+  names) and look it up in that list. No match is
+  `unknown (not in registry)`, never a guess.
+- **Why `/login` moves every seat on a Keychain host:** it rewrites the
+  one Keychain item, `Claude Code-credentials`, that every seat with no
+  env token of its own reads. On a token-file host, seats launched from
+  the login shell carry the file's token instead, and `use` swaps the
+  file: only new seats move.
+
 `session account` says which of your Claude accounts this Mac is on, and
 moves it to another one from a token you already hold. There is no
 browser, no `/login` and no restart. It never prints a token.
 
-- **`use` moves EVERY seat on the Mac.** By default the host's login is
-  one Keychain item, `Claude Code-credentials`. Every session with no env
-  token of its own reads it, and follows a change within about 50 s.
+- **`use` moves EVERY seat on the Mac.** On a Keychain host (the
+  default) it rewrites that one item, as `/login` does, and every seat
+  that reads it follows the change within about 50 s.
 - **Each seat that moves cold-starts its cache.** Measured on one busy
   host: 2.07M and 1.10M tokens for all its seats, one swap each. `use`
   shows that cost and stops, unless you pass `--yes`.
@@ -24,13 +37,21 @@ browser, no `/login` and no restart. It never prints a token.
 - **`new` adds an account.** It runs `claude setup-token` in a masked
   copy of its screen, saves the token to passage, reads it back, and
   registers it. The token is never on screen or on argv. See `new` below.
+- **`use` does not change the name `/status` shows.** Claude Code's
+  `/status` and `claude auth status` name the account from
+  `~/.claude.json`, and `use` never edits that file. The token decides
+  which account is billed. `verify` proves which one. See
+  [Proving which account bills][proving].
 
 The verbs:
 
 - `session account list`: names, emails and sources, and which one the
   host is on.
 - `session account status [--json] [--no-resets]`: the host account,
-  this seat's route, plan usage and resets.
+  this seat's route, plan usage and resets, and the account
+  `~/.claude.json` names.
+- `session account verify [NAME] [--json]`: one 1-token request with a
+  token, to show which account the API bills for it.
 - `session account use NAME --witness WHO`: the plan and its cost. It
   writes nothing (exit 3).
 - `session account use NAME --witness WHO --yes`: move the host.
@@ -39,6 +60,54 @@ The verbs:
 - `session account add NAME --email E --source BACKEND:REF [--source ...] [--no-fp]`:
   register token sources that already exist.
 - `session account remove NAME`: unregister. It deletes no token.
+
+## Which mode is this host in?
+
+A host signs in one of two ways. The `session` setting
+`account.token_file` says which, and `status` shows it on its `host:`
+line (`Keychain, fp match` or `token file, fp match`).
+
+- **Keychain host** (`account.token_file` unset, the default). Every seat
+  with no env token of its own reads one Keychain item,
+  `Claude Code-credentials`. `use` rewrites that item, and live seats move
+  to the new account within about a minute (40 to 50 s measured). Signing
+  in again with `/login` in Claude Code also works: it rewrites the same
+  item.
+- **Token-file host** (`account.token_file` names a file). The login shell
+  exports `CLAUDE_CODE_OAUTH_TOKEN` from that file, and `use` swaps the
+  file. Only new seats move. Live seats keep the token they launched with
+  until they restart. See [Token-file hosts][token-file-hosts].
+
+## Proving which account bills
+
+`status` names an account by matching a token against the registry. That
+shows which token a seat holds, not which account the API bills. There
+are two ways to check what the API says:
+
+- **A fresh seat's status line.** If your status line shows the plan's
+  usage windows, start a new seat after the switch and read its 7d reset
+  time. On a Keychain host a live seat also moves within a minute. On a
+  token-file host only a new seat does.
+- **`session account verify`.** It makes one 1-token request to the API
+  with the token and prints the account-wide usage windows it gets back.
+  See [`verify`][verify] below. A plain `verify` checks the token this
+  seat bills, and `verify NAME` checks a registered account's token.
+
+**Why the 7d reset names the account.** The 7d window belongs to the
+account, not to a seat or a token. Every token of one account reports the
+same 7d reset, and two accounts almost never share one. So the same reset
+from `verify` and from a seat's status line means the same account.
+
+**`/status` and `claude auth status` can name the old account.** They name
+the account from `oauthAccount` in `~/.claude.json`. That field is only a
+display profile, not the token. `use` does not change that file (Claude
+Code owns it and rewrites it), so after a switch those two keep naming the
+old account until Claude Code rewrites it. `use` says so in its plan, and
+`status` prints the file's address on its own `profile:` line, marked
+when it is not the host's account. The `profile:` line reads the default
+file, `~/.claude.json`. Claude Code reads `$CLAUDE_CONFIG_DIR/.claude.json`
+instead when `CLAUDE_CONFIG_DIR` is set, so a seat with its own config
+folder may show a different name in `/status`.
 
 ## Blast radius
 
@@ -75,7 +144,9 @@ the plan is shown and every gate has passed.
    source costs a PIN and a key touch. All fail: exit 4.
 4. Read the host's current sign-in: the item, or the file. Already on
    NAME: say so, exit 0.
-5. Print the plan: from, to, the item or file, the token's source, and
+5. Print the plan: from, to, a `note:` line naming the account
+   `~/.claude.json` shows (which `use` does not change), the item or
+   file, the token's source, and
    the cost (how many seats move and the tokens their caches cold-start)
    or, for a token file, the restart report. Then where the backup goes,
    and the witness, or `MISSING`.
@@ -151,6 +222,7 @@ current token, compared in memory:
 
 ```text
 use home (home@example.com): the host moves from work to home
+  note:    ~/.claude.json names work@example.com (Claude's /status and 'claude auth status' read it); use does not change it. The token decides billing: check with 'session account verify'
   file:    token file ~/path/to/oauth-token
   keychain: not read: a seat that signs in from it does not move
   token:   passage:claude/oauth-tokens/home@example.com (preflight: runs before the write)
@@ -171,6 +243,58 @@ fingerprint. If the file holds a token the registry does not know,
 `status` says `token file: unknown (not in registry)`, not the account's
 name. To be named again, register the token the file now holds, or `use`
 back to an account whose source the registry knows.
+
+## `verify [NAME]`: which account a token bills
+
+`verify` makes ONE request to the API with a token: `POST /v1/messages`
+to `claude-haiku-4-5`, the cheapest model, with `max_tokens` 1. It reads
+the account-wide usage headers from the answer
+(`anthropic-ratelimit-unified-5h-utilization`,
+`anthropic-ratelimit-unified-5h-reset`,
+`anthropic-ratelimit-unified-7d-utilization`,
+`anthropic-ratelimit-unified-7d-reset` and
+`anthropic-ratelimit-unified-status`). It costs that one call. `status`
+never calls the API. `use` and `new` reach it only through `claude`
+itself: their `claude -p` preflight, and `new`'s `claude setup-token`.
+`verify` is the one verb that asks the API about a token directly.
+
+- **`verify NAME`** checks that registered account's token, from its first
+  source that works (a `pass` source costs its touch).
+- **`verify`** checks the token this seat bills, in the order Claude Code
+  uses: `CLAUDE_CODE_OAUTH_TOKEN` in this shell, else the host's token
+  file or Keychain item. On a token-file host with no env token, it says
+  that it checks the FILE: such a seat signs in from Claude's stored
+  credentials, so the file may not be what it bills.
+
+```text
+verify: token from Keychain item; matches registry account work
+  5h  12% used  (resets 2030-06-09T17:00+00:00, in 3h)
+  7d  6% used  (resets 2030-06-09T20:00+00:00, in 6h)  <- the 7d reset identifies the account
+  status: allowed (HTTP 200, model claude-haiku-4-5, max_tokens 1)
+```
+
+- The first line names where the token came from and which registry
+  account it matches, or `not in registry`. The fingerprint is never
+  shown.
+- A header the API did not send is `not reported`, never 0. No other
+  header is shown, and never a request header.
+- A 429 still carries the headers: it exits 0, and the status line says
+  `rate limited`.
+- `--json` gives `{source, account, http_status, model, windows: {5h:
+  {utilization, resets_at}, 7d: {...}}, status}`. `account` is the
+  registry name or null, `utilization` a percent or null.
+- **Never a token.** The token goes only into the request's
+  `Authorization` header. It is never printed, logged or put in an error,
+  and an error message from the API that looks like a token is not shown.
+
+| exit | meaning |
+|---|---|
+| 0 | the API answered with at least one usage window header (a 429 too) |
+| 2 | usage, unknown NAME |
+| 4 | no token resolved |
+| 5 | a refused registry, setting, token file or Keychain item |
+| 6 | the API refused the token (401, 403) |
+| 7 | no answer (network error, timeout, 5xx, or no window headers) |
 
 ## `new NAME --email E`: a token made, saved and registered
 
@@ -300,6 +424,29 @@ number.
   `--json`); `--resets` is still accepted and does nothing. A window the
   exporter gives no reset time for shows none in text, and `resets_at:
   null` in `--json`.
+  - **A window whose reset has passed is STALE**, from the exporter or
+    the limits file: `7d STALE: window ended 2030-06-09T20:00+00:00 (182d
+    ago), figure not shown`. A used-percent of a window that is over is
+    not a current reading, so it is not shown (`percent: null`, `expired`
+    and `stale` true in `--json`), and never guessed to be 0.
+    `--no-resets` does not hide it. A figure is STALE only once its reset
+    has passed, never just for being old.
+  - **Each figure's age**, when the exporter sends one (the optional
+    sample timestamp of the metrics format): `5h 75% (resets ..., 3m
+    old)`. An exporter that sends none gets `age not reported by the
+    exporter` once, at the end of the line. In `--json` each window
+    carries `age_seconds`, null when unknown, never a guess.
+  - **The display profile**, last: `profile: work@example.com
+    (~/.claude.json, display only)`, with `<- differs from the host
+    account` when it is not the host account's registry email. It is the
+    name `/status` shows, not the token (see [Proving which account
+    bills][proving]). No file or no account is `profile: none`; a file
+    that cannot be read is `profile: unreadable (~/.claude.json: WHY)`.
+    Only the address is read from the file, and the file is never
+    written. `--json`: `profile: {email, source, matches_host, reason}`,
+    `matches_host` null when either address is unknown.
+  - `--json` windows, from either source: `{window, account, percent,
+    expired, stale, age_seconds, resets_at}`.
 - **`add`:** registers token sources that already exist (`file:PATH`, a
   private 0600 file of yours; `pass:ENTRY`, gpg pass; `passage:ENTRY`,
   passage and age), cheapest first. It resolves one source to fingerprint
@@ -330,12 +477,15 @@ usage: 5h 3% (resets 2030-06-09T17:00+00:00), 7d 1% (resets 2030-12-08T17:00+00:
 
 - `--json` gives `usage.source` `limits_file`, the `file`, `written_at`,
   `age_seconds` and `stale`, and the same `windows` (`5h`, `7d`) the
-  exporter gives, each with `expired`.
+  exporter gives, each with `expired`, `stale` and `age_seconds` (the
+  file's age).
 - **The age is always said.** Past 15 minutes the file is `STALE`. Its
   numbers are still shown, and the reader decides.
-- **A window whose reset has passed shows no percent**: `5h reset since
-  written`, with no reset clause in text, and `percent: null`,
-  `expired: true` in `--json`. It is never guessed to be 0.
+- **A window whose reset has passed shows no percent**, as on the
+  exporter: `5h STALE: window ended 2030-06-09T11:34+00:00 (1h ago),
+  figure not shown`, with no reset clause, and `percent: null`,
+  `expired: true`, `stale: true` in `--json`. It is never guessed to
+  be 0.
 - Resets follow the same flag as the exporter's windows: shown by
   default, hidden by `--no-resets`.
 - **Only the host's window.** The file's `account` must be absent or
@@ -432,4 +582,6 @@ $ /path/to/python -m sessiontools.account.movehome --apply
   decision about the skill's size.
 
 [token-file-hosts]: #token-file-hosts
+[proving]: #proving-which-account-bills
+[verify]: #verify-name-which-account-a-token-bills
 [credentials]: session-start-launcher.md#credentials-are-never-handed-down

@@ -18,7 +18,14 @@ import stat
 import subprocess
 
 import pytest
-from start_support import TIMEOUT_S, clean_env, make_agents_root, plan_for, session_cmd
+from start_support import (
+    TIMEOUT_S,
+    at_a_terminal,
+    clean_env,
+    make_agents_root,
+    plan_for,
+    pretend_a_terminal,
+)
 
 from sessiontools import start
 from sessiontools.start import context, run, secrets
@@ -260,10 +267,15 @@ def test_main_no_longer_bridges_a_live_launch_that_declares_secrets(tmp_path, fa
     monkeypatch.setenv("AGENTS_DIR", make_agents_root(tmp_path, front_matter=SECRETS))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(os, "execve", lambda *a: pytest.fail("bridged"))
+    pretend_a_terminal(monkeypatch)
     seen = []
     monkeypatch.setattr(os, "execvpe", lambda f, argv, env: seen.append(argv) or (
         _ for _ in ()).throw(SystemExit(0)))
-    for argv in (["scout", "hello"], ["scout", "--resume", "abc"]):
+    for n, argv in enumerate((["scout", "hello"], ["scout", "--resume", "abc"])):
+        # Each launch its own state dir: the stubbed exec leaves this pytest
+        # alive as the first launch's claim on scout, which would refuse the
+        # second as a live holder (the front door's claim, ST-260).
+        monkeypatch.setenv("SESSION_STATE_DIR", str(tmp_path / f"state-{n}"))
         with pytest.raises(SystemExit):
             start.main(argv)
     assert [argv[:2] for argv in seen] == [["bash", "-c"]] * 2
@@ -296,7 +308,7 @@ def test_the_vendor_gets_the_value_and_the_file_is_gone_before_it_runs(tmp_path,
     (tmp_path / "work").mkdir()
     env = clean_env(AGENTS_DIR=root, TMPDIR=str(tmpdir),
                     PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    result = subprocess.run(session_cmd("scout", *tail), capture_output=True, text=True,
+    result = subprocess.run(at_a_terminal("scout", *tail), capture_output=True, text=True,
                             timeout=TIMEOUT_S, cwd=str(tmp_path / "work"), env=env, check=False)
     assert result.returncode == 0, result.stderr
     assert (record / "token").read_text() == VALUE

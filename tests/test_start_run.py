@@ -152,13 +152,13 @@ def test_execute_writes_the_planned_files_then_execs_the_script(tmp_path, monkey
         run.execute(plan)
     file, argv, modes, names = seen[0]
     assert (file, argv) == ("bash", ["bash", "-c", plan.script])
-    assert len(plan.files) == 3
+    assert len(plan.files) == 4                  # the settings door's too (tui default)
     assert set(modes) == {item.path for item in plan.files}      # every one, at the exec
     for is_dir, mode in modes.values():
         assert mode == (0o700 if is_dir else 0o600)
-    assert sorted(modes.values()) == [(False, 0o600), (False, 0o600), (True, 0o700)]
+    assert sorted(modes.values()) == [(False, 0o600)] * 3 + [(True, 0o700)]
     assert [n.split("-")[2] for n in names if n.startswith("session-start-")] == [
-        "agent", "first", "system"]
+        "agent", "first", "settings", "system"]
     assert ".gitignore" in names
     assert not any(os.path.exists(item.path) for item in plan.files)   # cleaned up
 
@@ -172,7 +172,7 @@ def test_a_live_plan_puts_its_door_files_under_launch(tmp_path):
     plan = plan_for(tmp_path, "start:\n  context:\n    system-prompt:\n      - echo hi\n",
                     argv_tail=["w" * 10], flags=["--first-message-file-over", "4"])
     launch_dir = os.path.join(plan.identity.session_dir, "launch")
-    assert len(plan.files) == 3
+    assert len(plan.files) == 4                  # the settings door's too (tui default)
     assert {os.path.dirname(item.path) for item in plan.files} == {launch_dir}
     assert all(launch_dir + "/" in token for token in plan.argv
                if isinstance(token, str) and "session-start-" in token

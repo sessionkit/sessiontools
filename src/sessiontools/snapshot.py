@@ -62,7 +62,7 @@ DEFAULT_MAX_AGE = 2.0
 LOCK_WAIT_S = 15.0
 LOCK_POLL_S = 0.01
 
-STATE_DIR_ENV = "SESSION_STATE_DIR"
+STATE_DIR_ENV = "SESSION_STATE_DIR"            # settings.SESSION_STATE_DIR_ENV
 MAX_AGE_ENV = "SESSION_LIST_MAX_AGE"
 FRESH_ENV = "SESSION_LIST_FRESH"
 TOOL = "session"
@@ -78,13 +78,11 @@ Compute = Callable[[bool], list[Row]]
 # --- where, and what is in force ------------------------------------------------
 
 def state_dir(env: Mapping[str, str] | None = None) -> Path:
-    """`$SESSION_STATE_DIR`, else `~/.session/state`."""
+    """The state leaf, `settings.state_root`: `$SESSION_STATE_DIR`, else the
+    old `~/.session/state/` while it is real, else
+    `~/.sessionkit/tools/state/` (settings.leaf_path)."""
     from sessiontools import settings
-    e = os.environ if env is None else env
-    override = e.get(STATE_DIR_ENV)
-    if override:
-        return Path(os.path.expanduser(override))
-    return settings.session_root(env) / "state"
+    return settings.state_root(env)
 
 
 def snapshot_path(env: Mapping[str, str] | None = None) -> Path:

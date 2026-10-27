@@ -101,7 +101,7 @@
 // live outside the engine, so a playing sound carries on across a rebuild.
 //
 // LOGGING: one JSON line per state change on stderr (launchd sends it to
-// ~/Library/Logs/sessiontools/sound-engine.log), never one per datagram.
+// ~/.sessionkit/tools/log/sound-engine.log), never one per datagram.
 
 import AVFoundation
 import CoreAudio

@@ -36,7 +36,7 @@ from collections.abc import Mapping
 from typing import NamedTuple
 
 from sessiontools import settings as _settings
-from sessiontools.start import agentfile, claude_settings, default_seat
+from sessiontools.start import agentfile, boot_identity, claude_settings, default_seat
 from sessiontools.start.agentfile import AgentFile, StartOptions, switch_enabled
 from sessiontools.start.agents import (
     Agent,
@@ -356,18 +356,19 @@ def rehearse_fold(launch: Launch) -> None:
     unreadable or non-object file, or `--settings` given twice, leaves no
     session directory behind. It runs exactly when the real assembly would
     fold: a `claude-code` file exists in a layer known now (template, host,
-    agent, seat; a session about to be minted has no session layer yet).
-    A layer file the reader refuses is left to the real assembly, which
-    refuses it as before."""
+    agent, seat; a session about to be minted has no session layer yet), or
+    the door carries the launcher's `tui` default (none of Claude's own
+    settings files names `tui`). A layer file the reader refuses is left to
+    the real assembly, which refuses it as before."""
     try:
         found = _settings.sources(claude_settings.TOOL, None, launch.agent.name or None,
                                   getattr(launch.args, "seat", None), launch.environ,
                                   default_seat.user_agent_file(launch.agent))
     except _settings.SettingsError:
         return
-    if not found:
-        return
     cwd = launch.work_dir if launch.resume is None else resume_cwd(launch)[0]
+    if not found and claude_settings.claude_sets_tui(cwd, launch.environ) is not None:
+        return
     typed_source(launch, cwd)
 
 
@@ -529,7 +530,8 @@ def render_launch_script(argv: list, work_dir: str,
                          vendor_env: Mapping[str, str] | None = None,
                          shebang: bool = False, pane_mint: PaneMint | None = None,
                          record: LaunchRecord | None = None,
-                         launch_info: str | None = None) -> str:
+                         launch_info: str | None = None,
+                         identity_call: str = "") -> str:
     """The bash a launch runs - ONE text for both endings: `bash -c` on the
     direct path, and with `shebang` the 0700 trampoline a tmux pane runs.
     In this order - the order is the contract:
@@ -551,6 +553,9 @@ def render_launch_script(argv: list, work_dir: str,
         the declared-environment prelude
         the launch record                   (the env the vendor gets,
                                              so after everything that sets it)
+        the identity block                  (`identity_call`: who this session
+                                             is, written in the pane, last
+                                             before the vendor)
         exec argv                           (shlex-quoted; exec, so the
                                              vendor owns this pid - which is
                                              what makes --reap-pid true)
@@ -602,6 +607,8 @@ def render_launch_script(argv: list, work_dir: str,
     rendered = " ".join(render_argv_token(arg) for arg in argv)
     if record is not None:
         lines.append(render_record_call(record, rendered))
+    if identity_call:
+        lines.append(identity_call.rstrip("\n"))
     if pane_mint is not None:
         lines.append(rendered)
         lines.append('exit "$?"')
@@ -810,16 +817,24 @@ def resolve_claude_settings(launch: Launch, identity: SessionIdentity | None,
     host (`~/.sessionkit/tools/settings/`, settings.host_dir), the agent's MD, the
     seat, and the session layer once the id is minted (a pane-minted launch
     has no id yet: its session layer is not read). None, and nothing said,
-    when no `claude-code` file exists anywhere or the vendor has no door.
+    when the vendor has no door.
+
+    The launcher's one default rides in it: `"tui": "default"`, when
+    nothing sets `tui` (claude_settings.with_tui_default). So there is a
+    door even with no `claude-code` file anywhere, unless one of Claude's
+    own settings files names `tui` (claude_settings.claude_sets_tui, read
+    under CWD's `.claude/` and the user's): then, with no file to render,
+    there is none, and the argv is as before.
 
     A CLI passthrough `--settings` (a crew's spawn) is FOLDED in as the top
     layer before render (claude_settings.fold): its keys win, a host
     `_locked` path still holds, and the caller drops its tokens for the one
     computed door (folded_cli_args). A relative path is read under CWD, the
-    session's working directory (default: the launch's). With no
-    `claude-code` file anywhere it is not read, and the argv is as before.
-    A CLI that opens `--settings` more than once is refused (exit 2): the
-    fold takes one, and dropping the rest would lose a file without a word.
+    session's working directory (default: the launch's). With no door (no
+    `claude-code` file anywhere, and Claude's own settings name `tui`) it
+    is not read, and the argv is as before. A CLI that opens `--settings`
+    more than once is refused (exit 2): the fold takes one, and dropping
+    the rest would lose a file without a word.
 
     Said on stderr, never refused: the reader's notes, each key v1
     does not render, and, for a launch whose AGENT FILE opens its own
@@ -837,21 +852,24 @@ def resolve_claude_settings(launch: Launch, identity: SessionIdentity | None,
     except _settings.SettingsError as error:
         raise LaunchError(f"{agent_subject(launch.agent)}: settings: {error}",
                           code=EXIT_USAGE) from error
-    if not res.sources:
-        return None
     declared = declared_settings(launch)
     if declared is not None:
-        files = claude_settings.render(res).files
-        print(f"{PROG}: {claude_settings.skipped(files, declared, launch.environ)}",
-              file=sys.stderr)
+        if res.sources:
+            files = claude_settings.render(res).files
+            print(f"{PROG}: {claude_settings.skipped(files, declared, launch.environ)}",
+                  file=sys.stderr)
+        return None
+    work_dir = launch.work_dir if cwd is None else cwd
+    claude_tui = claude_settings.claude_sets_tui(work_dir, launch.environ)
+    if not res.sources and claude_tui is not None:
         return None
     typed = typed_settings(launch)
     if typed is not None:
-        res = claude_settings.fold(res, typed_source(
-            launch, launch.work_dir if cwd is None else cwd))
+        res = claude_settings.fold(res, typed_source(launch, work_dir))
     rendered = claude_settings.render(res, typed)
     for note in [*res.notes, *rendered.notes]:
         print(f"{PROG}: {note}", file=sys.stderr)
+    rendered = claude_settings.with_tui_default(rendered, claude_tui)
     return rendered if rendered.data else None
 
 
@@ -921,6 +939,36 @@ def render_birth_call(record: LaunchRecord | None, python: str | None = None) ->
         " ".join([shlex.quote(python), "-I", "-c", shlex.quote(_settings.BIRTH_ENTRY),
                   "--dir", record.session_dir]) + " || :",
     ]) + "\n"
+
+
+def launch_seat(launch: Launch) -> str | None:
+    """The seat this launch takes, for the identity block: `--seat`, else
+    the default seat word when that is the agent launched (a holder or a
+    second session beside one), else None (the pane may still find the
+    address a spawner handed down)."""
+    seat = getattr(launch.args, "seat", None)
+    if seat:
+        return seat
+    word = default_seat.word()
+    return word if word and launch.agent.name == word else None
+
+
+def identity_call_for(launch: Launch, record: LaunchRecord | None, argv: list,
+                      identity: SessionIdentity | None,
+                      pane_mint: PaneMint | None) -> str:
+    """The script line that writes the identity block, into the session dir
+    the launch record names; "" with no session dir to write in. On the tmux
+    path a default-seat launch passes its own pid, so the pane waits for this
+    launcher to move the seat's claim to it before it says who holds it."""
+    if record is None:
+        return ""
+    seat = launch_seat(launch)
+    took_word = bool(seat) and seat == default_seat.word() and not launch.args.seat
+    return boot_identity.render_identity_call(
+        record.session_dir, argv, seat=seat,
+        keyed=pane_mint is not None or bool(identity is not None and identity.keyed),
+        in_pane=launch.in_tmux,
+        launcher_pid=os.getpid() if launch.in_tmux and took_word else None)
 
 
 def inherited_for(launch: Launch) -> tuple[SecretResult, ...]:
@@ -1003,7 +1051,8 @@ def assemble(launch: Launch, minted: SessionIdentity | PaneMint | None) -> Launc
         + render_home_prelude(home) + render_birth_call(record),
         secret_file=secret_path, vendor_env=VENDORS[start.vendor].get("env"),
         shebang=launch.in_tmux, pane_mint=pane_mint, record=record,
-        launch_info=launch_info_marker(injected, identity))
+        launch_info=launch_info_marker(injected, identity),
+        identity_call=identity_call_for(launch, record, argv, identity, pane_mint))
     return LaunchPlan(
         vendor=start.vendor, argv=argv, script=script, work_dir=launch.work_dir,
         work_dir_source=launch.work_dir_source, agent=launch.agent,

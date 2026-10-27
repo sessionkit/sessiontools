@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from sessiontools import busy, cli, completion, get, settings, verbs
+from sessiontools import busy, cli, completion, get, paths, settings, verbs
 from sessiontools.completion import Flag, Node
 
 
@@ -152,6 +152,7 @@ def _action(parser, dest):
     (cli._sound_parser, "event", busy.EVENTS),
     (cli._settings_parser, "tool", settings.TOOLS),
     (cli._get_parser, "prop", get.PROPS),
+    (paths.build_parser, "leaf", paths.LEAVES),
 ])
 def test_the_hints_are_the_verbs_own_tables_by_identity(builder, dest, table):
     action = _action(builder(), dest)

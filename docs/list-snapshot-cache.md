@@ -39,8 +39,10 @@ live/idle decision cannot take an answer up to 2 s old.
 
 ## Where it lives
 
-- `$SESSION_STATE_DIR/list/snapshot.json`, else
-  `~/.session/state/list/snapshot.json`, beside `list.lock`.
+- `list/snapshot.json` in the state dir (`session path state`), beside
+  `list.lock`: `$SESSION_STATE_DIR` when set, else
+  `~/.sessionkit/tools/state/` on a fresh host, or the old
+  `~/.session/state/` while it is still there.
 - The folder is 0700 and the file 0600 (it names every seat's cwd).
 - It is written to a temp file and renamed, so a reader never sees half
   of one.

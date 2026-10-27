@@ -13,13 +13,18 @@ THE RULE:
   is running with the start time the sidecar names (`procs.same_process`),
   so a crash-left sidecar or a reused pid holds nothing.
 - A HOLDER of agent A is a live session whose sidecar says `agent == A`,
-  EXCEPT one in the launcher's own tmux pane: a sidecar whose `tmux` pane
-  (`pane_of`) equals the launch environment's `$TMUX_PANE` is being
-  REPLACED, not doubled. `respawn --go`
-  runs `tmux respawn-pane -k` with `exec session start <agent>`; `-k` does
-  not wait for the old claude to die, so its sidecar can still read live
-  here, and the door refused, leaving the pane dead. No `$TMUX_PANE` (not
-  in tmux) exempts nothing; a sidecar naming no pane exempts nothing.
+  or a live claim on A (THE CLAIM, below), EXCEPT one this launch is
+  REPLACING (`replacing`, the narrow own-pane rule): on the direct path
+  only, in the launcher's own tmux pane (its `$TMUX_PANE` equals the
+  holder's pane), and only when the holder is not the launcher or one of
+  its ancestors. `respawn --go` runs `tmux respawn-pane -k` with `exec
+  session start <agent>`; `-k` does not wait for the old claude to die, so
+  its sidecar can still read live here, and the launcher is tmux's child,
+  not the old claude's. A tmux placement (`--in-tmux`) replaces nothing,
+  and neither does a start nested in a holder's own tool shell: that shell
+  shares the holder's pane, and the holder is its ancestor. No
+  `$TMUX_PANE` (not in tmux) exempts nothing; a holder naming no pane
+  exempts nothing.
 - The check runs only for a HAND launch: no claude `-n`/`--name` in the
   passthrough. A spawner (`tm kick`) names every seat with `-n`, and seat
   uniqueness for spawned seats is the spawner's door, not this one. The
@@ -50,9 +55,18 @@ knows which agent is the default seat (that policy is `default_seat`'s).
 `replacing` is the NARROWER own-pane rule: a holder in the launcher's pane
 is being replaced only on the direct path, and never when it is one of the
 launcher's own ancestors (a nested start in a seat's own tool shell shares
-its pane, and replaces nothing). `survey` keeps the broad `replaced` by
-default, so the front door keeps its broad rule until it switches to the
-narrow one.
+its pane, and replaces nothing). `survey` keeps the broad `replaced` as its
+default EXEMPT; the front door (`front_door`) and the default seat
+(`default_seat.check`) each pass the narrow one in.
+
+The front door READS the claim as well as the sidecars, so a launch still in
+its start race holds the agent. A hand launch of a named agent (the door
+applies, and it is not a dry run) takes the agent's lock, runs the door, and
+on a free agent writes its claim before it execs (`session start`'s named
+road): two near-simultaneous launches give one holder, and the second is
+refused. A lock that cannot be had, or a claim that cannot be read or
+written, warns once and launches with no claim: the door's fail-open rule.
+Only a measured live holder refuses.
 """
 
 from __future__ import annotations
@@ -224,15 +238,77 @@ def sidecars(environ: Mapping[str, str] | None = None) -> list:
     return list(claude_code.sessions(dict(environ) if environ is not None else None))
 
 
+class ClaimView(NamedTuple):
+    """A live claim as the door shows a holder (a sidecar's fields): a
+    launch still in its start race, or a pane whose session has written no
+    sidecar yet."""
+
+    id: str
+    pid: int
+    tmux: str | None
+    started_at: float | None
+    no_id: str = "id not known yet"
+
+
 def front_door(agent: str, cli_args: Iterable[str],
                environ: Mapping[str, str] | None = None,
                table: Callable[[], dict] = _procs.table,
-               now: float | None = None) -> Door | None:
+               now: float | None = None, *, direct: bool = True,
+               launcher: int | None = None) -> Door | None:
     """The door for one launch: None when it does not apply (a plain
-    session, or a seat its spawner named with `-n`), else the survey."""
+    session, or a seat its spawner named with `-n`), else who holds AGENT:
+    its live claim, then its live sidecars, each unless this launch is
+    REPLACING it (`replacing`: the DIRECT path, the launcher's own pane, and
+    not the launcher or its ancestor; LAUNCHER defaults to this process).
+    Reads only. With no claim file and no sidecar naming AGENT, it asks
+    no process table. A claim that cannot be read, or a table that cannot,
+    is `unmeasured`: the door opens, loudly. A name that cannot carry a
+    claim (`claim_paths`' ValueError) has none to read."""
     if not agent or names_the_seat(cli_args):
         return None
-    return survey(agent, environ, table=table, now=now)
+    now = time.time() if now is None else now
+    try:
+        claim = read_claim(agent, environ)
+    except ClaimUnreadable as error:
+        return Door(agent, (), now, {}, unmeasured=str(error))
+    except ValueError:
+        claim = None
+    read: dict = {}
+
+    def once() -> dict:
+        if "procs" not in read:
+            read["procs"] = table()
+        return read["procs"]
+
+    def exempt(session, own, procs) -> bool:
+        return replacing(session.pid, session.tmux, own, procs, direct=direct,
+                         launcher=launcher)
+
+    door = survey(agent, environ, table=once, now=now, exempt=exempt)
+    if claim is None or door.unmeasured:
+        return door
+    try:
+        procs = once()
+    except Exception as error:   # noqa: BLE001 - fail open on ANY failure, loudly
+        return Door(agent, (), now, {},
+                    unmeasured=f"the process table could not be read ({error})")
+    if not procs:
+        return Door(agent, (), now, {},
+                    unmeasured="the process table came back empty (`ps` failed?)")
+    if not claim_is_live(claim, procs):
+        return door
+    pane = claim.get("pane") if isinstance(claim.get("pane"), str) else None
+    if replacing(claim["pid"], pane, own_pane(environ), procs, direct=direct,
+                 launcher=launcher):
+        return door
+    if any(held.pid == claim["pid"] for held in door.holders):
+        return door                 # its sidecar already names it, with an id
+    sid = claim.get("sessionId") if isinstance(claim.get("sessionId"), str) else ""
+    began = procs[claim["pid"]].started
+    held = sorted((*door.holders, ClaimView(sid, claim["pid"], pane, began)),
+                  key=lambda s: s.started_at or door.started.get(s.pid) or 0.0,
+                  reverse=True)
+    return Door(agent, tuple(held), now, {**door.started, claim["pid"]: began})
 
 
 def enforce(door: Door | None, allowed: bool, warn: Callable[[str], None]) -> None:

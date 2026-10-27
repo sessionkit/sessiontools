@@ -179,7 +179,7 @@ def test_fixture_renders_the_golden_line_byte_for_byte(base, name):
     assert got.stdout == (FIXTURES / f"{name}.out").read_bytes()
 
 
-def test_the_full_line_reads_as_mikes(base):
+def test_the_full_line_reads_as_the_operators(base):
     root, env = base
     got = render(fixture("full.json", repo(root)), env)
     assert strip_ansi(got.stdout.decode()) == (

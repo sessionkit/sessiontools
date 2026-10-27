@@ -331,6 +331,7 @@ def bare_at_home(tmp_path, macos, monkeypatch):
         err = Terminal()
         monkeypatch.setattr(sys, "stdin", stdin if isinstance(stdin, Terminal)
                             else Terminal(stdin))
+        monkeypatch.setattr(sys, "stdout", Terminal())
         monkeypatch.setattr(sys, "stderr", err)
         code = st.main([])
         return code, (plans[0] if plans else None), err.getvalue()

@@ -1,15 +1,18 @@
 # The session-info hooks (plugin hooks)
 
-Two SessionStart hooks, one shim: `hooks/session-info` (`hooks/hooks.json`,
-one entry per verb). **Both are off by default.** Each has its own switch,
-and the shim checks it before python starts.
+Three SessionStart hooks, one shim: `hooks/session-info` (`hooks/hooks.json`,
+one entry per verb). **The title and context hooks are off by default; the
+identity hook is on, and its switch is the file.** Each has its own
+switch, and the shim checks it before python starts.
 
 | variable | what it does |
 | --- | --- |
 | `SESSIONTOOLS_HOOK_TITLE=on` | the title hook runs (also `1`, `true`, `yes`) |
 | `SESSIONTOOLS_HOOK_SESSION_INFO=on` | the context hook runs (also `1`, `true`, `yes`) |
+| `SESSIONTOOLS_HOOK_IDENTITY=off` | the identity hook does not run (also `0`, `false`, `no`) |
 
-Anything else, or unset, leaves a hook off. Set them in the session's
+For title and context, anything else, or unset, leaves the hook off. For
+identity, anything else leaves it on. Set them in the session's
 environment, or in a settings file's `env` block.
 
 ## The title hook
@@ -65,7 +68,23 @@ It adds a short block to the session's context before the first prompt:
   harness's (working directory, source, transcript path), for any
   session, whoever launched it.
 
-## Both hooks
+## The identity hook
+
+It adds the identity block that `session start` wrote for this session
+to the context, with the same bytes `session identity` prints: the
+session id, seat, nickname, pane, call holder, seat-mates and key. See
+[the identity block][identity].
+
+- **Its switch is the file.** A session that `session start` did not
+  launch has no block, and the hook says nothing. It costs such a
+  session one python start and one failed open.
+- It runs on every source. It reads the block of the payload's session
+  id, so after `/clear`, which has a new id and no block, it says
+  nothing.
+- A block it cannot use (unreadable, not UTF-8, empty, over 16 KiB) is
+  silence, never a partial block.
+
+## All three hooks
 
 - A subagent's payload (`agent_id`) is silent. A `claude --agent`
   session carries `agent_type` without `agent_id`, and the hooks run
@@ -97,7 +116,10 @@ It adds a short block to the session's context before the first prompt:
 - The module is `sessiontools.session_info`, standard library only. Its
   pure functions, `title_output(payload, env)` and
   `context_output(payload, env)`, check the switches again, so they are
-  safe to call directly.
+  safe to call directly. `identity_output(payload, env)` reads the block
+  through `sessiontools.identity_block`, the reader `session identity`
+  uses.
 - It ships unreleased: see [the plugin][plugin].
 
 [plugin]: claude-code-plugin.md
+[identity]: identity-block.md

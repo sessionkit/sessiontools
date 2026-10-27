@@ -695,6 +695,49 @@ def test_package_dir_is_package_first_under_the_kit_home():
     assert settings.kit_root({"HOME": str(home_dir)}) == home_dir / ".sessionkit"
 
 
+def test_log_dir_is_the_packages_log_beside_settings():
+    """The one test that spells the shape: ~/.sessionkit/<package>/log/ (ST-263)."""
+    home_dir = Path("/home-of-test")
+    env = {"HOME": str(home_dir)}
+    assert settings.log_dir("tools", env) == home_dir / ".sessionkit" / "tools" / "log"
+    assert settings.log_dir("tools", env).parent == settings.package_dir("tools", env).parent
+    assert settings.log_dir(settings.PACKAGES["session"], env) == settings.log_dir("tools", env)
+
+
+def test_log_dir_follows_home_and_has_no_override_of_its_own(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert settings.log_dir("tools") == tmp_path / ".sessionkit" / "tools" / "log"
+    assert not settings.log_dir("tools").exists()                 # a resolver creates nothing
+
+
+def test_legacy_log_dir_is_the_old_location_and_the_pointer_names_an_old_file(tmp_path):
+    env = {"HOME": str(tmp_path)}
+    old = tmp_path / "Library" / "Logs" / "sessiontools"
+    assert settings.legacy_log_dir(env) == old
+    assert settings.legacy_log_pointer("pane-state.log", env) == []    # absent: no line
+    assert not old.exists()                                             # and nothing made
+    old.mkdir(parents=True)
+    (old / "pane-state.log").write_text("x\n")
+    assert settings.legacy_log_pointer("pane-state.log", env) == [
+        f"old log  {old / 'pane-state.log'} (no longer written)"]
+    assert settings.legacy_log_pointer("sound-engine.log", env) == []  # only the file that exists
+    assert (old / "pane-state.log").read_text() == "x\n"              # read only
+
+
+def test_no_writer_spells_a_log_path_and_only_legacy_log_dir_names_the_old_one():
+    """The one-resolver rule (ST-263): `"Logs"` and `Library/Logs` appear in
+    src/ only inside legacy_log_dir."""
+    src = Path(__file__).resolve().parents[1] / "src"
+    hits = [(p.relative_to(src), n, line) for p in sorted(src.rglob("*"))
+            if p.suffix in (".py", ".swift", ".sh") for n, line in
+            enumerate(p.read_text().splitlines(), 1)
+            if "Library/Logs" in line or '"Logs"' in line]
+    assert {str(p) for p, _, _ in hits} == {"sessiontools/settings.py"}, hits
+    body = Path(settings.__file__).read_text().split("def legacy_log_dir", 1)[1]
+    body = body.split("\ndef ", 1)[0]
+    assert len(hits) == sum(("Library/Logs" in x or '"Logs"' in x) for x in body.splitlines())
+
+
 def test_host_dir_is_its_packages_directory_and_a_pair_with_no_note():
     env = {"HOME": "/home-of-test"}
     for tool, package in settings.PACKAGES.items():

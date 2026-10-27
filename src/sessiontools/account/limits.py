@@ -26,8 +26,9 @@ What is read, and what is refused:
 - `written_at` is required: without it the file's age cannot be told, and an
   old file must never read as current. Past `STALE_AFTER` seconds the file
   is marked stale; its numbers are still shown.
-- A window whose `resets_at` has passed measured a window that is over. Its
-  percent is not shown (`expired`), never guessed to be 0.
+- A window whose `resets_at` has passed measured a window that is over. It
+  reads as the exporter's does (`status.stale_text`): STALE, when it ended,
+  its percent not shown (`expired`, `stale`), never guessed to be 0.
 - `account` must be absent or `"default"`, the host's own sign-in: any other
   account's window is not the host's usage.
 
@@ -204,6 +205,7 @@ def read_limits(path: str | os.PathLike, now: float) -> st.Usage:
     if age < -FUTURE_SLACK:
         return _malformed(path, "written_at is in the future")
 
+    age_s = max(0, int(age))
     windows = []
     for key, label in WINDOWS:
         raw = data.get(key)
@@ -217,10 +219,10 @@ def read_limits(path: str | os.PathLike, now: float) -> st.Usage:
         resets_at = _number(raw.get("resets_at"))
         expired = resets_at is not None and resets_at <= now
         windows.append(st.Window(label, None, None if expired else percent, resets_at,
-                                 expired=expired))
+                                 expired=expired, age_s=age_s,
+                                 ended_s=max(0, int(now - resets_at)) if expired else None))
     if not windows:
         return st.Usage(None, unavailable=f"{path} has no usage windows")
-    age_s = max(0, int(age))
     return st.Usage(None, tuple(windows), source=st.SOURCE_FILE, file=str(path),
                     written_at=written_at, age_s=age_s, stale=age_s > STALE_AFTER)
 

@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from sessiontools.start.agents import NO_AGENT
+from sessiontools.start.agents import DEFAULT_AGENTS_DIR, NO_AGENT
 from sessiontools.start.errors import PROG
 
 # claude's own resume spellings (`-r, --resume [value]`, `-c, --continue`):
@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
         "agent", nargs="?", default=None,
         help="agent name, resolved to <agents-dir>/<name>.md or "
              "<agents-dir>/<name>/<name>.md (agents-dir: $AGENTS_DIR, else "
-             "~/.session/agents); omit it for the default seat (plain when "
+             f"the agent leaf's config/, else {DEFAULT_AGENTS_DIR}); omit it for the default seat (plain when "
              "it is held or cannot hear), or write `-` for a plain vendor "
              "session with no agent file")
     parser.add_argument(
@@ -128,7 +128,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--in-tmux", action="store_true",
         help="place the session in a tmux window instead of exec-ing in "
-             "place (the old launcher's --tmux, renamed: claude owns --tmux)")
+             "place (the old launcher's --tmux, renamed: claude owns --tmux). "
+             "Outside tmux with no --tmux-target SESSION, the window goes in "
+             "session 'agents', created if it is missing")
     parser.add_argument(
         "--tmux-target", metavar="SESSION[:WINDOW]",
         help="tmux session (matched by EXACT name) and optional window name "

@@ -24,6 +24,7 @@ from sessiontools import (
     busy,
     default_model,
     default_model_watch,
+    migrate,
     operator,
     pane_state,
     pane_state_agent,
@@ -143,7 +144,8 @@ def test_readme_logs_names_each_log_the_code_writes(tmp_path):
     env = {"HOME": str(tmp_path)}
     home = str(tmp_path)
     logs = [sound_service.log_path(env), pane_state_agent.log_path(env),
-            snapshot.state_dir(env) / "reap.log", default_model_watch.log_path(env),
+            settings.log_dir(settings.PACKAGES["session"], env) / "reap.log",
+            default_model_watch.log_path(env),
             default_model.state_dir(env) / "log.jsonl"]
     for log in logs:
         shown = "~" + str(log)[len(home):]
@@ -152,6 +154,53 @@ def test_readme_logs_names_each_log_the_code_writes(tmp_path):
     status_line = (ROOT / "src/sessiontools/statusline/statusline.sh").read_text(encoding="utf-8")
     assert "statusline-log.jsonl" in status_line
     assert "`~/.config/session/statusline-log.jsonl`" in section
+
+
+def _flat(text: str) -> str:
+    """TEXT with each run of whitespace as one space, so a phrase may wrap."""
+    return " ".join(text.split())
+
+
+def _tilde(path: Path, home: Path) -> str:
+    return "~/" + str(path.relative_to(home))
+
+
+def test_readme_logs_names_the_old_locations(tmp_path):
+    # ST-263: the old logs stay where they were, and the README says where.
+    section = _flat(_section(README, "Logs"))
+    assert f"`{_tilde(settings.legacy_log_dir({'HOME': str(tmp_path)}), tmp_path)}/`" in section
+    assert "`$SESSION_STATE_DIR/reap.log`" in section
+    assert "left in place" in section
+    # An installed plist loads again at every login with its old path: only a
+    # rewritten plist moves a service's log, so "loaded again" is not enough.
+    assert "until its plist is written again" in section
+
+
+def test_readme_uninstall_never_deletes_from_library_logs(tmp_path):
+    section = _section(README, "Uninstall")
+    legacy = _tilde(settings.legacy_log_dir({"HOME": str(tmp_path)}), tmp_path)
+    for line in section.splitlines():
+        if line.lstrip().startswith("rm "):
+            assert "Library/Logs" not in line, line
+    flat = _flat(section)
+    assert "The logs are left in place" in flat
+    assert f"`{legacy}/`" in flat
+    assert f"`{_tilde(settings.log_dir(settings.PACKAGES['session'], {'HOME': str(tmp_path)}), tmp_path)}/`" in flat
+
+
+def _items(text: str) -> list[str]:
+    """TEXT cut into paragraphs and bullets."""
+    return [x for x in re.split(r"\n\s*\n|\n(?=\s*- )", text) if x.strip()]
+
+
+def test_the_docs_name_library_logs_only_as_the_old_location():
+    pages = [("README.md", README)] + [
+        (str(p.relative_to(ROOT)), p.read_text(encoding="utf-8"))
+        for p in sorted((ROOT / "docs").glob("*.md"))]
+    for name, text in pages:
+        for item in _items(text):
+            if "Library/Logs" in item:
+                assert "left in place" in _flat(item), (name, item)
 
 
 def test_readme_logs_says_how_to_follow_one():
@@ -260,6 +309,7 @@ def test_every_variable_the_configuration_page_names_is_read_by_the_code():
 TEST_FENCES = frozenset({
     pane_state_agent.FENCE_ENV,                # SESSIONTOOLS_PANE_STATE_NO_LAUNCHCTL
     sound_service.FENCE_ENV,                   # SESSIONTOOLS_SOUND_NO_LAUNCHCTL
+    migrate.FENCE_ENV,                         # SESSIONTOOLS_MIGRATE_NO_PROBE
     "SESSIONTOOLS_SOUND_NO_DEVICE",            # engine.swift
 })
 

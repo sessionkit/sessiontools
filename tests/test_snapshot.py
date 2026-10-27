@@ -442,8 +442,10 @@ def test_a_holder_killed_mid_computation_never_wedges_a_waiter(monkeypatch, tmp_
 
 
 def test_the_state_dir_defaults_under_home(monkeypatch):
+    """A fresh HOME: the state leaf's fresh default is NEW (ST-266, wave 3)."""
     monkeypatch.delenv(snapshot.STATE_DIR_ENV)
-    assert snapshot.snapshot_path() == Path(os.environ["HOME"]) / ".session" / "state" / "list" / "snapshot.json"
+    home = Path(os.environ["HOME"])
+    assert snapshot.snapshot_path() == home / ".sessionkit/tools/state/list/snapshot.json"
 
 
 # --- the command -------------------------------------------------------------------------

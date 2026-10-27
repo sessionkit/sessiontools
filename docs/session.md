@@ -18,6 +18,8 @@ switch, closing idle seats and saying a seat has settled).
 - `ledger`: every file a session read and every command it ran, with the
   tokens each put in the window
 - `start`: launch a session from an agent file; see [session start][start]
+- `identity`: who a launched session is, as at launch; see
+  [the identity block][identity]
 - `agent`: the default seat's name, for scripts
 - `settings`: a session's settings, each key with the file that set it
 - `account`: which Claude account this Mac is on, and the switch; see
@@ -37,6 +39,8 @@ switch, closing idle seats and saying a seat has settled).
   [closing idle seats][reap]
 - `park`: say this seat has settled, or read that back; see
   [saying a seat has settled][park]
+- `path`: where tools keeps each leaf of its state, for scripts and
+  peers; see [where tools keeps its state][state-paths]
 - `completion`: a completion script for bash or zsh; see
   [shell completion][completion]
 
@@ -84,6 +88,15 @@ switch, closing idle seats and saying a seat has settled).
 
   ```sh
   session start --list-agents
+  ```
+
+- `session identity [SID]`: the identity block `session start` wrote
+  for SID (default `$CLAUDE_SESSION_ID`), byte for byte. Exit 3, with
+  one line on stderr, when the session has none; any other non-zero
+  exit is a fault.
+
+  ```sh
+  session identity
   ```
 
 - `session agent default`: prints the default seat's name, the vendor's
@@ -172,6 +185,27 @@ switch, closing idle seats and saying a seat has settled).
   session park --check
   ```
 
+- `session path [LEAF [NAME]] [--json]`: one absolute path, the folder
+  tools uses for LEAF on this host (`state`, `sessions`, `seats`, `agent`,
+  `backups`, `sound` or `log`); NAME joins a session id under `sessions`
+  or a seat under `seats`. `--json` gives every leaf's `path` and
+  `source`. It reads only, and makes nothing.
+
+  ```sh
+  session path sessions --json
+  ```
+
+- `session path migrate [--dry-run] [--json]`: moves the `state` and
+  `sound` folders to `~/.sessionkit/tools/state/`, once, and leaves a link
+  at each old path. It refuses, exit 3 with nothing moved, on a set
+  variable, a name in both folders, a cross-device move, a relative link
+  that would point elsewhere, or a loaded tools agent. A real run on a
+  host needs that host's go ([moving tools' state][state-migrate]).
+
+  ```sh
+  session path migrate --dry-run
+  ```
+
 - `session completion bash|zsh`: the script on stdout, built from these
   verbs' own parsers. In `~/.zshrc`, after compinit:
 
@@ -225,11 +259,35 @@ it.
   nothing, claims nothing and prints no line. Resuming a session that was
   born as the seat through `-` prints one line: it resumes plain and does
   not hear Delta.
+- **Which session holds it:** `session list` prints `claude` in the
+  SEAT column of the holder's row, beside the name Claude Code gave the
+  session. A row that holds no seat prints `-`. See
+  [`session list`](#session-list).
 - **The seat's name** is the vendor's own word. Scripts and tools that
   cannot import sessiontools read it here:
 
   ```sh
   session agent default
+  ```
+
+- **Only the holder hears.** Claude Code names a session's agent in
+  `CLAUDE_CODE_AGENT`, and sessionmail delivers box `claude` to every
+  live session whose agent is `claude`. `session start` unsets that
+  variable for every launch, and keeps it out of a tmux server it
+  creates; a launch that names an agent gets it back from `--agent`. So
+  a plain session started from the seat's own shell or tmux does not
+  hear the seat's mail.
+- **A tmux server born inside the seat before this fix** still holds
+  `CLAUDE_CODE_AGENT=claude` in its global environment and hands it to
+  every pane it makes. A `session start` in such a pane drops it, but a
+  raw `claude` typed there still inherits it and hears box `claude`.
+  Fixing it is an operator step on a live server, and an upgrade does
+  not do it. Check the server, then either restart it or remove the
+  variable:
+
+  ```sh
+  tmux show-environment -g CLAUDE_CODE_AGENT
+  tmux set-environment -g -u CLAUDE_CODE_AGENT
   ```
 
 - **If a `claude`-type subagent misbehaves** inside a default-seat
@@ -303,6 +361,26 @@ More: the claim, every line word for word, tmux and the dry run are in
 - The live sessions and their tmux panes, with the JSON keys and table
   columns its callers were written against, CONTEXT included
   (`sessiontools.window`).
+- A SEAT column after NAME and a `seat` key: the seat the session holds,
+  else `-` and null. That is `claude` for the
+  [default seat](#the-default-seat), or an agent's own name (such as
+  `scout`) for the session whose hand launch took that agent's claim at
+  [the front door][front-door]. A seat a spawner started with `-n` takes
+  no claim, so it shows `-`.
+  NAME stays the session's own name (Claude Code derives one, such as
+  `work-9d`), and `session send`, `get`, `reap` and `park` still match on
+  it. `agent` is the agent type, the same for the holder and for any other
+  `claude` session; only SEAT says which one holds the seat. The seat is
+  read from the holder's claim each time the list prints, so the
+  [list cache][cache] never serves a stale one.
+
+  ```text
+  SHORT      NAME                         SEAT       STATUS   STATE  ...
+  c240ec8c   work-9d                      claude     busy     busy   ...
+  5d1e0b77   work-3f                      -          busy     busy   ...
+  7a1d3e90   scout-2b                     scout      idle     idle   ...
+  ```
+
 - A STATE column and a `state` key: `busy`, `idle with children` or
   `idle`. STATUS and `status` keep the harness's own word.
 - `--no-context` skips CONTEXT (a transcript read per seat): `-` cells,
@@ -373,6 +451,7 @@ More: the claim, every line word for word, tmux and the dry run are in
 
 [owner]: #whose-command-this-is
 [start]: session-start-launcher.md
+[identity]: identity-block.md
 [account]: account.md
 [busy]: busy-sound-hook.md
 [engine]: sound-engine-agent.md
@@ -384,5 +463,8 @@ More: the claim, every line word for word, tmux and the dry run are in
 [park]: session-park.md
 [reap]: session-reap.md
 [completion]: shell-completion.md
+[state-paths]: tools-state-paths.md
+[state-migrate]: tools-state-migrate.md
 [seat]: #the-default-seat
 [seat-launcher]: session-start-launcher.md#the-default-seat-one-per-host
+[front-door]: session-start-launcher.md#the-front-door-one-holder

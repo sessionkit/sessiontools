@@ -52,7 +52,8 @@ def test_prepare_assembles_a_direct_plan(tmp_path):
 def test_a_live_plan_names_its_files_and_has_written_none(tmp_path):
     plan = plan_for(tmp_path, "start:\n  context:\n    system-prompt:\n      - echo hi\n")
     kinds = sorted(type(item).__name__ for item in plan.files)
-    assert kinds == ["PlannedFile", "PlannedPlugin"]
+    # the prompt file, and the settings door's (the launcher's tui default)
+    assert kinds == ["PlannedFile", "PlannedFile", "PlannedPlugin"]
     for item in plan.files:
         assert item.path in plan.argv
         assert os.path.dirname(item.path) == os.path.join(plan.identity.session_dir, "launch")   # 4.6

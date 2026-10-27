@@ -1,14 +1,19 @@
 #!/bin/sh
-# session-info - the plugin's SessionStart entry, two verbs, one registration
+# session-info - the plugin's SessionStart entry, three verbs, one registration
 # each: `title` sets the session title to the short session id, `context`
-# injects the session's facts (id, working directory, source, transcript).
+# injects the session's facts (id, working directory, source, transcript),
+# `identity` injects the identity block `session start` wrote for it.
 # It runs sessiontools.session_info from this plugin's own src/ and stays
 # SILENT whatever goes wrong. A hook must never be the reason a session breaks.
 #
-#   DEFAULT OFF. Each verb has its own switch, checked before python starts:
+#   Each verb has its own switch, checked before python starts.
+#   title and context are DEFAULT OFF:
 #   SESSIONTOOLS_HOOK_TITLE=on          the title verb runs (also 1/true/yes)
 #   SESSIONTOOLS_HOOK_SESSION_INFO=on   the context verb runs (also 1/true/yes)
 #   switch unset, or anything else      exit 0 - python never starts
+#   identity is ON: its switch is the session's identity.md (no file, silent):
+#   SESSIONTOOLS_HOOK_IDENTITY=off      exit 0 - python never starts
+#                                       (also 0/false/no; python re-checks)
 #   an unknown verb                     exit 0
 #   no pick-python.sh beside it         exit 0
 #   no python at all                    exit 0
@@ -24,6 +29,11 @@ exec 2>/dev/null
 case "${1:-}" in
   title) on=${SESSIONTOOLS_HOOK_TITLE:-} ;;
   context) on=${SESSIONTOOLS_HOOK_SESSION_INFO:-} ;;
+  identity)
+    case "${SESSIONTOOLS_HOOK_IDENTITY:-}" in
+      [Oo][Ff][Ff] | 0 | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo]) exit 0 ;;
+    esac
+    on=on ;;
   *) exit 0 ;;
 esac
 case "$on" in

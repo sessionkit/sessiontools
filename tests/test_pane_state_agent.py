@@ -182,8 +182,15 @@ def test_the_plist_has_exactly_the_designs_keys(fence):
     assert p["RunAtLoad"] is True and p["KeepAlive"] is True
     assert p["ThrottleInterval"] == agent.THROTTLE == 30
     assert p["LimitLoadToSessionType"] == "Aqua"
-    log = str(fence["home"] / "Library/Logs/sessiontools/pane-state.log")
+    log = str(fence["home"] / ".sessionkit/tools/log/pane-state.log")
     assert p["StandardOutPath"] == log == p["StandardErrorPath"]
+
+
+def test_log_path_is_the_tools_log_dir_under_home(tmp_path):
+    env = {"HOME": str(tmp_path)}
+    assert agent.log_path(env) == tmp_path / ".sessionkit/tools/log/pane-state.log"
+    from sessiontools import settings
+    assert agent.log_path(env).parent == settings.log_dir(settings.PACKAGES["session"], env)
 
 
 def test_the_path_is_tmuxs_directory_then_launchds_own(fence):
@@ -449,6 +456,25 @@ def test_status_json_reports_label_plist_loaded_pid_lock_and_log(fence, capsys):
                          "holder_pid": 4242, "ours": True}
     assert s["log"] == str(agent.log_path())
     assert set(verbs(fence["calls"])) == {"print"}               # status changes nothing
+
+
+def test_status_prints_the_new_log_and_points_at_an_old_one_only_while_it_exists(fence, capsys):
+    """ST-263: the log line names ~/.sessionkit/tools/log; an old file at
+    ~/Library/Logs/sessiontools adds one line naming it, text only."""
+    new = fence["home"] / ".sessionkit/tools/log/pane-state.log"
+    old = fence["home"] / "Library/Logs/sessiontools/pane-state.log"
+    rc, out, _ = run(["status"], capsys)
+    assert rc == 0 and f"log    {new}" in out
+    assert "old log" not in out and "Library/Logs" not in out
+    assert not old.parent.exists()                               # status made nothing
+    old.parent.mkdir(parents=True)
+    old.write_text("x\n")
+    rc, out, _ = run(["status"], capsys)
+    assert rc == 0 and f"log    {new}" in out
+    assert out.count("old log") == 1 and f"old log  {old} (no longer written)" in out
+    s = json.loads(run(["status", "--json"], capsys)[1])
+    assert s["log"] == str(new) and "old_log" not in s and str(old) not in json.dumps(s)
+    assert old.read_text() == "x\n"                             # never moved or deleted
 
 
 def test_status_when_off(fence, capsys):

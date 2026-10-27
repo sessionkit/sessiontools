@@ -39,7 +39,10 @@ How it behaves:
   No python, no reply, no wait.
 - **The engine owns** the delay, the speech guard, the no-replay latch
   and the stop.
-- **The sender** is `${SESSIONTOOLS_SOUND_HOME:-~/.local/share/sessiontools/sound}/bin/sound-event`.
+- **The sender** is `bin/sound-event` in the sound leaf (`session path
+  sound`): `$SESSIONTOOLS_SOUND_HOME` when set, else the old
+  `~/.local/share/sessiontools/sound/` while it is there, else
+  `~/.sessionkit/tools/state/sound/`.
   Not executable counts as off: nothing is sent.
 - **A resumed seat** (a new claude pid) resolves once and writes its own
   record.
@@ -73,7 +76,9 @@ the code; `status --json` prints it as `label`, and `--help` names it.
 - Exit 0 done, 1 tried and failed (bootstrap refused, no answer), 2
   refused before anything changed (no `swiftc`, a failed build, the port
   held, not macOS) or a usage error.
-- The log is `~/Library/Logs/sessiontools/sound-engine.log`.
+- The log is `~/.sessionkit/tools/log/sound-engine.log`.
+- Before 0.3.2 the log was `~/Library/Logs/sessiontools/sound-engine.log`.
+  That file is left in place, and `status` names it while it is there.
 
 ## Paths it will not touch
 

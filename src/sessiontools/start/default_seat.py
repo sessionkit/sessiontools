@@ -207,6 +207,8 @@ VIA_BARE = "bare start"
 VIA_NAMED = "named start"
 VIA_NAMED_RESUME = "named resume"
 VIA_TMUX = "tmux placement"
+#: A named agent's hand launch through the front door (any agent but the seat).
+VIA_DOOR = "front door"
 
 
 def current_platform() -> str:
@@ -352,8 +354,9 @@ def check(seat: str, environ: Mapping[str, str] | None = None, *, direct: bool,
 
 def claim_fields(session_id: str | None, pid: int, procs: Mapping,
                  environ: Mapping[str, str] | None = None, via: str = VIA_BARE) -> dict:
-    """The seat's claim for PID: its `procStart` from PROCS, the session
-    id (None when not known yet), the pane, and the reader-only fields."""
+    """An agent's claim for PID (the seat's, or a named agent's at the front
+    door, `via=VIA_DOOR`): its `procStart` from PROCS, the session id (None
+    when not known yet), the pane, and the reader-only fields."""
     start = holders.proc_start_of(pid, procs)
     if start is None:
         raise OSError(f"pid {pid} is not in the process table")

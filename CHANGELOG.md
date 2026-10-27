@@ -9,6 +9,144 @@ stamps this file.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-28
+
+### Added
+
+- **A launched session's identity block** (ST-272). `session start`
+  writes `<session dir>/identity.md` (0600, atomically) in the pane,
+  after the launch record and before the vendor starts: the session id,
+  seat, nickname, tmux pane, call holder and seat-mates (both "at
+  launch"), and whether a signing key was minted. Each line says what it
+  does not know instead of guessing. On the tmux path, a default-seat
+  launch waits up to 3 s for its claim to move to the new pane before it
+  says who holds the seat. The block never goes on a command line, and a
+  failed write never stops a launch.
+- **`session identity [SID]`** (ST-272): prints that block byte for byte
+  (SID defaults to `$CLAUDE_SESSION_ID`; a unique prefix will do). Exit 0
+  with the block; exit 3 and one stderr line when the session has none;
+  any other exit is a fault, with one stderr line. One file read, no
+  network. sessionmail's `memory wake` prints its output. See
+  `docs/identity-block.md`.
+- **The identity hook** (`hooks/session-info identity`, SessionStart,
+  ST-272): adds the same bytes to the session's context on turn one. It
+  is on, and its switch is the file: a session with no block is silent.
+  `SESSIONTOOLS_HOOK_IDENTITY=off` (or `0`/`false`/`no`) turns it off
+  before python starts. A subagent's payload is silent, and the hook
+  never breaks a session.
+- **`session account verify [NAME] [--json]` asks the API which account
+  a token bills** (ST-274). It makes one 1-token request with the token
+  and prints the account-wide 5h and 7d usage windows from the unified
+  rate-limit headers, each with its reset time. The 7d reset identifies
+  the account. It also prints where the token came from and which
+  registry account it matches. NAME checks that registered account's
+  token. With no NAME it checks the token this seat bills: the env
+  token, else the host's token file or Keychain item. It never prints,
+  logs or mails a token. A header the API did not send reads `not
+  reported`, never 0. Exit codes: 0 answered (a 429 too), 2 usage or
+  unknown NAME, 4 no token, 5 a refused registry, setting, token file
+  or Keychain item, 6 the API refused the token, 7 no answer. See
+  `docs/account.md`.
+
+### Changed
+
+- **`session account -h` and `docs/account.md` now start with how it
+  knows your accounts** (ST-276). Available: the accounts `new` or `add`
+  registered. In use: the host's token (the Keychain item, or the
+  `account.token_file`) fingerprinted and looked up in that list. The
+  doc adds why `/login` moves every seat on a Keychain host, and only
+  new seats on a token-file host.
+- **`session account status` marks a usage window whose reset has
+  passed STALE** (ST-274), from the exporter and from the limits file
+  alike. It says when the window ended and withholds its figure, never
+  showing it as 0 (`percent: null`, `expired` and `stale` true in
+  `--json`). Each figure shows its age when the source can tell it,
+  and otherwise says `age not reported`.
+- **`session account status` names the account Claude Code's own
+  display shows** (ST-274). A `profile:` line names the account in
+  `~/.claude.json` (`oauthAccount`), which `/status` and `claude auth
+  status` read. It is marked when that account differs from the host
+  account. `session account use` never changes that file, so both of
+  its plans now say so, and say that the token decides billing. Only
+  the address is read from the file, and it is never written.
+- **`session account use --witness` over 64 characters is refused
+  naming its length** (ST-274), never its value.
+- **The tools' logs move to `~/.sessionkit/tools/log/`** (ST-263). The
+  sound engine, the pane signal's agent and the default model's launchd
+  agent render plists that log to `sound-engine.log`, `pane-state.log`
+  and `default-model.log` there, and `session reap --yes` writes
+  `reap.log` there instead of `$SESSION_STATE_DIR` (it follows `HOME`
+  now). One resolver, `settings.log_dir()`, spells the path. Old logs in
+  `~/Library/Logs/sessiontools/` and `~/.session/state/reap.log` are
+  left in place and never read; a service an older release installed
+  keeps writing its old log, at every login too, until its plist is
+  written again (`on`, or the default model's install steps). While an
+  old log exists, `session sound engine status` and `session pane-state
+  agent status` add one line naming it. The uninstall steps no longer delete
+  `~/Library/Logs/sessiontools`. An installed sound engine reads stale
+  until `session sound engine on` rebuilds it (a source comment
+  changed). See the README's Logs section.
+- **The `session` skill points to the sessionkit skill's card,
+  "Several agents in one seat"**, for what to do when several agents
+  share one seat, and does not repeat it. To keep the skill inside its
+  400-token fold, its other lines are worded more tightly; every verb,
+  flag, path and link it teaches is still there.
+- **One resolver for each folder of tools' state, and `session path`**
+  (ST-266). `state`, `sessions`, `seats`, `agent`, `backups` and `sound`
+  each have an old folder (`~/.session/<leaf>/`, and
+  `~/.local/share/sessiontools/sound/`) and a new one under
+  `~/.sessionkit/tools/state/`. The variable wins when set, else the old
+  folder while it is real, else the new one. Nothing moves by itself:
+  every reader and writer uses the old folder while it is real, and
+  follows the new one once the old path is a link to it. `session path LEAF
+  [NAME] [--json]` prints the answer for scripts and the kit's other
+  packages, with `source` and any `stranded` folder. The sound engine's
+  plist now passes it the sessions folder (`--sessions`). See
+  `docs/tools-state-paths.md`.
+- **`state` and `sound` start under `~/.sessionkit/tools/state/` on a
+  fresh host, and `session path migrate` moves them on an existing one**
+  (ST-266). A host with neither folder writes its state and builds the
+  sound engine in the new folder; `sessions`, `seats`, `agent` and
+  `backups` still start in the old one. `session path migrate
+  [--dry-run] [--json]` moves `~/.session/state/` and
+  `~/.local/share/sessiontools/sound/` by `rename` only, once, and leaves
+  a link at each old path. It refuses the whole run, exit 3 with nothing
+  moved, on a set `SESSION_STATE_DIR` or `SESSIONTOOLS_SOUND_HOME`, a
+  name in both folders, a cross-device move, a relative link that would
+  point elsewhere once moved, or a loaded tools agent. **Operator step,
+  not run by the upgrade:** each host's run is its own deploy, with its
+  own go; stop the three agents, dry run, run, start them again. The
+  links stay until one release after every peer is deployed on every
+  host. **Upgrade every copy of sessiontools on a host together** (other
+  packages' copies too): an older copy writes `~/.session/state/` again,
+  and `session path --json` then shows `stranded`. See
+  `docs/tools-state-migrate.md`.
+
+### Fixed
+
+- `session list` says which session holds the default seat, and which holds each hand-launched agent. It named the holder only by the name Claude Code gave it (such as `work-9d`), and its `agent` reads `claude` for any `claude` session, so nothing showed which one held the seat. A SEAT column after NAME, and a `seat` JSON key on every row, now carry the seat word for the session that holds it: `claude` for the default seat's holder, or an agent's own name (such as `scout`) for the session whose hand launch took that agent's claim. Every other session shows `-` or null, a seat started by a spawner's `-n` among them. NAME and the other columns keep their values; the columns after NAME move one place right (ST-264).
+- `session start <agent>` no longer starts a second holder from the holder's own tmux pane. The front door counted any session in the launcher's pane as being replaced; now only a direct start replaces it, and only when that session is not the launcher's ancestor (a `respawn-pane -k`). A start with `--in-tmux`, or one nested in the holder's own shell, is refused, exit 3. A hand launch of a free agent now also takes a per-agent claim under a lock before it execs, so two launches started together give one holder and the second is refused. A lock or claim that cannot be had warns once and launches unclaimed (ST-260).
+- **`session start` on a fresh Mac: no tmux server, no terminal, and the
+  fullscreen offer.** `--in-tmux` from outside tmux with no
+  `--tmux-target SESSION` was refused. It now places the window in
+  session `agents`: created detached when it is missing (without the
+  caller's session identity or credentials), reused when it exists. The
+  agent's window is made current, and the line it prints ends with
+  `attach: tmux attach -t agents`. A launch in place with no terminal
+  (stdin or stdout not one) took the seat and minted, then failed in
+  Claude Code's print mode. It is now refused with exit 2 before
+  anything happens, naming `--in-tmux`; `--dry-run`, `-p`/`--print`,
+  `-h`/`--help` and `-v`/`--version` need no terminal. A launched session
+  no longer opens on Claude Code's fullscreen-renderer offer: its
+  `--settings` file carries `"tui": "default"` when nothing names `tui`
+  (a `claude-code` layer, a typed `--settings`, or Claude Code's own
+  user, project or local settings, which are read, never written). So
+  there is a `--settings` now even with no `claude-code` file, and a
+  typed `--settings` is folded into it there too: one that cannot be
+  read refuses the launch. The theme picker and the folder-trust
+  question are still asked. See `docs/session-start-launcher.md`.
+- Only the default seat's holder hears the seat's mail. A plain session started from the seat's tree, directly or through a tmux server born there, inherited `CLAUDE_CODE_AGENT=claude`, so its sidecar named `claude` and it heard box `claude` while its line said it would not. `session start` now unsets `CLAUDE_CODE_AGENT` in the launch script and drops it from a tmux server it creates; a launch that names an agent still gets its word from `--agent` (ST-270). **Operator step, not run by the upgrade:** a tmux server born inside a seat before this fix keeps the word for every pane it makes until it is restarted, or until `tmux set-environment -g -u CLAUDE_CODE_AGENT` is run on it. See `docs/session.md`.
+
 ## [0.3.1] - 2026-10-25
 
 ### Added

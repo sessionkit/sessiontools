@@ -1,12 +1,13 @@
-"""`session account list | status | use | new | add | remove`: the group's
-argparse `main(argv)`.
+"""`session account list | status | verify | use | new | add | remove`: the
+group's argparse `main(argv)`.
 
-`list`, `status`, `use` and `new` live in their own modules (`status`,
-`use`, `new`); this module parses their flags and calls them. `add` and
-`remove` live here.
+`list`, `status`, `verify`, `use` and `new` live in their own modules
+(`status`, `verify`, `use`, `new`); this module parses their flags and
+calls them. `add` and `remove` live here.
 
     session account list
     session account status [--json] [--no-resets]
+    session account verify [NAME] [--json]
     session account use NAME --witness WHO [--yes]
     session account new NAME --email E
     session account add NAME --email E --source BACKEND:REF [--source ...] [--no-fp]
@@ -55,12 +56,12 @@ Two deliberate calls:
 
 Exit codes: 0 done; 2 usage, unknown or duplicate name, a bad source; 3
 `remove` of the host's account; 4 (`add`) no source resolved; 5 a refused
-registry or config. `use` and `new` keep their own tables
-(`use.EXIT_CODES`, `new.EXIT_CODES`).
+registry or config. `verify`, `use` and `new` keep their own tables
+(`verify.EXIT_CODES`, `use.EXIT_CODES`, `new.EXIT_CODES`).
 
 Seams: every external is a keyword of `main` (the Keychain, the preflight,
-the seat scan, the usage fetcher, the backends, the environment, HOME, and
-`new`'s token store, capture and terminal), so
+the seat scan, the usage fetcher, `verify`'s transport, the backends, the
+environment, HOME, and `new`'s token store, capture and terminal), so
 the end-to-end test drives every verb on fakes. Left as None, each is the
 production default, chosen by the module that owns it.
 """
@@ -80,6 +81,7 @@ from sessiontools.account import keychain as kc
 from sessiontools.account import registry as reg
 from sessiontools.account import status as st
 from sessiontools.account import use as u
+from sessiontools.account import verify as vf
 
 if TYPE_CHECKING:
     from sessiontools.account.setuptoken import Run
@@ -92,6 +94,17 @@ EXIT_USAGE = reg.EXIT_USAGE             # 2
 EXIT_HOST = 3                           # remove: the host is on it
 EXIT_UNRESOLVED = reg.EXIT_UNRESOLVED   # 4
 EXIT_REGISTRY = reg.EXIT_REGISTRY       # 5
+
+#: The group's `-h` leads with how it knows the accounts and which one is in
+#: use (registry.default_path; status.host_of), and why `/login` moves every
+#: seat on a Keychain host (keychain.SERVICE). Raw: the line breaks are kept.
+DESCRIPTION = """\
+Which Claude account this Mac is on, and the switch. Never prints a token.
+Available: the accounts `new` or `add` put in ~/.sessionkit/tools/accounts/.
+In use: the host's token, fingerprinted and looked up in that list: the
+Keychain item's, or the file's when the setting account.token_file names one.
+/login moves every seat on a Keychain host: all with no env token read the item.
+"""
 
 EPILOG = """\
 By default the host signs in from the Keychain item all seats read: `use`
@@ -108,6 +121,12 @@ file unless its agent file says inherit: [CLAUDE_CODE_OAUTH_TOKEN];
 without it, it signs in from Claude's stored credentials, and `status`
 says so.
 
+`use` changes the token, never ~/.claude.json: Claude's /status and
+`claude auth status` name the account from that file's oauthAccount,
+so after a switch they can name the old one. `status` prints that name
+on its own profile line, and `verify` makes one 1-token request to show
+which account the API bills for a token.
+
 `new` runs `claude setup-token` in a masked copy of its screen, saves the
 token to passage at <PREFIX>/<E>, reads it back, and registers it. PREFIX
 is the `session` setting account.passage_prefix (default
@@ -123,6 +142,7 @@ backup or ledger (or `use`: a bad account.token_file or token file; or
 restored the item or file; 7 `use` could not restore it; 8 `new` did not save the
 token; 9 `new` saved it but did not register it.
 """
+EPILOG += "\n" + vf.EPILOG_LINE + "\n"
 
 
 class AccountError(Exception):
@@ -261,8 +281,7 @@ def remove(name: str, *, keychain: kc.Keychain | None = None,
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=PROG, epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter,
-        description="Which of the Claude accounts this Mac is on, and the switch "
-                    "between them. Never prints a token.")
+        description=DESCRIPTION)
     verbs = p.add_subparsers(dest="verb", metavar="VERB")
     verbs.required = True
 
@@ -272,12 +291,27 @@ def parser() -> argparse.ArgumentParser:
 
     s = verbs.add_parser("status", help="the host's account, this seat's, plan usage",
                          description="Which account the host is on, this seat's route, "
-                                     "and the plan usage of the live account.")
+                                     "the plan usage of the live account (a window past "
+                                     "its reset is STALE, its figure not shown), and the "
+                                     "account ~/.claude.json names (display only: the "
+                                     "token decides billing).")
     s.add_argument("--json", action="store_true", help="one JSON object")
     s.add_argument("--no-resets", action="store_true",
                    help="hide when each usage window resets (shown by default)")
     s.add_argument("--resets", action="store_true",
                    help="accepted and ignored: resets are shown by default")
+
+    v = verbs.add_parser("verify", help="ask the API which account a token bills",
+                         description="Make ONE 1-token request to the API with a token "
+                                     "and print the account-wide usage windows it "
+                                     "reports: the 7d reset identifies the account. "
+                                     "NAME: that registry account's token. No NAME: "
+                                     "the token this seat bills (the env token, else "
+                                     "the host's token file or Keychain item). Never "
+                                     "prints a token.")
+    v.add_argument("name", metavar="NAME", nargs="?",
+                   help="a registered account (default: this seat's token)")
+    v.add_argument("--json", action="store_true", help="one JSON object")
 
     # The usage line is written by hand: --witness is required to write, but
     # argparse's `required=True` would exit before `use` shows the plan.
@@ -329,6 +363,7 @@ def main(argv: Sequence[str] | None = None, *,
          preflight: u.Preflight | None = None,
          seat_scan: u.SeatScan | None = None,
          fetch: st.Fetcher | None = None,
+         post: vf.Post | None = None,
          backends: Mapping[str, reg.Backend] | None = None,
          env: Mapping[str, str] | None = None,
          home: str | os.PathLike | None = None,
@@ -340,7 +375,8 @@ def main(argv: Sequence[str] | None = None, *,
          out: TextIO | None = None, err: TextIO | None = None) -> int:
     """`session account VERB ...`. Returns the exit code. Every keyword is
     a seam; None is the production default. `store`, `capture` and `tty`
-    (stdin's fd, stdout's fd) are `new`'s; so is `preflight`, as `use`'s."""
+    (stdin's fd, stdout's fd) are `new`'s; so is `preflight`, as `use`'s.
+    `post` is `verify`'s transport."""
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
     try:
@@ -355,6 +391,9 @@ def main(argv: Sequence[str] | None = None, *,
     if args.verb == "status":
         return st.status(as_json=args.json, resets=not args.no_resets, keychain=keychain,
                          fetch=fetch, env=env, home=home, clock=clock, out=out, err=err)
+    if args.verb == "verify":
+        return vf.verify(args.name, as_json=args.json, keychain=keychain, backends=backends,
+                         env=env, home=home, post=post, clock=clock, out=out, err=err)
     if args.verb == "use":
         return u.use(args.name, witness=args.witness, yes=args.yes, keychain=keychain,
                      preflight=preflight, seat_scan=seat_scan, home=home,

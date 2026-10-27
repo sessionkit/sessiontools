@@ -84,10 +84,8 @@ In `~/.sessionkit/tools/settings/session.json` (template and host layers):
 - `--dry-run`: logs every transition and never writes tmux. It **takes no
   lock**, so it runs beside a live publisher and creates no file.
 - `--stats`: on exit, prints `ticks= ps= tmux= writes= mismatches=`.
-- **One per host:** an flock on
-  `$SESSION_STATE_DIR/pane-state/watch.lock` (else
-  `~/.session/state/pane-state/`). A second `watch` names the holder and
-  exits 0.
+- **One per host:** an flock on `pane-state/watch.lock` in the state dir
+  (`session path state`). A second `watch` names the holder and exits 0.
 - **On SIGTERM or SIGINT** it unsets every option it wrote. A stopped
   publisher leaves UNKNOWN, never a stale FREE.
 - **At start** it rewrites whatever the panes hold, so a FREE left by a
@@ -133,7 +131,9 @@ How the job runs:
   publisher first.
 - **`on` proves it:** it waits up to 10 s for the lock to name the
   job's pid. If it never does, `on` exits 1 and names the log,
-  `~/Library/Logs/sessiontools/pane-state.log`.
+  `~/.sessionkit/tools/log/pane-state.log`. Before 0.3.2 the agent logged
+  to `~/Library/Logs/sessiontools/pane-state.log`; that file is left in
+  place, and `status` names it while it is there.
 - **KeepAlive:** a crashed publisher is back within 30 s
   (`ThrottleInterval`). If a hand-run `watch` holds the lock, the job
   exits at each start and launchd tries again every 30 s; `status`

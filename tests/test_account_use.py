@@ -835,3 +835,57 @@ def test_default_by_names_the_session_else_the_user():
     assert u.default_by({"CLAUDE_CODE_SESSION_ID": "abc", "USER": "x"}) == "session:abc"
     assert u.default_by({"USER": "x"}) == "user:x"
     assert u.default_by({}) == "user:unknown"
+
+
+# --- the oauthAccount note, and the witness length --------------------------------------
+
+
+def _note(world) -> str:
+    lines = world.out.getvalue().splitlines()
+    assert lines[1].startswith("  note:    "), lines
+    return lines[1]
+
+
+def test_the_keychain_plan_says_the_display_profile_is_not_changed(world, capsys):
+    (world.home / ".claude.json").write_text(json.dumps(
+        {"oauthAccount": {"emailAddress": "ai@example.com", "accountUuid": "uuid-NOT-SHOWN"}}))
+    before = (world.home / ".claude.json").read_bytes()
+    assert world.run(yes=False) == 3
+    assert _note(world) == (
+        "  note:    ~/.claude.json names ai@example.com (Claude's /status and 'claude auth "
+        "status' read it); use does not change it. The token decides billing: check with "
+        "'session account verify'")
+    assert "uuid-NOT-SHOWN" not in world.text()
+    assert world.run() == 0                         # and a real switch leaves it alone
+    assert (world.home / ".claude.json").read_bytes() == before
+    world.assert_no_leak(capsys)
+
+
+def test_the_keychain_plan_with_no_profile_says_it_names_none(world, capsys):
+    assert world.run(yes=False) == 3
+    assert _note(world).startswith("  note:    ~/.claude.json names no account (Claude's")
+    assert "use does not change it" in _note(world)
+    world.assert_no_leak(capsys)
+
+
+def test_the_keychain_plan_with_an_unreadable_profile_says_why(world, capsys):
+    (world.home / ".claude.json").write_text("{oops")
+    assert world.run(yes=False) == 3
+    assert _note(world).startswith("  note:    ~/.claude.json could not be read: not JSON "
+                                   "(Claude's")
+    world.assert_no_leak(capsys)
+
+
+def test_a_witness_over_64_characters_is_refused_naming_its_length(world, capsys):
+    value = "w" * 65
+    assert world.run(witness=value) == 2
+    err = world.err.getvalue()
+    assert ("--witness is 65 characters; at most 64 (the value is not shown)" in err)
+    assert value not in err and world.out.getvalue() == ""
+    world.assert_untouched()
+    world.assert_no_leak(capsys)
+
+
+def test_a_witness_of_64_characters_is_accepted(world, capsys):
+    assert world.run(witness="w" * 64, yes=False) == 3
+    world.assert_no_leak(capsys)

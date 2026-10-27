@@ -172,7 +172,7 @@ def test_the_port_env_moves_it_for_tests_only_when_it_is_a_port(raw, port):
 
 
 def test_the_sender_home_rule():
-    assert engine_client.home({"HOME": "/h"}) == Path("/h/.local/share/sessiontools/sound")
+    assert engine_client.home({"HOME": "/h"}) == Path("/h/.sessionkit/tools/state/sound")  # fresh: new
     assert engine_client.sender({"HOME": "/h", engine_client.HOME_ENV: "/s"}) == Path(
         "/s/bin/sound-event")
 
@@ -746,6 +746,35 @@ def test_engine_not_installed_the_hook_exits_0_silent_and_sends_nothing(shim_rig
     for verb in ("arm", "end", "stop", "clear"):
         shim_rig.shim(verb, **gone)
     assert fake.drain() == []
+    assert shim_rig.python_runs() == 1
+
+
+@pytest.mark.parametrize("layout", ["old-only", "fresh", "migrated"])
+def test_the_hooks_sender_is_where_sound_home_says(shim_rig, fake, layout):
+    """ST-266 do-003 (the decompose review's busy-sound rule): with no
+    SESSIONTOOLS_SOUND_HOME, the engine is installed wherever sound.home()
+    resolves (the old folder while it is real; else the new one, the fresh
+    default now) and the hook's bash rule must find the same sender with no
+    python: its fast-path `end` reaches the engine. A wrong guess is silent."""
+    home = {"HOME": str(shim_rig.root)}
+    old = shim_rig.root / ".local/share/sessiontools/sound"
+    new = shim_rig.root / ".sessionkit/tools/state/sound"
+    if layout == "old-only":
+        old.mkdir(parents=True)
+    if layout == "migrated":
+        new.mkdir(parents=True)
+        old.parent.mkdir(parents=True)
+        old.symlink_to(new)
+    want = {"old-only": old, "fresh": new, "migrated": new}[layout]
+    assert engine_client.home(home) == want
+    sender = engine_client.sender(home)
+    sender.parent.mkdir(parents=True, exist_ok=True)
+    sender.symlink_to(shim_rig.home / "bin" / "sound-event")    # the real, built sender
+    shim_rig.settings()
+    unset = {"SESSIONTOOLS_SOUND_HOME": None}
+    shim_rig.shim("arm", **unset)                                # python: the record, and arm
+    shim_rig.shim("end", **unset)                                # the shim and the sender alone
+    assert events(fake) == [("arm", SID), ("end", SID)]
     assert shim_rig.python_runs() == 1
 
 

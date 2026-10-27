@@ -309,9 +309,18 @@ def warn_env_file_traps(environment: Environment, work_dir: str) -> None:
 #: launch-info carries, which the session-info hook leaves out of its block.
 #: A parent's marker must never reach a child launched without launch-info,
 #: so it is scrubbed here and exported again only by `render_launch_script`.
+#: CLAUDE_CODE_AGENT is the agent word, which sessionmail reads:
+#: the vendor sets it from `--agent` and writes its sidecar's `agent` from
+#: it, and mail merges every live sidecar carrying a word into that word's
+#: row. Inherited, a plain session started from the default seat's tree
+#: (directly, or through a tmux server born there) heard the seat's mail.
+#: A launch that names an agent gets its word back from the vendor's
+#: `--agent` door, never from the caller. Only this one name: EMAIL,
+#: TM_AGENT_ADDRESS and SESSIONMAIL_SUBSCRIBE are handed down on purpose.
 SESSION_IDENTITY_VARS = (*SESSION_ID_VARS,
                          "CLAUDE_SESSION_AGENT_SOCK", "CLAUDE_SESSION_AGENT_PID",
-                         "CLAUDE_SESSION_PUB", "GIT_CONFIG_COUNT", LAUNCH_INFO_ENV)
+                         "CLAUDE_SESSION_PUB", "GIT_CONFIG_COUNT", LAUNCH_INFO_ENV,
+                         "CLAUDE_CODE_AGENT")
 
 #: The rest of the signing block: git's indexed env-config pairs, an open
 #: family, so they are named by PREFIX. session-key-init owns the whole

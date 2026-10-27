@@ -10,10 +10,16 @@ are the first message.
 - `session start -`: always plain, with no agent.
 - `session start --list-agents`: the agents it can start.
 - `session start --dry-run AGENT`: what would run. It launches nothing.
-- `session start --in-tmux AGENT`: in a new tmux window, not in place.
+- `session start --in-tmux AGENT`: in a new tmux window, not in place
+  (from outside tmux, in session `agents`).
 - `session start AGENT review the auth`: the words after AGENT are the
   first message.
 - Flags go BEFORE the agent name.
+- A launch in place needs a terminal: stdin and stdout must both be one.
+  With no terminal (stdout piped, say) it is refused with exit 2 before
+  anything happens. Run it from a terminal, or add `--in-tmux`, which
+  gives the session a tmux window of its own. `--dry-run`, and a typed
+  `-p`/`--print`, `-h`/`--help` or `-v`/`--version`, need no terminal.
 - Exit codes: 0 ok, 1 launch failed, 2 usage or a refusal, 3 the agent
   is already held (see [the front door][door], and [the default
   seat][seat] for `session start claude`).
@@ -65,6 +71,11 @@ are the first message.
   yourself, write `--tmux-target SESSION:WINDOW`.
 - `--switch` moves the tmux client to the new window; `--no-switch`
   never does, even from an interactive terminal inside tmux.
+- Outside tmux, with no SESSION given, the window goes in session
+  `agents`. It is created (detached) if it is missing and reused if it
+  exists, and the agent's window is made its current one. The line it
+  prints ends with how to reach it: `attach: tmux attach -t agents`.
+  `--dry-run` says which session it would use and touches no tmux.
 
 ## The front door: one holder
 
@@ -73,6 +84,25 @@ are the first message.
   its age.
 - `--allow-second-holder` launches anyway, with one stderr line naming
   whom it starts beside.
+- **A holder** is a live Claude Code session of that agent, or a live
+  claim on it (below): a launch still starting up holds the agent too.
+- **Your own pane:** a direct start typed in the holder's own tmux pane
+  replaces it (`respawn-pane -k`), unless the holder is the launcher or
+  one of its ancestors. A start nested in the holder's own shell is
+  refused, and so is a start with `--in-tmux`: a tmux placement never
+  replaces anything.
+- **The claim:** a hand launch of a free agent takes the agent's lock
+  (`holders/<agent>.lock` in the state dir) and writes
+  `holders/<agent>.json` before it execs, the same claim the default
+  seat writes. Two launches of one agent started together give one
+  holder; the second is refused, exit 3. With `--in-tmux` the claim
+  moves to the new pane's process once the window is up. A dry run, a
+  spawner's `-n` launch and a launch beside a holder with
+  `--allow-second-holder` take no claim.
+- **Fail open, loudly:** when the process table or the claim cannot be
+  read, the lock stays busy for 10 s, or the claim cannot be written,
+  the launch goes ahead with one stderr line saying so. Only a measured
+  live holder refuses.
 - The front door reads the live sessions every call, never the
   [`session list` cache][cache].
 
@@ -98,7 +128,7 @@ it means for you, shadowing included, is in
      when it applies, then the mint. A question waits on a person, so it
      is never asked under the lock; the claim already holds the seat.
 - **The claim:** `holders/claude.json` in the state dir
-  (`~/.session/state`, or `$SESSION_STATE_DIR`), beside its lock
+  (`session path state`), beside its lock
   `holders/claude.lock`. It records the session id, the pid, that pid's
   start time, the tmux pane and how it was taken. Nothing releases it.
   It goes stale when the pid ends or the pid's start time differs (a
@@ -124,6 +154,14 @@ it means for you, shadowing included, is in
   `--agents '{"claude": {"description": ..., "prompt": ""}}' --agent
   claude`, with no plugin dir. The prompt is empty, and the description
   is always the shipped one.
+- **The agent word is never inherited.** `CLAUDE_CODE_AGENT` is part of
+  the session identity the launch script's first line unsets, and a
+  tmux server `session start` creates never holds it. The seat, and
+  every named launch, gets it from `--agent`, which Claude Code turns
+  back into the variable. A plain launch has none, so its sidecar names
+  no agent and it does not hear box `claude`. A server born inside a
+  seat before this fix keeps the word until an operator removes it:
+  see [the default seat][seat-user].
 - **Reads as bare:** the built-in counts as no agent file for `--idle`,
   `--converse` and the settings layer. The session's birth settings
   record `agent: claude` and no agent file. A shadowing file counts as an
@@ -270,13 +308,17 @@ them in the `claude-code` settings tool:
   `launch/` directory and passes it as `--settings`. The dry run's
   command lists it with the layer and file of each value; the launch
   record names the file.
-- Only `model`, `effortLevel` and `statusLine` are passed on. Any other
+- Only `model`, `effortLevel`, `statusLine` and `tui` are passed on. Any other
   key gets one stderr line, `claude-code: KEY (from FILE) not rendered in
   v1`, and is dropped.
 - A `--model` or `--effort` typed on the command line still wins:
   claude ranks its own flags above `--settings`.
-- With no `claude-code` file anywhere, nothing changes: no `--settings`.
-  With no `statusLine` in any layer, the file is what it was before.
+- The file also carries `"tui": "default"` when nothing names `tui`
+  ([Claude Code's first-run screens](#claude-codes-first-run-screens)),
+  so there is a `--settings` even with no `claude-code` file anywhere.
+  With no `claude-code` file and a `tui` in your own Claude settings,
+  nothing changes: no `--settings`. With no `statusLine` in any layer,
+  the file has none.
 - A `--settings` typed on the command line is folded in as the top
   layer, above the session's. Its keys win over every other layer,
   except a key a lower file locks with `_locked`, and they are passed
@@ -286,14 +328,38 @@ them in the `claude-code` settings tool:
   launch's home, and a relative path is read under the session's
   working directory. One the launcher cannot read, one that is not a
   JSON object, or a second `--settings`, refuses the launch with exit 2,
-  naming it. With no `claude-code` file anywhere, it is not read and
-  passes to claude unchanged.
+  naming it. When there is no file to fold it into (no `claude-code`
+  file anywhere, and a `tui` in your own Claude settings), it is not
+  read and passes to claude unchanged.
 - A `--settings` in the agent file's `claude:` section gets none from
   the launcher: no model, no effort, no status line. Its argv is
   unchanged, and one stderr line names the host file not applied and
   the launch's own file.
 - A resume carries the file too.
 - `~/.claude/settings.json` is never written.
+
+### Claude Code's first-run screens
+
+- **The fullscreen-renderer offer** greets a session while no setting
+  names Claude Code's `tui`. A session `session start` launches is not
+  shown it: its `--settings` file carries `"tui": "default"`, the
+  renderer it already runs. Your own files are read, never written.
+- The launcher sets it only when nothing else names `tui`: a
+  `claude-code` layer, a typed `--settings`, or Claude's own settings
+  (`~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json`
+  when that is set, and the working directory's `.claude/settings.json`
+  and `.claude/settings.local.json`). A file that is missing or not
+  JSON names nothing.
+- `--settings` outranks your own files, so the launcher never sets
+  `tui` over them. To use the fullscreen renderer, run `/tui fullscreen`
+  once in any session: it writes your own settings, and from then on
+  the launcher leaves `tui` alone. To pick one for every launched
+  session, put `"tui"` in `claude-code.json`.
+- **The theme picker and the folder-trust question are still asked.**
+  They are not settings: Claude Code keeps the answers in its own
+  `~/.claude.json`, and no `--settings` key or environment variable
+  answers them. The launcher does not write that file. The theme is
+  asked once for each user, and trust once for each folder.
 
 ### The status line
 

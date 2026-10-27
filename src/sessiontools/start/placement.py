@@ -3,6 +3,7 @@
     session start --in-tmux alice                     a window in this session
     session start --tmux-target work:alice alice      a window in session `work`
     session start --tmux-target work --switch alice   ...and move the client there
+    session start --in-tmux alice   (outside tmux)    a window in session `agents`
 
 The pane runs the plan's own launch script, written as a 0700 trampoline:
 `render_launch_script` with a shebang, extended and never forked, so the
@@ -46,6 +47,11 @@ from sessiontools.start.run import discard_files, run_tmux, write_files
 
 TRAMPOLINE = "launch.sh"
 
+#: The session a placement with no target lands in when the caller is not
+#: inside tmux: one fixed name, so a second launch from a plain terminal
+#: adds a window beside the first instead of a session per agent.
+DEFAULT_TMUX_SESSION = "agents"
+
 
 class TmuxPlacement(NamedTuple):
     """Where a tmux launch landed: what `receipt` prints."""
@@ -67,6 +73,17 @@ def parse_tmux_target(value: str | None) -> tuple[str, str]:
         return "", ""
     session, _sep, window = value.partition(":")
     return session, window
+
+
+def default_session(session: str, environ: Mapping[str, str] | None = None) -> str:
+    """The session a placement targets: SESSION as typed; with none typed
+    and the caller outside tmux, DEFAULT_TMUX_SESSION, which `ensure_session`
+    creates (detached, born the scrubbed way) or reuses. Inside tmux an
+    empty SESSION stays empty: the window opens in the caller's session."""
+    environ = os.environ if environ is None else environ
+    if session or environ.get("TMUX"):
+        return session
+    return DEFAULT_TMUX_SESSION
 
 
 def should_switch(switch: bool, no_switch: bool,
@@ -181,6 +198,12 @@ def place_in_tmux(plan: LaunchPlan, session: str, window: str, switch: bool,
     window_id, pane_id, pane_pid = _parse_new_window(printed)
     after = [("automatic-rename off",
               ["set-window-option", "-t", window_id, "automatic-rename", "off"])]
+    if created:
+        # `new-session` made window 0, a bare shell, and `new-window -d`
+        # left it current: make the agent's window the one an attach lands
+        # on. No client is attached to a session just made, so nobody's
+        # view moves.
+        after.append(("select the new window", ["select-window", "-t", window_id]))
     if switch:
         after.append(("switch the client to it", ["switch-client", "-t", window_id]))
     for description, arguments in after:
@@ -211,9 +234,13 @@ def _parse_new_window(printed: list[str]) -> tuple[str, str, int | None]:
     return window_id, pane_id, pane_pid
 
 
-def receipt(plan: LaunchPlan, placement: TmuxPlacement) -> str:
+def receipt(plan: LaunchPlan, placement: TmuxPlacement,
+            environ: Mapping[str, str] | None = None) -> str:
     """The one line a placement prints: who, which window (and its @id),
-    where, and the session id - or that the pane mints it."""
+    where, and the session id - or that the pane mints it. A caller outside
+    tmux is never switched to the window, so its line ends with how to
+    reach it; a caller inside tmux gets the line unchanged."""
+    environ = os.environ if environ is None else environ
     if placement.session:
         created = " (created)" if placement.created_session else ""
         where = f"session '{placement.session}'{created}"
@@ -221,15 +248,20 @@ def receipt(plan: LaunchPlan, placement: TmuxPlacement) -> str:
         where = "the current session"
     sid = plan.identity.session_id if plan.identity is not None else "id minted in the pane"
     who = plan.agent.name or plan.vendor
-    return (f"{PROG}: placed {who} in tmux window {placement.window!r} "
+    line = (f"{PROG}: placed {who} in tmux window {placement.window!r} "
             f"({placement.window_id}) of {where} -- session {sid}")
+    if placement.session and not environ.get("TMUX"):
+        line += f"; attach: tmux attach -t {shlex.quote(placement.session)}"
+    return line
 
 
 __all__ = [
+    "DEFAULT_TMUX_SESSION",
     "NEW_WINDOW_FORMAT",
     "TRAMPOLINE",
     "TmuxPlacement",
     "check_placeable",
+    "default_session",
     "ensure_session",
     "parse_tmux_target",
     "place_in_tmux",

@@ -73,8 +73,9 @@
 # So after the first arm the engine path starts no python, except at a Stop
 # when a stop sound is set (or before any arm has stamped sounds/stop/off).
 #
-# The sender is ${SESSIONTOOLS_SOUND_HOME:-~/.local/share/sessiontools/sound}
-# /bin/sound-event. Not executable means not installed, which counts as off: no
+# The sender is <sound home>/bin/sound-event, the sound leaf by the bash copy
+# of the rule below ($SESSIONTOOLS_SOUND_HOME, else the old folder while it is
+# real, else tools' state). Not executable means not installed, which counts as off: no
 # datagram, exit 0. It sends ONE datagram to 127.0.0.1 ($SESSIONTOOLS_SOUND_PORT
 # for tests, else 44100) and exits 0, silent; an engine that is off is silent
 # by construction. The record is keyed on the claude pid, so `claude --resume`
@@ -113,8 +114,26 @@ esac
 [ -n "$sound$turn" ] || exit 0
 sid=${CLAUDE_CODE_SESSION_ID:-}
 case "$sid" in '' | */* | . | ..) exit 0 ;; esac   # busy.is_sid
-root=${SESSIONS_DIR:-$HOME/.session/sessions}
-case "$root" in \~/*) root=$HOME/${root#\~/} ;; esac   # a literal ~/, as python expanduser()s it
+# THE ONE BASH COPY of settings.leaf_path, for the sessions and sound
+# leaves, with builtins only: the override; else OLD while it is a directory
+# that is not NEW's; else NEW when it is a directory; else the fresh default,
+# the third word: old for sessions, new for sound (settings.FRESH_NEW).
+# tests/test_leaf_paths.py pins it against python on old-only, fresh,
+# migrated and new-only HOMEs.
+leaf() {   # leaf OLD NEW old|new: sets $at to the rule's answer, no override; no fork
+  if [ -d "$1" ] && ! [ "$1" -ef "$2" ]; then at=$1
+  elif [ -d "$2" ]; then at=$2
+  elif [ "$3" = new ]; then at=$2
+  else at=$1
+  fi
+}
+if [ -n "${SESSIONS_DIR:-}" ]; then
+  root=$SESSIONS_DIR
+  case "$root" in \~/*) root=$HOME/${root#\~/} ;; esac   # a literal ~/, as python expanduser()s it
+else
+  leaf "$HOME/.session/sessions" "$HOME/.sessionkit/tools/state/sessions" old
+  root=$at
+fi
 dir=$root/$sid
 [ -d "$dir" ] || exit 0
 # This file's dir and python's src/, by builtins: `$(dirname)` forked on
@@ -155,7 +174,12 @@ fi
 b=$dir/sounds/busy
 h=$HOME/.sessionkit/tools/settings
 s=$dir/settings
-ev=${SESSIONTOOLS_SOUND_HOME:-$HOME/.local/share/sessiontools/sound}/bin/sound-event
+if [ -n "${SESSIONTOOLS_SOUND_HOME:-}" ]; then
+  ev=$SESSIONTOOLS_SOUND_HOME/bin/sound-event
+else
+  leaf "$HOME/.local/share/sessiontools/sound" "$HOME/.sessionkit/tools/state/sound" new
+  ev=$at/bin/sound-event
+fi
 cp=${CLAUDE_PID:-}
 case "$cp" in '' | *[!0-9]*) cp= ;; esac   # busy.claude_pid: digits only
 case "$verb" in

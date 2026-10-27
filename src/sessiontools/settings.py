@@ -12,9 +12,13 @@ THE LAYERS, top to bottom; each overrides the one above it:
     template  <pkg>/<tool>.template.json                 shipped
     host      <pkg>/<tool>.json | <tool>.d/*.json,
               or the file SETTINGS_FILE_ENV names (see host_files)
-    agent     ~/.session/agent/config/<name>.md, front matter `settings:`
-    seat      ~/.session/seats/<seat>/settings/<tool>.json | <tool>.d/
-    session   ~/.session/sessions/<sid>/settings/<tool>.json | <tool>.d/
+    agent     <agent>/config/<name>.md, front matter `settings:`
+    seat      <seats>/<seat>/settings/<tool>.json | <tool>.d/
+    session   <sessions>/<sid>/settings/<tool>.json | <tool>.d/
+
+`<agent>`, `<seats>` and `<sessions>` are leaves of tools' state, each
+resolved by leaf_path: the OLD `~/.session/<leaf>/` while it is real, else
+the NEW `~/.sessionkit/tools/state/<leaf>/`.
 
 `<pkg>` is `~/.sessionkit/<package>/settings/`, the settings directory of
 the package that ships the tool (`~/.sessionkit/tools/settings/session.json`):
@@ -159,6 +163,11 @@ def settings_root(env: Mapping[str, str] | None = None) -> Path:
 
 
 def session_root(env: Mapping[str, str] | None = None) -> Path:
+    """DEPRECATED: `~/.session/`, the OLD root of tools' state, sessions and
+    seats (before 0.3.2). Only leaf_old (the fallback rule) and the migrate
+    verb read it. Every other reader and writer takes its leaf's resolver:
+    state_root, sessions_root, seats_root, agent_root, backups_root,
+    sound_root (leaf_path)."""
     return home(env) / SESSION_DIR
 
 
@@ -173,6 +182,35 @@ def package_dir(package: str, env: Mapping[str, str] | None = None) -> Path:
     the shape is spelled: every reader, writer and test derives the path
     from here."""
     return kit_root(env) / package / "settings"
+
+
+#: A package's log folder under its home, beside `settings/`.
+LOG_DIR = "log"
+
+
+def log_dir(package: str, env: Mapping[str, str] | None = None) -> Path:
+    """`~/.sessionkit/<package>/log/`: PACKAGE's log directory, beside
+    `settings/`. The ONE place the shape is spelled: every log writer
+    derives its path from here, passing PACKAGES[tool], never a literal.
+    HOME moves it (through kit_root); there is no env override of its own."""
+    return kit_root(env) / package / LOG_DIR
+
+
+def legacy_log_dir(env: Mapping[str, str] | None = None) -> Path:
+    """`~/Library/Logs/sessiontools/`: the OLD log location, before the logs
+    moved under the kit's home (0.3.2). Read only, for the one-line pointer
+    a status prints while an old file is still there; no writer may call it,
+    and nothing deletes from it. Drop it in the release after next."""
+    return home(env) / "Library" / "Logs" / "sessiontools"
+
+
+def legacy_log_pointer(name: str, env: Mapping[str, str] | None = None) -> list[str]:
+    """The one line naming an old log NAME (e.g. `pane-state.log`) that still
+    exists at legacy_log_dir, as a list for a status render: `[]` when it is
+    absent. Text output only, never a JSON key."""
+    # drop after 0.3.3 (the old-log pointer)
+    old = legacy_log_dir(env) / name
+    return [f"old log  {old} (no longer written)"] if old.exists() else []
 
 
 #: `session account`'s folder under its package's home, beside `settings/`
@@ -445,19 +483,182 @@ def host_files(tool: str, env: Mapping[str, str] | None = None) -> HostFiles:
 #: crews (task 4.1b drops that). The launcher and this reader read the SAME
 #: variable, so a launch and `session settings` agree on the directory.
 SESSIONS_DIR_ENV = "SESSIONS_DIR"
+#: Moves the state leaf (snapshot, holders, default-model, pane-state).
+SESSION_STATE_DIR_ENV = "SESSION_STATE_DIR"
+#: Moves the sound engine's home (its binaries). Taken as written, unexpanded,
+#: as sound.home always took it.
+SOUND_HOME_ENV = "SESSIONTOOLS_SOUND_HOME"
 #: An ambiguous short id names at most this many candidates, then the total
 #: (a one-letter prefix on a busy host named ~100 ids, about 3.8 KB).
 AMBIGUOUS_SHOW = 10
 
 
+# --- tools' state and the leaves nested in it ---------------------------------------
+#
+# THE LAYOUT (Q1, the kit super ruling; see the task card): tools' state folder is
+# `~/.sessionkit/tools/state/`, beside `settings/` and `log/`, and every other
+# leaf nests inside it: `tools/state/{sessions,seats,agent,backups,sound}/`.
+# The OLD homes are `~/.session/<leaf>/` and, for sound,
+# `~/.local/share/sessiontools/sound/`.
+#
+# THE RULE, per leaf, in order (OLD-WINS-WHILE-REAL, design/build-cut.md §2):
+#   1. its override is set:                         that path   (override)
+#   2. old is a directory that is not new's:         old         (old)
+#   3. new is a directory (old a link to it, or gone): new       (new)
+#   4. neither:                                      the fresh default,
+#      old (fresh-old) or new (fresh-new): FRESH_NEW names the leaves whose is new.
+# Old wins while it is real because the leaves NEST: a fresh write under
+# `tools/state/sound/` makes `tools/state/`, and "new wins" would then strand
+# a live `~/.session/state/`. Readers AND writers take the same answer, so on
+# a host that has the old folder no writer switches until its data moves (the
+# old path becomes a link); only a host with neither folder starts new.
+# hooks/busy-sound carries the ONE bash copy of this rule (sessions, sound).
+
+#: tools' state folder under its package's home, beside `settings/` and `log/`.
+STATE_DIR = "state"
+#: The leaves, in the order `session path --json` lists them. `state` is the
+#: folder itself; every other leaf's NEW path nests inside it.
+LEAVES = ("state", "sessions", "seats", "agent", "backups", "sound")
+NESTED_LEAVES = LEAVES[1:]
+#: Each leaf's override, a variable that wins outright, with no fallback (None:
+#: none). AGENTS_DIR is not here: it moves only the launcher's agent-file
+#: lookup (start/agents.agents_root), never the agent leaf or a seat's home.
+LEAF_OVERRIDE = {"state": SESSION_STATE_DIR_ENV, "sessions": SESSIONS_DIR_ENV,
+                 "seats": None, "agent": None, "backups": None, "sound": SOUND_HOME_ENV}
+#: Sound's OLD folder under HOME, before the move.
+OLD_SOUND_DIR = (".local", "share", "sessiontools", "sound")
+#: The pre-4.2 flat agents folder under the old root, read only as the
+#: launcher's last fallback (start/agents.agents_root).
+OLD_AGENTS_DIR = "agents"
+#: The leaves whose FRESH default (neither path there) is NEW. Wave 3 (READY
+#: B, build-cut.md §3): state and sound, so a fresh host writes its state and
+#: installs its sound engine under `~/.sessionkit/tools/state/`. sessions,
+#: seats, agent and backups keep OLD until wave 4 (the all-seats-down move).
+FRESH_NEW: frozenset[str] = frozenset({"state", "sound"})
+#: What `leaf_path` says it used.
+LEAF_SOURCES = ("override", "old", "new", "fresh-old", "fresh-new")
+
+
+def _leaf(leaf: str) -> str:
+    if leaf not in LEAVES:
+        raise ValueError(f"unknown leaf {leaf!r}: one of {', '.join(LEAVES)}")
+    return leaf
+
+
+def tools_state_dir(env: Mapping[str, str] | None = None) -> Path:
+    """`~/.sessionkit/tools/state/`: tools' state folder, the NEW path of the
+    state leaf and the parent of every other leaf's. The ONE place the shape
+    is spelled; the package is PACKAGES["session"], never a literal."""
+    return kit_root(env) / PACKAGES["session"] / STATE_DIR
+
+
+def leaf_new(leaf: str, env: Mapping[str, str] | None = None) -> Path:
+    """LEAF's NEW path: `tools/state/` for state, `tools/state/<leaf>/` else."""
+    base = tools_state_dir(env)
+    return base if _leaf(leaf) == "state" else base / leaf
+
+
+def leaf_old(leaf: str, env: Mapping[str, str] | None = None) -> Path:
+    """LEAF's OLD path: `~/.session/<leaf>/`, or for sound
+    `~/.local/share/sessiontools/sound/`. Read by the rule and the migrate
+    verb only; no writer opens it but through leaf_path."""
+    if _leaf(leaf) == "sound":
+        return home(env).joinpath(*OLD_SOUND_DIR)
+    return session_root(env) / leaf
+
+
+def legacy_agents_dir(env: Mapping[str, str] | None = None) -> Path:
+    """`~/.session/agents/`, the pre-4.2 flat agents folder: the launcher's
+    last fallback for an agent's file, read only."""
+    return session_root(env) / OLD_AGENTS_DIR
+
+
+def leaf_override(leaf: str, env: Mapping[str, str] | None = None) -> Path | None:
+    """LEAF's override as the path it names, else None (unset or empty).
+    SESSION_STATE_DIR and SESSIONS_DIR are `~`-expanded, as they always were;
+    SESSIONTOOLS_SOUND_HOME is taken as written, as sound.home took it."""
+    var = LEAF_OVERRIDE[_leaf(leaf)]
+    raw = (os.environ if env is None else env).get(var) if var else None
+    if not raw:
+        return None
+    return Path(raw) if leaf == "sound" else Path(os.path.expanduser(raw))
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    """A and B are one directory (symlinks followed, as `[ A -ef B ]`)."""
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+def leaf_path(leaf: str, env: Mapping[str, str] | None = None) -> tuple[Path, str]:
+    """(path, source) for LEAF: THE rule above, the one every *_root function
+    and `session path --json` share. Source is one of LEAF_SOURCES. It never
+    raises for a path it cannot stat: that path reads as absent."""
+    found = leaf_override(leaf, env)
+    if found is not None:
+        return found, "override"
+    old, new = leaf_old(leaf, env), leaf_new(leaf, env)
+    if os.path.isdir(old) and not _same_dir(old, new):
+        return old, "old"
+    if os.path.isdir(new):
+        return new, "new"
+    if leaf in FRESH_NEW:
+        return new, "fresh-new"
+    return old, "fresh-old"
+
+
+def leaf_stranded(leaf: str, env: Mapping[str, str] | None = None) -> Path | None:
+    """LEAF's NEW path when the rule uses OLD while new holds something of
+    its own, else None. Both are real, distinct directories: old is used and
+    new is never read or merged; a human decides. The leaves nested in the
+    state folder are not the state leaf's own, so a `tools/state/` holding
+    only them (a fresh `sound/`, say) is not stranded state. A new folder
+    that cannot be listed is reported: it cannot be shown empty."""
+    if leaf_path(leaf, env)[1] != "old":
+        return None
+    new = leaf_new(leaf, env)
+    if not os.path.isdir(new):
+        return None
+    nested = set(NESTED_LEAVES) if leaf == "state" else set()
+    try:
+        names = os.listdir(new)
+    except OSError:
+        return new
+    return new if any(n not in nested for n in names) else None
+
+
+def state_root(env: Mapping[str, str] | None = None) -> Path:
+    """The state leaf: snapshot (`list/`), holders, default-model, pane-state."""
+    return leaf_path("state", env)[0]
+
+
+def seats_root(env: Mapping[str, str] | None = None) -> Path:
+    """The seats leaf: `<seat>/settings/` is the seat layer of the cascade."""
+    return leaf_path("seats", env)[0]
+
+
+def agent_root(env: Mapping[str, str] | None = None) -> Path:
+    """The agent leaf: `config/` (agent files) and `home/<agent>/`. AGENTS_DIR
+    never moves it (LEAF_OVERRIDE)."""
+    return leaf_path("agent", env)[0]
+
+
+def backups_root(env: Mapping[str, str] | None = None) -> Path:
+    """The backups leaf. No tools writer; resolved for peers and the move."""
+    return leaf_path("backups", env)[0]
+
+
+def sound_root(env: Mapping[str, str] | None = None) -> Path:
+    """The sound leaf: the engine's home (`bin/`). sound.home is this."""
+    return leaf_path("sound", env)[0]
+
+
 def sessions_root(env: Mapping[str, str] | None = None) -> Path:
-    """`$SESSIONS_DIR`, else `~/.session/sessions`: the one root under which
-    every session's dir is made (task 4.1), whatever the agent."""
-    e = os.environ if env is None else env
-    override = e.get(SESSIONS_DIR_ENV)
-    if override:
-        return Path(os.path.expanduser(override))
-    return session_root(env) / "sessions"
+    """The sessions leaf: the one root under which every session's dir is
+    made (task 4.1), whatever the agent. `$SESSIONS_DIR` overrides it."""
+    return leaf_path("sessions", env)[0]
 
 
 def session_dir(sid: str, env: Mapping[str, str] | None = None) -> Path:
@@ -499,7 +700,7 @@ def resolve_sid(sid: str, env: Mapping[str, str] | None = None) -> tuple[str, st
 
 
 def seat_dir(seat: str, env: Mapping[str, str] | None = None) -> Path:
-    return session_root(env) / "seats" / seat
+    return seats_root(env) / seat
 
 
 def agent_config(agent: str, env: Mapping[str, str] | None = None) -> Path:
@@ -507,14 +708,14 @@ def agent_config(agent: str, env: Mapping[str, str] | None = None) -> Path:
     extras (avatar, portrait, letter, tour) when that directory exists,
     else the flat `<name>.md`. The directory layout wins, as the launcher's
     does."""
-    config = session_root(env) / "agent" / "config"
+    config = agent_root(env) / "config"
     if _is_dir(config / agent):
         return config / agent / f"{agent}.md"
     return config / f"{agent}.md"
 
 
 def agent_home(agent: str, env: Mapping[str, str] | None = None) -> Path:
-    return session_root(env) / "agent" / "home" / agent
+    return agent_root(env) / "home" / agent
 
 
 def ensure_private_dir(path: str | Path) -> Path:

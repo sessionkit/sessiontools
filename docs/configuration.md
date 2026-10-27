@@ -10,8 +10,11 @@ and where each one lives. One section per part of the `session` command.
   of the kit has its own, `~/.sessionkit/<package>/settings/`
   ([one folder per package][packages]); files from 0.1.0 are moved by
   hand ([upgrading][upgrading]).
-- **Its own folders:** `~/.session/` (sessions, seats, agents, the state
-  dir) and `~/.sessionkit/tools/accounts/` (`session account`).
+- **Its own folders:** its state, moving from `~/.session/` (sessions,
+  seats, agents, the state dir) to `~/.sessionkit/tools/state/`, where a
+  fresh host starts the state dir and the sound engine
+  ([where tools keeps its state][state-folders]), and
+  `~/.sessionkit/tools/accounts/` (`session account`).
 - **Environment variables:** each one belongs to one part, below. None
   is needed: unset, each part uses the default its table names.
 - **The plugin's hooks** are switched by environment variables
@@ -30,11 +33,11 @@ own files. Nothing here needs setting.
 | `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Where the transcripts are read from. |
 | `CONTEXT_MAX` | unset | A ceiling on the context window, in tokens. It only lowers a known model's window, never makes one. Set but not a positive number: the window is unknown. |
 | `SESSIONS_DIR` | `~/.session/sessions` | The root of every session's folder. |
-| `SESSION_STATE_DIR` | `~/.session/state` | The state dir: the list snapshot, the pane signal's lock, `reap.log`, the default model's backups and log, and the default seat's claim and lock (`holders/`). |
+| `SESSION_STATE_DIR` | the `state` leaf ([below][state-folders]) | The state dir: the list snapshot, the pane signal's lock, the default model's backups and log, and each agent's claim and lock (`holders/`: the default seat's, and each hand-launched agent's), which `session list` reads for its SEAT column. Not `reap.log` since 0.3.2: it is in `~/.sessionkit/tools/log/`, which follows `HOME`, not this. |
 | `SESSION_LIST_MAX_AGE` | `2` | Seconds a list snapshot may be served. Beats the `list.max_age` setting. `0` turns the cache off. |
 | `SESSION_LIST_FRESH` | unset | A true word (`1`, `true`, `yes`, `on`) computes now, as `--fresh` does. |
 
-- **The snapshot** is `~/.session/state/list/snapshot.json`
+- **The snapshot** is `list/snapshot.json` in the state dir
   ([the list cache][cache]).
 
 ## `session start`
@@ -53,9 +56,10 @@ resolves two settings tools for it ([starting a session][start]).
   and `settings:`, the agent layer.
 - **The session's home:** the `session` keys `home` and `home_dir`. It is
   handed to the session as `SESSION_HOME`, never `HOME`.
-- **Model, effort and status line:** the `claude-code` tool, in
-  `~/.sessionkit/tools/settings/claude-code.json`. It is passed to
-  Claude Code as one `--settings` file. `~/.claude` is never written.
+- **Model, effort, status line and renderer:** the `claude-code` tool,
+  in `~/.sessionkit/tools/settings/claude-code.json`. It is passed to
+  Claude Code as one `--settings` file, with `"tui": "default"` when
+  nothing names `tui`. `~/.claude` is never written.
 - **Credentials are never handed down.** `CLAUDE_CODE_OAUTH_TOKEN`,
   `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are dropped, unless the
   agent file names one under `environment: inherit:`. When one is set and
@@ -124,6 +128,7 @@ settings file's `env` block reaches them too ([the plugin][plugin]).
 | `SESSIONTOOLS_HOOK_TURN` | off | `on` (or `1`, `true`, `yes`) sets the turn-ended mark at Stop. |
 | `SESSIONTOOLS_HOOK_TITLE` | off | `on` (or `1`, `true`, `yes`) sets the session title to the short session id at SessionStart. |
 | `SESSIONTOOLS_HOOK_SESSION_INFO` | off | `on` (or `1`, `true`, `yes`) adds the session-info block to the context at SessionStart. |
+| `SESSIONTOOLS_HOOK_IDENTITY` | on | `off` (or `0`, `false`, `no`) stops the identity block being added to the context at SessionStart. A session with no block is silent either way. |
 | `SESSIONTOOLS_LAUNCH_INFO` | unset | Set by `session start` to the session id its launch-info carries. The session-info block then leaves that id out on startup. |
 | `SESSIONTOOLS_PYTHON` | the `session` command's python | The python the busy sound, settle alert, clock line and session-info hooks run. |
 
@@ -134,6 +139,7 @@ settings file's `env` block reaches them too ([the plugin][plugin]).
   `~/.sessionkit/tools/settings/sounds.json` and every lower layer. Each
   is silent until set ([the busy sound][busy]).
 - **The session-info hooks:** [the session-info hooks][session-info].
+  The identity hook's block: [the identity block][identity].
 
 ## The busy sound and the sound engine
 
@@ -143,10 +149,12 @@ sound engine is an optional player, a per-user launchd agent, macOS only
 
 - **Settings:** `~/.sessionkit/tools/settings/sounds.json`, or an agent,
   seat or session layer.
-- **The engine's files:** its binaries in
-  `~/.local/share/sessiontools/sound/bin/`, its plist
+- **The engine's files:** its binaries in `bin/` of the `sound` leaf
+  (`~/.sessionkit/tools/state/sound/` on a fresh host, else the old
+  `~/.local/share/sessiontools/sound/`), its plist
   `~/Library/LaunchAgents/dev.sessionkit.tools.sound-engine.plist`, its
-  log in `~/Library/Logs/sessiontools/`.
+  log `~/.sessionkit/tools/log/sound-engine.log` (0.3.1 and before:
+  `~/Library/Logs/sessiontools/`, left in place).
 - **The mouth:** the busy sound never plays while the mouth speaks; the
   stop sound is queued behind it (`mouth play`, when `mouth` is on
   `PATH`). Its folder
@@ -157,7 +165,7 @@ sound engine is an optional player, a per-user launchd agent, macOS only
 
 | Name | Default | What it does |
 | --- | --- | --- |
-| `SESSIONTOOLS_SOUND_HOME` | `~/.local/share/sessiontools/sound` | Where the engine's binaries are built and found. |
+| `SESSIONTOOLS_SOUND_HOME` | the `sound` leaf ([below][state-folders]) | Where the engine's binaries are built and found. |
 | `SESSIONTOOLS_SOUND_PORT` | `44100` | The local UDP port the engine listens on. |
 | `MOUTH_DIR` | unset | The mouth's folder, read to know when it speaks. |
 | `SESSIONVOICE_HOME` | unset | sessionvoice's home; the mouth's folder is `mouth/` inside it. |
@@ -192,11 +200,11 @@ pane. Its publisher can run as a per-user launchd agent, macOS only
 - **Settings:** `pane_state.listeners` and `pane_state.interval`, in
   `~/.sessionkit/tools/settings/session.json`, template and host layers only
   ([the keys][session-keys]).
-- **The lock:** `~/.session/state/pane-state/watch.lock`, under
-  `$SESSION_STATE_DIR` when set.
+- **The lock:** `pane-state/watch.lock` in the state dir.
 - **The agent's files:** its plist
-  `~/Library/LaunchAgents/dev.sessionkit.tools.pane-state.plist`, its log in
-  `~/Library/Logs/sessiontools/`.
+  `~/Library/LaunchAgents/dev.sessionkit.tools.pane-state.plist`, its log
+  `~/.sessionkit/tools/log/pane-state.log` (0.3.1 and before:
+  `~/Library/Logs/sessiontools/`, left in place).
 - **The agent passes on** `TMUX_TMPDIR`, `SESSION_STATE_DIR`,
   `SESSION_SIDECAR_DIR` and `SESSIONS_DIR`, each when it is set at `on`.
 
@@ -212,15 +220,15 @@ you ([the default model][default-model]).
 - **The file it guards:** `~/.claude/settings.json`, only its top-level
   `"model"`; under `$CLAUDE_CONFIG_DIR` when set, the same folder
   the status line reports on.
-- **Its own files:** backups in `~/.session/state/default-model/backups/`
-  (the newest 10) and one line per write in
-  `~/.session/state/default-model/log.jsonl`, under `$SESSION_STATE_DIR`
-  when set.
+- **Its own files:** backups in `default-model/backups/` in the state
+  dir (the newest 10), and one line per write in
+  `default-model/log.jsonl` beside them.
 - **A unit carries** `CLAUDE_CONFIG_DIR` and `SESSION_STATE_DIR`, each
   when it is set at `unit`.
 - **The unit's files,** once you install one: the plist
   `~/Library/LaunchAgents/dev.sessionkit.tools.default-model.plist` and
-  its log `~/Library/Logs/sessiontools/default-model.log`, or the
+  its log `~/.sessionkit/tools/log/default-model.log` (0.3.1 and before:
+  `~/Library/Logs/sessiontools/`, left in place), or the
   systemd user units `sessiontools-default-model.path` and `.service`.
 
 ## `session context` and `session ledger`
@@ -230,6 +238,33 @@ you ([the default model][default-model]).
   read from all five layers ([the keys][session-keys]).
 - **The ledger's token counts** use tiktoken's cache:
   `$TIKTOKEN_CACHE_DIR`, else `~/.cache/tiktoken`.
+
+## Where tools keeps its state
+
+Each folder of tools' state is a leaf with an old and a new path. One
+resolver in `sessiontools.settings` picks one for each leaf, and
+`session path LEAF` prints it ([the page][state-paths]).
+
+- **The rule:** the leaf's variable when it is set; else the old folder
+  while it is a real directory; else the new folder when it exists, as
+  after a move that left the old path a link to it; else where a first
+  write goes: the new folder for `state` and `sound`, the old one for the
+  rest.
+- **Nothing moves by itself.** `session path migrate` moves `state` and
+  `sound`, once per host, with that host's go, and leaves a link at each
+  old path ([moving tools' state][migrate]).
+- **Upgrade every copy of sessiontools on a host together:** an older copy
+  writes the old `state` folder.
+
+| Leaf | Old | New | Variable |
+| --- | --- | --- | --- |
+| `state` | `~/.session/state` | `~/.sessionkit/tools/state` | `SESSION_STATE_DIR` |
+| `sessions` | `~/.session/sessions` | `~/.sessionkit/tools/state/sessions` | `SESSIONS_DIR` |
+| `seats` | `~/.session/seats` | `~/.sessionkit/tools/state/seats` | none |
+| `agent` | `~/.session/agent` | `~/.sessionkit/tools/state/agent` | none; `AGENTS_DIR` moves only the agent-file lookup |
+| `backups` | `~/.session/backups` | `~/.sessionkit/tools/state/backups` | none |
+| `sound` | `~/.local/share/sessiontools/sound` | `~/.sessionkit/tools/state/sound` | `SESSIONTOOLS_SOUND_HOME` |
+| `log` | none read | `~/.sessionkit/tools/log` | none |
 
 ## Settings
 
@@ -243,6 +278,9 @@ template, host, agent, seat and session. The most specific layer wins.
 - What applies to one session: `session settings <session-id> [tool]`.
 
 [settings]: settings.md
+[state-folders]: #where-tools-keeps-its-state
+[state-paths]: tools-state-paths.md
+[migrate]: tools-state-migrate.md
 [packages]: settings.md#one-folder-per-package
 [upgrading]: settings.md#upgrading-from-010
 [session-keys]: settings.md#the-session-tools-keys
@@ -258,6 +296,7 @@ template, host, agent, seat and session. The most specific layer wins.
 [clock]: clock-line-hook.md
 [busy]: busy-sound-hook.md
 [session-info]: session-info-hook.md
+[identity]: identity-block.md
 [engine]: sound-engine-agent.md
 [status-line]: status-line-script.md
 [pane-state]: pane-state-signal.md

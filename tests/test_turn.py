@@ -208,7 +208,7 @@ def test_session_list_says_the_word_in_the_table_and_the_json(world):
     header, _rule, line = table.splitlines()
     assert "STATE" in header.split()
     assert "idle with children" in line
-    assert line.split()[:3] == ["16550ac1", "foreman-98", "busy"]   # seat-hearing's columns
+    assert line.split()[:4] == ["16550ac1", "foreman-98", "-", "busy"]   # seat-hearing's two, SEAT
 
     world.unmark()
     row = json.loads(listing.render_json(listing.rows(), now=NOW))[0]

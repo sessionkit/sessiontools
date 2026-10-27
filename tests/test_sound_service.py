@@ -150,12 +150,41 @@ def test_the_plist_has_exactly_the_designs_keys(monkeypatch):
     assert set(p) == DESIGN_KEYS
     assert p["Label"] == "dev.sessionkit.tools.sound-engine"
     assert p["ProgramArguments"] == [
-        str(home / ".local/share/sessiontools/sound/bin/sound-engine"), "--port", "44100"]
+        str(home / ".sessionkit/tools/state/sound/bin/sound-engine"), "--port", "44100",
+        "--sessions", str(home / ".session/sessions")]
     assert p["RunAtLoad"] is True and p["KeepAlive"] is True
     assert p["ProcessType"] == "Interactive" and p["LimitLoadToSessionType"] == "Aqua"
-    log = str(home / "Library/Logs/sessiontools/sound-engine.log")
+    log = str(home / ".sessionkit/tools/log/sound-engine.log")
     assert p["StandardOutPath"] == log == p["StandardErrorPath"]
     assert "EnvironmentVariables" not in p
+
+
+def test_the_plist_passes_the_sessions_root_python_resolves(monkeypatch, tmp_path):
+    """ST-266: the engine is handed the sessions leaf, never left to spell
+    one: old while it is real, new once the host moved (old a link to it).
+    The installer's own SESSIONS_DIR is set aside: the engine never read it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SESSIONS_DIR", str(tmp_path / "one-seats-own"))
+    from sessiontools import settings
+    old, new = settings.leaf_old("sessions"), settings.leaf_new("sessions")
+    assert service.plist()["ProgramArguments"][3:] == ["--sessions", str(old)]   # fresh: old
+    new.mkdir(parents=True)
+    assert service.engine_sessions() == new                                        # new only
+    old.parent.mkdir(parents=True)
+    old.symlink_to(new)
+    assert service.plist()["ProgramArguments"][3:] == ["--sessions", str(new)]   # migrated
+    old.unlink()
+    old.mkdir()
+    assert service.engine_sessions() == old                                        # old real wins
+    src = (REPO / "src/sessiontools/sound/engine.swift").read_text()
+    assert '"--sessions": sessions = value()' in src                               # it takes it
+
+
+def test_log_path_is_the_tools_log_dir_under_home(tmp_path):
+    env = {"HOME": str(tmp_path)}
+    assert service.log_path(env) == tmp_path / ".sessionkit/tools/log/sound-engine.log"
+    from sessiontools import settings
+    assert service.log_path(env).parent == settings.log_dir(settings.PACKAGES["session"], env)
 
 
 def test_the_plist_port_is_the_one_constant(monkeypatch):
@@ -164,7 +193,7 @@ def test_the_plist_port_is_the_one_constant(monkeypatch):
     src = (REPO / "src/sessiontools/sound/engine.swift").read_text()
     assert f"let defaultPort = {sound.PORT}" in src
     monkeypatch.setenv(sound.PORT_ENV, "45000")
-    assert service.plist()["ProgramArguments"][1:] == ["--port", "45000"]
+    assert service.plist()["ProgramArguments"][1:3] == ["--port", "45000"]
 
 
 def test_the_throttle_outlasts_the_engines_restart_window():
@@ -499,6 +528,26 @@ def test_status_json_reports_binaries_plist_loaded_pid_and_pong(fence, capsys):
     for name, b in s["binaries"].items():
         assert b["present"] and not b["stale"] and b["built_from"] == service.source_hash(name)
     assert s["pong"]["device"] == "MacBook Pro Speakers"
+
+
+def test_status_prints_the_new_log_and_points_at_an_old_one_only_while_it_exists(fence, capsys):
+    """ST-263: the log line names ~/.sessionkit/tools/log; an old file at
+    ~/Library/Logs/sessiontools adds one line naming it, text only."""
+    home = Path(os.environ["HOME"])
+    new = home / ".sessionkit/tools/log/sound-engine.log"
+    old = home / "Library/Logs/sessiontools/sound-engine.log"
+    rc, out, _ = run(["status"], capsys)
+    assert rc == 0 and f"log    {new}" in out
+    assert "old log" not in out and "Library/Logs" not in out
+    assert not old.parent.exists()                               # status made nothing
+    old.parent.mkdir(parents=True)
+    old.write_text("x\n")
+    rc, out, _ = run(["status"], capsys)
+    assert rc == 0 and f"log    {new}" in out
+    assert out.count("old log") == 1 and f"old log  {old} (no longer written)" in out
+    s = json.loads(run(["status", "--json"], capsys)[1])
+    assert s["log"] == str(new) and "old_log" not in s and str(old) not in json.dumps(s)
+    assert old.read_text() == "x\n"                             # never moved or deleted
 
 
 def test_status_text_names_a_stale_binary(fence, capsys):

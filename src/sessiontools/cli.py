@@ -8,6 +8,7 @@ package code, well structured, in the right place - not copied.
     session get [PROP [SEAT]] [--json]
     session context [SEAT] [--peak] [--max N] [--parts [--tools] | --startup | --boot | --hooks] [--json]
     session start ...        launch a session from an agent file
+    session identity [SID]   the identity block `session start` wrote (exit 3: none)
     session agent default    the default seat's name (the vendor's word), one line
     session sound landed|given --session SID [--ref ID] [--json]
     session sound engine build|on|off|status   the sound engine
@@ -24,6 +25,7 @@ package code, well structured, in the right place - not copied.
     session park [--letter REF] [--no-promises | --promise TEXT... [--handed-on REF] | --handed-on REF]
                  [--keep-until T --why R] [--json]   this seat has settled: the record
     session park --check [SEAT] [--json]   read it back: parked, clean, and why not
+    session path [LEAF [NAME]] [--json]   where tools keeps each leaf of its state
     session completion bash|zsh   a shell completion script, on stdout
     session mail ...         (retired: says where each verb went)
 
@@ -50,6 +52,7 @@ VERBS = (
     ("get", "read one property of a live seat"),
     ("context", "how full a seat's context window is"),
     ("start", "launch a session from an agent file"),
+    ("identity", "who a launched session is, as at launch (the block session start wrote)"),
     ("agent", "the default seat's name, for scripts (default)"),
     ("settings", "a session's settings, each key with the file that set it"),
     ("sound", "signal the busy sound (landed|given); `sound engine` switches the engine"),
@@ -61,6 +64,7 @@ VERBS = (
     ("account", "the Claude account this Mac is on, and the switch (list | status | use)"),
     ("reap", "every seat idle past a limit, CLOSE or KEEP and why (--yes closes)"),
     ("park", "say this seat has settled, and what the checks found (--check reads it back)"),
+    ("path", "where tools keeps each leaf of its state (state, sessions, ...), for peers"),
     ("completion", "a completion script for bash or zsh, on stdout"),
 )
 
@@ -674,6 +678,14 @@ def _write_out(text: str) -> None:
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
+def _identity(argv: list[str]) -> int:
+    """`session identity [SID]`: the identity block, byte for byte; exit 3
+    when the session has none. Stdlib only (`sessiontools.identity_block`),
+    so it never loads PyYAML."""
+    from sessiontools import identity_block
+    return identity_block.main(argv)
+
+
 def _account(argv: list[str]) -> int:
     """`session account list|status|use|add|remove`: the group is
     `sessiontools.account.main`. Imported here and nowhere else: the
@@ -807,12 +819,22 @@ def _completion(argv: list[str]) -> int:
     return 0
 
 
+def _path(argv: list[str]) -> int:
+    """`session path [LEAF [NAME]] [--json]`, and `session path migrate`
+    (sessiontools.migrate, by paths.GROUP): a view onto the settings
+    resolvers (sessiontools.paths), so a peer in any language asks rather
+    than copies a path."""
+    from sessiontools import paths
+    return paths.main(argv)
+
+
 HANDLERS = {"list": _list, "get": _get, "context": _context, "start": _start, "agent": _agent,
+            "identity": _identity,
             "settings": _settings, "sound": _sound, "operator": _operator,
             "statusline": _statusline, "pane-state": _pane_state,
             "default-model": _default_model, "ledger": _ledger,
             "account": _account, "reap": _reap, "park": _park,
-            "completion": _completion}
+            "path": _path, "completion": _completion}
 
 #: Each verb's parser, as a `sessiontools.verbs` reference: a builder, or a
 #: `Group` for a verb whose first word is dispatched by hand. Each handler
@@ -823,6 +845,7 @@ PARSERS = {"list": "sessiontools.cli:_list_parser",
            "get": "sessiontools.cli:_get_parser",
            "context": "sessiontools.cli:_context_parser",
            "start": "sessiontools.start.args:build_parser",
+           "identity": "sessiontools.identity_block:build_parser",
            "agent": "sessiontools.cli:AGENT",
            "settings": "sessiontools.cli:_settings_parser",
            "sound": "sessiontools.cli:SOUND",
@@ -834,6 +857,7 @@ PARSERS = {"list": "sessiontools.cli:_list_parser",
            "account": "sessiontools.account.cli:parser",
            "reap": "sessiontools.reap:build_parser",
            "park": "sessiontools.park:build_parser",
+           "path": "sessiontools.paths:GROUP",
            "completion": "sessiontools.cli:_completion_parser"}
 
 

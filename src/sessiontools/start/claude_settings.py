@@ -31,6 +31,19 @@ claude before. The launch then carries ONE `--settings`, the computed one.
 A `--settings` in the agent file's `claude:` section is not folded: that
 launch gets no door, as before (`skipped`).
 
+THE LAUNCHER'S ONE DEFAULT: `tui`. Claude Code offers its fullscreen
+renderer to every session while no setting names `tui`, so a launched
+session opens on that offer. When nothing names `tui` (no cascade layer,
+no folded CLI `--settings`, and none of Claude's own settings files a
+launched claude reads: `claude_sets_tui`), the door carries
+`"tui": "default"`, the renderer a launched session already runs, and
+the offer is not made. The door outranks Claude's own user and project
+files, so it never sets `tui` over one that names it: a user who runs
+`/tui fullscreen` writes their own file, and from then on the launcher
+steps aside. That is also why the door exists now with no `claude-code`
+file anywhere (`with_tui_default`). Claude's files are only read, never
+written.
+
 Nothing here writes a file: `context.settings_argv` plans the 0600 file and
 `run.execute` writes it. `~/.claude/settings.json` is never written.
 Standard library only.
@@ -39,6 +52,7 @@ Standard library only.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import NamedTuple
@@ -48,7 +62,7 @@ from sessiontools import settings as _settings
 #: The settings tool this module renders.
 TOOL = "claude-code"
 #: The keys v1 renders, Claude's own names, in file order.
-RENDERED = ("model", "effortLevel", "statusLine")
+RENDERED = ("model", "effortLevel", "statusLine", "tui")
 #: The one RENDERED key that is an object, rendered whole.
 STATUS_LINE = "statusLine"
 #: statusLine's sub-keys beyond `type` and `command`, each with the check
@@ -58,6 +72,12 @@ STATUS_LINE_KEYS = {
     "refreshInterval": lambda v: type(v) is int and v >= 1,
     "hideVimModeIndicator": lambda v: type(v) is bool,
 }
+#: Claude's renderer setting, and the value the launcher sets when nothing
+#: else does: the classic renderer, the one a launched session runs today.
+TUI = "tui"
+TUI_DEFAULT = "default"
+#: The "layer" `origins` names for that value: no file set it.
+LAUNCHER_DEFAULT = "launcher default"
 #: The layer of a CLI `--settings` folded on top of the cascade (`fold`).
 PASSTHROUGH = "passthrough"
 #: The origin an inline-JSON `--settings` is named by: it has no file.
@@ -252,7 +272,8 @@ def provenance(rendered: Rendered, env: Mapping[str, str] | None = None) -> str:
     """The door's source line: each value's layer and file (`~` for HOME),
     then, for a fold, the CLI `--settings` folded on top (named even when
     none of its keys survived)."""
-    parts = [f"{key} from {layer} {_settings._short(origin, env)}"
+    parts = [f"{key} from the {layer} (no settings file sets it)" if layer == LAUNCHER_DEFAULT
+             else f"{key} from {layer} {_settings._short(origin, env)}"
              for key, (layer, origin) in ((k, rendered.origins[k]) for k in rendered.data)]
     line = f"computed: {TOOL} settings: {', '.join(parts)}"
     if rendered.folded is not None:
@@ -260,6 +281,49 @@ def provenance(rendered: Rendered, env: Mapping[str, str] | None = None) -> str:
                 else f"--settings {_settings._short(rendered.folded, env)}")
         line += f"; folded on top: the CLI {what}"
     return line
+
+
+def claude_settings_files(work_dir: str | None,
+                          env: Mapping[str, str] | None = None) -> list[Path]:
+    """Claude Code's own settings files that a claude launched in WORK_DIR
+    reads, and that the door outranks: the user's (`$CLAUDE_CONFIG_DIR/
+    settings.json`, else `~/.claude/settings.json`, `~` the launch's HOME),
+    then the project's and the local one under WORK_DIR."""
+    env = os.environ if env is None else env
+    config_dir = env.get("CLAUDE_CONFIG_DIR")
+    user = (Path(_settings._expand_tilde(config_dir, env)) if config_dir
+            else _settings.home(env) / ".claude")
+    files = [user / "settings.json"]
+    if work_dir:
+        files += [Path(work_dir) / ".claude" / "settings.json",
+                  Path(work_dir) / ".claude" / "settings.local.json"]
+    return files
+
+
+def claude_sets_tui(work_dir: str | None, env: Mapping[str, str] | None = None) -> str | None:
+    """The first of Claude's own settings files (`claude_settings_files`)
+    that names `tui`, any value, or None. Read only. A file that is
+    missing, unreadable or not one JSON object names nothing."""
+    for path in claude_settings_files(work_dir, env):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and TUI in data:
+            return str(path)
+    return None
+
+
+def with_tui_default(rendered: Rendered, claude_tui: str | None) -> Rendered:
+    """RENDERED with the launcher's `"tui": "default"`, unless a layer or
+    the folded CLI `--settings` already put `tui` in it, or CLAUDE_TUI (the
+    file `claude_sets_tui` found) names it: the door outranks that file,
+    so setting it would undo the user's own choice."""
+    if TUI in rendered.data or claude_tui is not None:
+        return rendered
+    data = {**rendered.data, TUI: TUI_DEFAULT}
+    origins = {**rendered.origins, TUI: (LAUNCHER_DEFAULT, "")}
+    return rendered._replace(data=data, origins=origins)
 
 
 def without_own_settings(args: list) -> list:
@@ -328,6 +392,8 @@ def skipped(files: tuple, own: str, env: Mapping[str, str] | None = None) -> str
             "refused")
 
 
-__all__ = ["INLINE", "PASSTHROUGH", "RENDERED", "STATUS_LINE", "STATUS_LINE_KEYS", "TOOL",
-           "Rendered", "bad_status_line", "fold", "not_rendered", "own_settings_value",
-           "own_settings_values", "passthrough_source", "provenance", "render", "skipped", "without_own_settings"]
+__all__ = ["INLINE", "LAUNCHER_DEFAULT", "PASSTHROUGH", "RENDERED", "STATUS_LINE",
+           "STATUS_LINE_KEYS", "TOOL", "TUI", "TUI_DEFAULT", "Rendered", "bad_status_line",
+           "claude_sets_tui", "claude_settings_files", "fold", "not_rendered",
+           "own_settings_value", "own_settings_values", "passthrough_source", "provenance",
+           "render", "skipped", "with_tui_default", "without_own_settings"]

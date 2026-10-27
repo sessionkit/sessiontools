@@ -15,7 +15,7 @@ environment: the environment is not a layer (settle's own
 unreadable or not a number from 0 to 100 is the default, DEFAULT_NEAR_PCT
 (any other default is a one-line change to it).
 
-    ~/.session/sessions/<sid>/settings/session.json   {"context": {"near_pct": 10}}
+    <sessions>/<sid>/settings/session.json   {"context": {"near_pct": 10}}
 
 No schema is shipped for the key: the cascade reads a key without one, and
 nothing installs a `session` schema today.

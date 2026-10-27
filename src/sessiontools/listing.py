@@ -13,6 +13,18 @@ sidebar reads. It costs a transcript read per seat, so it is filled only by
 `with_context()`, which `session list` calls unless `--no-context`; `get`,
 `send` and `--pane` never pay for it.
 
+SEAT is the seat a session holds, or `-`: the column after NAME and a `seat`
+JSON key (a word, else null) on every row. Every live claim under
+`holders/` names one: the default seat's (`claude`), and a named agent's
+that its hand launch took at the front door (`scout`). A spawner's `-n`
+launch takes no claim, so it shows `-`. NAME is the sidecar's own name
+(Claude Code derives one, e.g. `work-9d`), and `agent` is the agent TYPE, the
+same for the holder and a second session of that agent; only the holder
+claim (`start.holders`) says which session holds the seat, so the listing
+reads it at render time (`seats`). NAME and the Row are unchanged: `match`,
+`get`, `reap` and `park` read them, and the list snapshot carries no seat,
+so a served snapshot never shows a stale one.
+
 STATE is the seat's state in our words: `busy`, `idle with
 children` (the harness says busy, but the turn is over and a background
 agent runs) or `idle`. A column after STATUS and a `state` JSON key; STATUS
@@ -140,13 +152,14 @@ class Row:
         while busy.)"""
         return max(0, int(now - self.session.since))
 
-    def to_dict(self, now: float) -> dict:
+    def to_dict(self, now: float, seat: str | None = None) -> dict:
         s = self.session
         row = {
             "session_id": s.id,
             "short": self.short,
             "pid": s.pid,
             "name": self.name,
+            "seat": seat,
             "agent": s.agent,
             "status": s.raw_status,
             "state": s.state,
@@ -185,6 +198,80 @@ def with_context(found: list[Row], env: dict[str, str] | None = None) -> list[Ro
     return [replace(r, fullness=_window.of(r.session.id, r.session.cwd, env)) for r in found]
 
 
+def seats(found: list[Row], env: dict[str, str] | None = None) -> dict[str, str]:
+    """session id -> the seat word, for each listed session that holds a
+    seat: a live claim under `holders.holders_dir`, the seat being the
+    claim file's name. Reads only, and never fails the listing: a claim that
+    is missing, does not parse or cannot be read names nobody.
+
+    A claim names its session by `sessionId`, else (no id recorded yet) by
+    `pid`, else by `pane`: the rule `default_seat._sidecar_id` uses. It is
+    live when its pid and `procStart` are the listed session's own. A claim
+    whose pid is not the session's (a pane's shell, with the session its
+    child) is live when that pid runs, started when the claim says, and is
+    an ancestor of the session: that one case reads the process table."""
+    if not found:
+        return {}
+    # Lazy: holders imports fmt_duration from this module.
+    from sessiontools.start import holders
+    try:
+        paths = sorted(holders.holders_dir(env).glob("*.json"))
+    except OSError:
+        return {}
+    named: dict[str, str] = {}
+    table: dict | None = None
+    for path in paths:
+        seat = path.stem
+        try:
+            claim = holders.read_claim(seat, env)
+        except (OSError, ValueError):            # ClaimUnreadable, or a name no claim may have
+            continue
+        if claim is None:
+            continue
+        row = _claimed_row(claim, found, holders.pane_of)
+        if row is None or row.session.id in named:
+            continue
+        if row.session.pid == claim["pid"]:
+            live = _same_start(claim, row)
+        else:
+            if table is None:
+                try:
+                    table = _procs.table()
+                except Exception:   # noqa: BLE001 - an unreadable table names nobody
+                    table = {}
+            live = (holders.claim_is_live(claim, table)
+                    and claim["pid"] in _procs.ancestors(row.session.pid, table))
+        if live:
+            named[row.session.id] = seat
+    return named
+
+
+def _claimed_row(claim: dict, found: list[Row], pane_of) -> Row | None:
+    """The listed row CLAIM names: by session id when it records one (and
+    only by it), else by pid, else by pane."""
+    sid = claim.get("sessionId")
+    if isinstance(sid, str) and sid:
+        return next((r for r in found if r.session.id == sid), None)
+    by_pid = next((r for r in found if r.session.pid == claim["pid"]), None)
+    if by_pid is not None:
+        return by_pid
+    pane = claim.get("pane")
+    if not isinstance(pane, str) or not pane:
+        return None
+    return next((r for r in found
+                 if pane in (pane_of(r.session.tmux), r.tmux_pane)), None)
+
+
+def _same_start(claim: dict, row: Row) -> bool:
+    """CLAIM's `procStart` is the row's own process start: the table's,
+    else the sidecar's, within `procs.SAME_PROCESS_SECONDS`."""
+    start = claim.get("procStart")
+    claimed = _procs.parse_start(start if isinstance(start, str) else None)
+    own = row.started if row.started is not None else _procs.parse_start(row.session.proc_start)
+    return (claimed is not None and own is not None
+            and abs(claimed - own) <= _procs.SAME_PROCESS_SECONDS)
+
+
 def match(found: list[Row], query: str) -> Row | None:
     """The `session send` rule, first match wins: QUERY inside the name or
     the repo, or a prefix of the session id. Case-insensitive."""
@@ -202,21 +289,29 @@ def match_id_first(found: list[Row], query: str) -> Row | None:
     return next((r for r in found if r.session.id.lower().startswith(q)), None) or match(found, query)
 
 
-def render_table(found: list[Row], now: float | None = None) -> str:
+def render_table(found: list[Row], now: float | None = None,
+                 seat_of: dict[str, str] | None = None) -> str:
+    """The table; SEAT_OF is `seats(found)` unless given."""
     if not found:
         return "No running sessions found."
     now = time.time() if now is None else now
-    header = (f"{'SHORT':10} {'NAME':28} {'STATUS':8} {'STATE':18} {'REPO':16} "
+    seat_of = seats(found) if seat_of is None else seat_of
+    header = (f"{'SHORT':10} {'NAME':28} {'SEAT':10} {'STATUS':8} {'STATE':18} {'REPO':16} "
               f"{'PANE':6} {'RUNTIME':>8} {'IDLE':>8} {'CONTEXT':>7}")
     lines = [header, "-" * len(header)]
     for r in found:
-        lines.append(f"{r.short:10} {r.name[:28]:28} {(r.session.raw_status or '-'):8} "
+        seat = seat_of.get(r.session.id) or "-"
+        lines.append(f"{r.short:10} {r.name[:28]:28} {seat[:10]:10} "
+                     f"{(r.session.raw_status or '-'):8} "
                      f"{r.session.state:18} {r.repo[:16]:16} {(r.tmux_pane or '-'):6} "
                      f"{fmt_duration(r.runtime_s(now)):>8} {fmt_duration(r.idle_s(now)):>8} "
                      f"{_window.cell(r.fullness or _window.UNKNOWN):>7}")
     return "\n".join(lines)
 
 
-def render_json(found: list[Row], now: float | None = None) -> str:
+def render_json(found: list[Row], now: float | None = None,
+                seat_of: dict[str, str] | None = None) -> str:
+    """The rows as JSON; SEAT_OF is `seats(found)` unless given."""
     now = time.time() if now is None else now
-    return json.dumps([r.to_dict(now) for r in found], indent=2)
+    seat_of = seats(found) if seat_of is None else seat_of
+    return json.dumps([r.to_dict(now, seat_of.get(r.session.id)) for r in found], indent=2)

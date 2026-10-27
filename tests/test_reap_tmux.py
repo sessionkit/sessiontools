@@ -325,7 +325,7 @@ def test_yes_closes_only_the_done_free_panes_on_a_private_server(server, store, 
     for key in closed:
         assert f"closed {info[key]['sessionId'][:8]} ({info[key]['name']})" in out
 
-    log = (Path(os.environ["SESSION_STATE_DIR"]) / "reap.log").read_text().splitlines()
+    log = (Path(os.environ["HOME"]) / ".sessionkit/tools/log/reap.log").read_text().splitlines()
     assert sorted(line.split("\t")[5] for line in log) == ["closed"] * 4
     assert all(f"\t{server.socket}:%" in line for line in log)
 
@@ -370,7 +370,7 @@ def test_a_listener_that_outlives_its_seat_is_named_and_left_alone(server, store
     for pid in data["kids"]:                         # named, and never killed
         assert alive(pid)
         assert f"{pid} (" in out
-    line = (Path(os.environ["SESSION_STATE_DIR"]) / "reap.log").read_text()
+    line = (Path(os.environ["HOME"]) / ".sessionkit/tools/log/reap.log").read_text()
     assert "\tfailed\t" in line
 
 

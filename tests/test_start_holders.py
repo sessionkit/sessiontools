@@ -20,14 +20,24 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from start_support import launch_e2e, recorded_argv
+from start_support import (
+    TIMEOUT_S,
+    at_a_terminal,
+    clean_env,
+    launch_e2e,
+    make_agents_root,
+    recorded_argv,
+)
 
+import sessiontools.start as st
 from sessiontools import procs
-from sessiontools.start import EXIT_HELD, holders
+from sessiontools.start import EXIT_HELD, default_seat, holders
 from sessiontools.start import args as a
 from sessiontools.start.errors import LaunchError
+from sessiontools.start.placement import TmuxPlacement
 
 SID = "37f09460-1111-2222-3333-444455556666"
 AGE_S = 23 * 60 + 30          # "live 23m", however many seconds the test takes
@@ -333,11 +343,27 @@ def test_front_door_does_not_apply_to_a_plain_or_named_launch(sidecars):
 # A merge hold: `respawn --go` runs `tmux respawn-pane -k` with `exec
 # session start <agent>` and no -n. -k does not wait for the old claude to
 # die, so its sidecar can still read LIVE when the door surveys: exit 3, the
-# pane left dead. A holder IN THE LAUNCHER'S OWN PANE is being replaced.
+# pane left dead. A holder IN THE LAUNCHER'S OWN PANE is being replaced -
+# on the direct path, and only when it is NOT the launcher's ancestor
+# (ST-260): the launcher respawn-pane starts is tmux's child, so the dying
+# claude is a stranger to it. The `stranger` fixture is that shape: a live
+# process beside the launcher, never above it (this pytest IS above it).
 # Hermetic: TMUX_PANE alone, no TMUX - no tmux server is touched.
 
-def test_a_same_pane_respawn_is_not_refused(tmp_path, sidecars):
-    write_sidecar(sidecars, tmux="priv:@1.%4")
+@pytest.fixture
+def stranger():
+    """A live pid that is not the e2e launcher's ancestor: a sibling child
+    of this pytest, as the old claude is to a respawned pane's launcher."""
+    child = subprocess.Popen(["sleep", "300"])
+    try:
+        yield child.pid
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_a_same_pane_respawn_is_not_refused(tmp_path, sidecars, stranger):
+    write_sidecar(sidecars, pid=stranger, proc=proc_start(stranger), tmux="priv:@1.%4")
     result, record, sessions = run(tmp_path, sidecars, "scout", "hello",
                                    extra={"TMUX_PANE": "%4"})
     assert result.returncode == 0, result.stderr
@@ -368,8 +394,10 @@ def test_a_sidecar_with_no_tmux_field_exempts_nothing(tmp_path, sidecars):
     assert not vendor_ran(record)
 
 
-def test_the_own_pane_holder_is_dropped_but_another_still_refuses(tmp_path, sidecars):
-    write_sidecar(sidecars, sid="aaaaaaaa-own", tmux="priv:@1.%4", age_s=60)
+def test_the_own_pane_holder_is_dropped_but_another_still_refuses(tmp_path, sidecars,
+                                                                  stranger):
+    write_sidecar(sidecars, pid=stranger, proc=proc_start(stranger), sid="aaaaaaaa-own",
+                  tmux="priv:@1.%4", age_s=60)
     write_sidecar(sidecars, sid="bbbbbbbb-other", tmux="priv:@2.%7", age_s=3 * 3600)
     result, record, _ = run(tmp_path, sidecars, "scout", extra={"TMUX_PANE": "%4"})
     assert result.returncode == EXIT_HELD
@@ -381,8 +409,8 @@ def test_the_own_pane_holder_is_dropped_but_another_still_refuses(tmp_path, side
     assert not vendor_ran(record)
 
 
-def test_a_same_pane_dry_run_has_no_holder_line(tmp_path, sidecars):
-    write_sidecar(sidecars, tmux="priv:@1.%4")
+def test_a_same_pane_dry_run_has_no_holder_line(tmp_path, sidecars, stranger):
+    write_sidecar(sidecars, pid=stranger, proc=proc_start(stranger), tmux="priv:@1.%4")
     result, _, _ = run(tmp_path, sidecars, "--dry-run", "scout", extra={"TMUX_PANE": "%4"})
     assert result.returncode == 0 and "holder:" not in result.stdout
 
@@ -550,12 +578,306 @@ def test_replacing_is_the_narrow_rule():
 
 
 def test_survey_keeps_the_broad_rule_by_default(tmp_path, sidecars, monkeypatch):
-    """The front door is unchanged until ST-260: a holder in the launcher's
-    pane is exempt even when it is the launcher's ancestor - and the
-    narrow rule, passed in, holds it."""
+    """`survey`'s DEFAULT exempt stays the broad `replaced`: a holder in the
+    launcher's pane is exempt even when it is the launcher's ancestor. The
+    front door passes the narrow rule in, so it holds that holder."""
     write_sidecar(sidecars)                      # this pytest, in pane %4
-    env = {"SESSION_SIDECAR_DIR": str(sidecars), "TMUX_PANE": "%4"}
+    env = {"SESSION_SIDECAR_DIR": str(sidecars), "TMUX_PANE": "%4",
+           "SESSION_STATE_DIR": str(tmp_path / "state")}
     assert not holders.survey("scout", env).held
     narrow = holders.survey("scout", env, exempt=lambda s, own, t: holders.replacing(
         s.pid, s.tmux, own, t, direct=True))
     assert narrow.held
+    assert holders.front_door("scout", [], env).held
+
+
+# ---------- ST-260: the narrow own-pane rule at the front door ---------------------
+# The broad rule exempted ANY holder in the launcher's $TMUX_PANE. A tmux
+# placement typed in the holder's own tool shell, and a start nested in
+# that shell, replace nothing: both must meet the door.
+
+def test_a_nested_direct_start_in_the_holders_own_shell_is_refused(tmp_path, sidecars):
+    """The holder (this pytest) is the launcher's ANCESTOR and shares its
+    pane: a start typed in a seat's own tool shell, not a respawn."""
+    write_sidecar(sidecars, tmux="priv:@1.%4")
+    result, record, sessions = run(tmp_path, sidecars, "scout", "hello",
+                                   extra={"TMUX_PANE": "%4"})
+    assert result.returncode == EXIT_HELD, result.stderr
+    assert result.stderr.splitlines() == [REFUSAL]
+    assert not vendor_ran(record) and not minted_anything(sessions)
+
+
+def test_a_nested_dry_run_says_it_would_refuse(tmp_path, sidecars):
+    write_sidecar(sidecars, tmux="priv:@1.%4")
+    result, _, _ = run(tmp_path, sidecars, "--dry-run", "scout", extra={"TMUX_PANE": "%4"})
+    assert result.returncode == 0
+    assert f"holder:   a live launch would REFUSE (exit 3): {REFUSAL[15:]}" in result.stdout
+
+
+@pytest.mark.parametrize("holder", ["ancestor", "stranger"])
+def test_in_tmux_from_the_holders_own_pane_is_refused(tmp_path, sidecars, stranger, holder):
+    """A tmux placement never replaces the launcher's pane, so the own-pane
+    holder is a holder whatever its ancestry. Refused before placement:
+    no tmux server is asked anything."""
+    pid = os.getpid() if holder == "ancestor" else stranger
+    write_sidecar(sidecars, pid=pid, proc=proc_start(pid), tmux="priv:@1.%4")
+    result, record, sessions = run(tmp_path, sidecars, "--tmux-target", "held", "scout",
+                                   extra={"TMUX_PANE": "%4"})
+    assert result.returncode == EXIT_HELD, result.stderr
+    assert result.stderr.splitlines() == [REFUSAL.replace(f"pid {os.getpid()}", f"pid {pid}")]
+    assert not vendor_ran(record) and not minted_anything(sessions)
+
+
+def test_an_unrelated_pane_is_unchanged(tmp_path, sidecars, stranger):
+    """A holder in another pane refuses; a launch with no holder in sight
+    launches - whatever the launcher's own pane."""
+    write_sidecar(sidecars, pid=stranger, proc=proc_start(stranger), tmux="priv:@1.%7")
+    result, record, _ = run(tmp_path, sidecars, "scout", extra={"TMUX_PANE": "%4"})
+    assert result.returncode == EXIT_HELD
+    assert not vendor_ran(record)
+
+
+def test_front_door_applies_the_narrow_rule(tmp_path, sidecars, stranger):
+    env = {"SESSION_SIDECAR_DIR": str(sidecars), "TMUX_PANE": "%4",
+           "SESSION_STATE_DIR": str(tmp_path / "state")}
+    write_sidecar(sidecars, pid=stranger, proc=proc_start(stranger), tmux="priv:@1.%4")
+    assert not holders.front_door("scout", [], env).held                 # a respawn
+    assert not holders.front_door("scout", [], env, direct=True).held
+    assert holders.front_door("scout", [], env, direct=False).held       # --in-tmux
+    # The same holder as the launcher's PARENT: a start nested in its shell.
+    table = procs.table()
+    table[4242] = procs.Proc(4242, stranger, 0.0)
+    assert holders.front_door("scout", [], env, table=lambda: table, launcher=4242).held
+
+
+def test_front_door_with_no_candidate_and_no_claim_asks_no_process_table(tmp_path, sidecars):
+    write_sidecar(sidecars, agent="bob")
+
+    def table():
+        raise AssertionError("ps asked with no candidate and no claim")
+
+    env = {"SESSION_SIDECAR_DIR": str(sidecars), "SESSION_STATE_DIR": str(tmp_path / "state")}
+    door = holders.front_door("scout", [], env, table=table)
+    assert not door.held and door.unmeasured is None
+
+
+# ---------- ST-260: the door reads, and a hand launch takes, the agent's claim ------
+
+def _claim_for(env: dict, pid: int, pane: str | None = None, sid: str | None = None) -> None:
+    holders.write_claim("scout", {"sessionId": sid, "pid": pid,
+                                  "procStart": proc_start(pid), "pane": pane,
+                                  "via": "front door"}, env)
+
+
+def _run_env(tmp_path: Path, sidecars: Path, **extra: str) -> dict:
+    return {"SESSION_SIDECAR_DIR": str(sidecars), "SESSION_STATE_DIR": str(tmp_path / "state"),
+            **extra}
+
+
+def test_a_live_claim_holds_the_agent_with_no_sidecar(tmp_path, sidecars, stranger):
+    """A launch still in its start race has written its claim and no
+    sidecar yet: the door refuses on the claim alone."""
+    env = _run_env(tmp_path, sidecars)
+    _claim_for(env, stranger, pane="%7")
+    result, record, sessions = run(tmp_path, sidecars, "scout", extra=env)
+    assert result.returncode == EXIT_HELD, result.stderr
+    assert result.stderr.splitlines() == [
+        (f"session start: scout is already held by a session (id not known yet) "
+         f"(pid {stranger}, tmux %7), live 0s -- refusing a second holder; pass "
+         "--allow-second-holder to start one anyway")]
+    assert not vendor_ran(record) and not minted_anything(sessions)
+
+
+def test_a_claim_and_its_own_sidecar_are_one_holder(tmp_path, sidecars, stranger):
+    env = _run_env(tmp_path, sidecars)
+    _claim_for(env, stranger, pane="%7")
+    write_sidecar(sidecars, pid=stranger, proc=proc_start(stranger), tmux="priv:@1.%7")
+    door = holders.front_door("scout", [], env)
+    assert [h.pid for h in door.holders] == [stranger]
+    assert door.holders[0].id == SID                  # the sidecar's, with its id
+
+
+def test_a_dead_claim_holds_nothing(tmp_path, sidecars):
+    env = _run_env(tmp_path, sidecars)
+    _claim_for(env, os.getpid())
+    claim = holders.read_claim("scout", env)
+    holders.write_claim("scout", {**claim, "pid": _dead_pid()}, env)
+    assert not holders.front_door("scout", [], env).held
+
+
+def test_a_respawn_replaces_a_claim_in_its_pane_too(tmp_path, sidecars, stranger):
+    env = _run_env(tmp_path, sidecars, TMUX_PANE="%4")
+    _claim_for(env, stranger, pane="%4")
+    assert not holders.front_door("scout", [], env).held
+    assert holders.front_door("scout", [], env, direct=False).held
+
+
+VENDOR_RECORDS_PID = """#!/usr/bin/env bash
+printf '%%s' "$$" > "%(dir)s/pid.$$"
+"""
+
+
+def test_a_free_hand_launch_claims_the_agent_before_it_execs(tmp_path, sidecars):
+    """The claim names the launcher's pid, which exec keeps: the vendor's
+    own `$$`. `via` says the front door wrote it."""
+    env = _run_env(tmp_path, sidecars)
+    result, record, _work = launch_e2e(tmp_path, "scout", extra_env=env,
+                                       stub_body=VENDOR_RECORDS_PID)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    [pid_file] = record.glob("pid.*")
+    claim = holders.read_claim("scout", env)
+    assert claim["pid"] == int(pid_file.read_text())
+    assert claim["via"] == "front door" and claim["agent"] == "scout"
+    assert claim["sessionId"]                         # the minted id, recorded
+
+
+@pytest.mark.parametrize("flags", [["--dry-run"], []])
+def test_no_claim_for_a_dry_run_or_a_spawner_named_seat(tmp_path, sidecars, flags):
+    env = _run_env(tmp_path, sidecars)
+    tail = [] if flags else ["-n", "scout+1"]
+    result, _record, _ = run(tmp_path, sidecars, *flags, "scout", *tail, extra=env)
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "state" / "holders").exists()
+
+
+def test_the_override_beside_a_holder_takes_no_claim(tmp_path, sidecars, stranger):
+    env = _run_env(tmp_path, sidecars)
+    write_sidecar(sidecars, pid=stranger, proc=proc_start(stranger))
+    result, record, _ = run(tmp_path, sidecars, "--allow-second-holder", "scout", extra=env)
+    assert result.returncode == 0 and vendor_ran(record)
+    assert len(result.stderr.splitlines()) == 1
+    assert "starting a second holder of scout beside" in result.stderr
+    assert holders.read_claim("scout", env) is None
+
+
+VENDOR_HOLDS = """#!/usr/bin/env bash
+printf '%%s' "$$" > "%(dir)s/pid.$$"
+sleep 4
+"""
+
+
+def test_two_simultaneous_launches_give_one_holder_and_one_refusal(tmp_path, sidecars):
+    """Both start before either has a sidecar (none is ever written here):
+    the agent's lock and claim alone decide. Whichever takes the lock first
+    holds; the other waits for the lock, reads the live claim, exit 3."""
+    env = _run_env(tmp_path, sidecars)
+    record = tmp_path / "record"
+    record.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "claude"
+    stub.write_text(VENDOR_HOLDS % {"dir": record})
+    stub.chmod(0o755)
+    root = make_agents_root(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    full = clean_env(AGENTS_DIR=root, SESSIONS_DIR=os.path.join(root, "sessions"),
+                     PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", **env)
+    launches = [subprocess.Popen(at_a_terminal("scout"), cwd=str(work), env=full,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                for _ in range(2)]
+    outcomes = sorted((p.wait(timeout=TIMEOUT_S), p.stderr.read()) for p in launches)
+    for p in launches:
+        p.stdout.close()
+        p.stderr.close()
+    (ok, ok_err), (held, held_err) = outcomes
+    assert (ok, held) == (0, EXIT_HELD), outcomes
+    assert ok_err == ""
+    assert "scout is already held by" in held_err and "refusing a second holder" in held_err
+    assert len(list(record.glob("pid.*"))) == 1                # ONE vendor ran
+
+
+# ---------- ST-260: fail OPEN, loudly, when the claim cannot be had ----------------
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0000 file")
+def test_an_unreadable_claim_warns_once_and_launches(tmp_path, sidecars):
+    env = _run_env(tmp_path, sidecars)
+    _lock, path = holders.claim_paths("scout", env)
+    path.parent.mkdir(parents=True)
+    path.write_text("{}")
+    path.chmod(0)
+    try:
+        result, record, _ = run(tmp_path, sidecars, "scout", extra=env)
+    finally:
+        path.chmod(0o600)
+    assert result.returncode == 0 and vendor_ran(record), result.stderr
+    [line] = result.stderr.splitlines()
+    assert line.startswith("session start: the second-holder check could not run: the claim ")
+    assert line.endswith("-- launching unchecked")
+
+
+def test_a_lock_that_cannot_be_opened_warns_once_and_launches(tmp_path, sidecars):
+    env = _run_env(tmp_path, sidecars)
+    lock, _claim = holders.claim_paths("scout", env)
+    lock.mkdir(parents=True)                   # a directory where the lock file goes
+    result, record, _ = run(tmp_path, sidecars, "scout", extra=env)
+    assert result.returncode == 0 and vendor_ran(record), result.stderr
+    [line] = result.stderr.splitlines()
+    assert line.startswith("session start: scout's claim could not be taken (the lock file ")
+    assert line.endswith("-- launching with no claim, so a second launch starting now is "
+                         "not held off")
+    assert holders.read_claim("scout", env) is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a 0500 dir")
+def test_an_unwritable_claim_warns_once_and_launches(tmp_path, sidecars):
+    env = _run_env(tmp_path, sidecars)
+    lock, _claim = holders.claim_paths("scout", env)
+    lock.parent.mkdir(parents=True)
+    lock.write_text("")
+    lock.chmod(0o600)
+    lock.parent.chmod(0o500)
+    try:
+        result, record, _ = run(tmp_path, sidecars, "scout", extra=env)
+    finally:
+        lock.parent.chmod(0o700)
+    assert result.returncode == 0 and vendor_ran(record), result.stderr
+    [line] = result.stderr.splitlines()
+    assert line.startswith("session start: scout's claim could not be taken (the claim "
+                           "could not be written (")
+
+
+def test_a_name_that_cannot_carry_a_claim_warns_once_and_launches(tmp_path, sidecars):
+    """`resolve_agent` accepts `a/b`; `claim_paths` refuses it. The door still
+    reads the sidecars, and the launch goes ahead with no claim."""
+    env = _run_env(tmp_path, sidecars)
+    said: list[str] = []
+    launch = SimpleNamespace(agent=SimpleNamespace(name="team/scout"), environ=env,
+                             cli_args=[], resume=None)
+    args = a.parse_args(["team/scout"])
+    door, taken = st.door_start(args, launch, False, warn=said.append)
+    assert taken is None and not door.held
+    assert len(said) == 1 and "cannot name a holder's claim" in said[0]
+    assert not (tmp_path / "state").exists()
+
+
+# ---------- ST-260: the --in-tmux claim follows the pane, as the seat's does --------
+
+def test_a_named_agents_claim_moves_to_the_pane(tmp_path, stranger):
+    env = _state_env(tmp_path)
+    table = procs.table()
+    fields = default_seat.claim_fields(None, os.getpid(), table, env, via="front door")
+    holders.write_claim("scout", fields, env)
+    launch = SimpleNamespace(agent=SimpleNamespace(name="scout"), environ=env)
+    start = st.SeatStart(launch, None, None, fields)
+    said: list[str] = []
+    placed = TmuxPlacement("eng", "scout", "@7", False, "%12", stranger)
+    st._repoint(start, SimpleNamespace(identity=None), placed, warn=said.append)
+    claim = holders.read_claim("scout", env)
+    assert said == []
+    assert claim["pid"] == stranger and claim["pane"] == "%12"
+    assert claim["via"] == "tmux placement" and claim["agent"] == "scout"
+
+
+def test_a_named_agents_failed_repoint_names_the_agent(tmp_path):
+    env = _state_env(tmp_path)
+    launch = SimpleNamespace(agent=SimpleNamespace(name="scout"), environ=env)
+    start = st.SeatStart(launch, None, None, {"pid": os.getpid(), "procStart": "x"})
+    said: list[str] = []
+    placed = TmuxPlacement("eng", "scout", "@7", False, "%12", None)
+    st._repoint(start, SimpleNamespace(identity=None), placed, warn=said.append)
+    assert said == [("placed, but scout's claim could not move to the new pane (tmux printed "
+                     "no pane pid or id for the new window); scout reads free until that "
+                     "session writes its sidecar")]
+    assert "default seat" not in said[0]

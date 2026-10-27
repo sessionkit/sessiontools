@@ -28,6 +28,11 @@ its hooks; the `session` command works without it.
   transcript path to the context. Off unless
   `SESSIONTOOLS_HOOK_SESSION_INFO=on`. See
   [the session-info hooks][session-info].
+- **The identity block** (`hooks/session-info identity`, SessionStart):
+  adds the block `session start` wrote (who this session is, at launch)
+  to the context. On; a session with no block is silent;
+  `SESSIONTOOLS_HOOK_IDENTITY=off` turns it off. See
+  [the identity block][identity].
 
 ## Install
 
@@ -73,3 +78,4 @@ claude plugin marketplace remove sessiontools
 [busy]: busy-sound-hook.md
 [library]: python-library-api.md
 [session-info]: session-info-hook.md
+[identity]: identity-block.md

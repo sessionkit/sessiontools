@@ -6,7 +6,9 @@ NEVER call `main()` in-process WITHOUT --dry-run and with a real agent: the
 direct path execs, and an in-process exec replaces the TEST RUNNER with a
 live vendor (measured in the old suite: three pytest runs exec'd into
 claude). Live launches go through `launch_e2e`, a subprocess with a stub
-`claude` on PATH, where an exec can only replace the child.
+`claude` on PATH, where an exec can only replace the child, run at a
+pseudo-terminal (`at_a_terminal`): an in-place launch with no terminal is
+refused.
 """
 
 from __future__ import annotations
@@ -81,6 +83,27 @@ def plan_for(tmp_path: Path, front_matter: str, argv_tail=(), work: str = "work"
 def session_cmd(*args: str) -> list[str]:
     """`session start ...` through this checkout's own cli, no install needed."""
     return [sys.executable, "-m", "sessiontools.cli", "start", *args]
+
+
+#: Runs a command with its stdin and stdout on a pseudo-terminal.
+PTY_RUN = str(Path(__file__).resolve().parent / "pty_run.py")
+
+
+def at_a_terminal(*args: str) -> list[str]:
+    """`session_cmd(*args)` run as if typed at a terminal: stdin and stdout a
+    pseudo-terminal, stderr still the caller's pipe. A live in-place launch
+    with no terminal is refused before anything happens (`check_terminal`),
+    so every test of a live launch, or of what a live launch refuses, runs
+    it this way. stdout still reaches `result.stdout`, byte for byte."""
+    return [sys.executable, PTY_RUN, *session_cmd(*args)]
+
+
+def pretend_a_terminal(monkeypatch) -> None:
+    """For an IN-PROCESS `main` on the direct road: answer `check_terminal`'s
+    question (stdin and stdout both terminals) yes, leaving pytest's capture
+    in place. `at_a_terminal` is the subprocess form, with a real one."""
+    from sessiontools.start import run
+    monkeypatch.setattr(run, "_isatty", lambda _stream: True)
 
 
 def walled_bin() -> str:
@@ -169,9 +192,11 @@ def without_known_paths(text: str, tmp_path: Path) -> str:
 
 def launch_e2e(tmp_path: Path, *verb_args: str,
                front_matter: str = "claude:\n  effort: high\n",
-               extra_env: dict | None = None, stub_body: str = VENDOR_STUB):
-    """Run the verb as a real subprocess against a stub `claude` on PATH.
-    Returns (result, record_dir, work_dir)."""
+               extra_env: dict | None = None, stub_body: str = VENDOR_STUB,
+               terminal: bool = True):
+    """Run the verb as a real subprocess against a stub `claude` on PATH, at
+    a pseudo-terminal unless `terminal` is False (stdin and stdout then the
+    pipes). Returns (result, record_dir, work_dir)."""
     record = tmp_path / "record"
     record.mkdir()
     bin_dir = tmp_path / "bin"
@@ -186,7 +211,8 @@ def launch_e2e(tmp_path: Path, *verb_args: str,
                     PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     if extra_env:
         env.update(extra_env)
-    result = subprocess.run(session_cmd(*verb_args), capture_output=True, text=True,
+    command = at_a_terminal(*verb_args) if terminal else session_cmd(*verb_args)
+    result = subprocess.run(command, capture_output=True, text=True,
                             timeout=TIMEOUT_S, cwd=str(work), env=env, check=False)
     return result, record, work
 

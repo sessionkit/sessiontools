@@ -115,9 +115,23 @@ def test_should_switch_doctrine():
     assert "pick one" in str(refused.value)
 
 
-def test_check_placeable_needs_a_session_or_tmux():
+def test_default_session_fills_in_a_name_only_outside_tmux():
+    """No target typed and no tmux around it: the default session, one
+    fixed name. A typed SESSION always wins; inside tmux an empty one stays
+    empty (the caller's own session)."""
+    assert placement.DEFAULT_TMUX_SESSION == "agents"
+    assert placement.default_session("", environ={}) == "agents"
+    assert placement.default_session("eng", environ={}) == "eng"
+    assert placement.default_session("", environ={"TMUX": "/x,1,2"}) == ""
+    assert placement.default_session("eng", environ={"TMUX": "/x,1,2"}) == "eng"
+
+
+def test_check_placeable_passes_whatever_default_session_returns():
+    """The library guard stays for a caller that skips `default_session`; a
+    caller that asks it first is never refused."""
     placement.check_placeable("eng", environ={})
     placement.check_placeable("", environ={"TMUX": "/x,1,2"})
+    placement.check_placeable(placement.default_session("", environ={}), environ={})
     with pytest.raises(LaunchError) as refused:
         placement.check_placeable("", environ={})
     assert refused.value.code == EXIT_USAGE
@@ -196,7 +210,8 @@ def test_the_keyed_pane_trampoline_is_byte_unchanged_by_st112():
     re-captured on ST-112's tip (21063f0) for ST-113, which moves exactly
     one thing: the opening `unset` also names CLAUDE_CODE_SESSION_ID, so
     the pane never inherits the caller's id. ST-143 moves that same line
-    once more: it unsets CREDENTIAL_VARS too. It is stored
+    once more: it unsets CREDENTIAL_VARS too, and ST-270 adds
+    CLAUDE_CODE_AGENT to it (the agent word). It is stored
     WITHOUT its shebang line: a tracked file that opens with a bash shebang
     is shellchecked by `make lint`, and generated text is not a source
     script. The shebang is asserted here, so the whole text is still exact."""
@@ -503,7 +518,10 @@ def test_every_target_is_anchored_and_the_window_is_addressed_by_its_id(tmp_path
     assert new_window[new_window.index("-n") + 1] == "scout"
     assert new_window[-1] == trampoline_of(plan)
     assert calls[2] == ["set-window-option", "-t", "@9", "automatic-rename", "off"]
-    assert len(calls) == 3                               # no switch asked for
+    # a CREATED session's window 0 is a bare shell: the agent's window is
+    # made current, so an attach lands on it
+    assert calls[3] == ["select-window", "-t", "@9"]
+    assert len(calls) == 4                               # no switch asked for
     for call in calls:
         if "-t" in call:
             assert call[call.index("-t") + 1][0] in "=@", call
@@ -537,6 +555,39 @@ def test_a_server_born_by_new_session_never_gets_the_callers_identity(
                     "GIT_CONFIG_GLOBAL": "/agent/gitconfig"}
     assert envs["new-window"] is caller                  # narrow: new-session only
     assert caller["CLAUDE_CODE_SESSION_ID"] == "parent-CLAUDE_CODE_SESSION_ID"
+
+
+def test_a_reused_session_selects_no_window(tmp_path, monkeypatch):
+    """Someone may be looking at a session that already existed: its
+    current window is theirs, so placement leaves it alone."""
+    plan = live_plan(tmp_path)
+    calls = []
+
+    def recording(arguments, environ=None):
+        calls.append(list(arguments))
+        return "@9\n" if arguments[0] == "new-window" else ""
+
+    monkeypatch.setattr(placement, "run_tmux", recording)
+    monkeypatch.setattr(placement, "session_exists", lambda name, environ=None: True)
+    placed = placement.place_in_tmux(plan, "agents", "scout", False, environ={})
+    assert not placed.created_session
+    assert [call[0] for call in calls] == ["new-window", "set-window-option"]
+
+
+def test_a_failed_select_window_is_degraded_not_failed(tmp_path, monkeypatch, capsys):
+    plan = live_plan(tmp_path)
+
+    def recording(arguments, environ=None):
+        if arguments[0] == "select-window":
+            raise LaunchError("tmux select-window failed: nope")
+        return "@9\n" if arguments[0] == "new-window" else ""
+
+    monkeypatch.setattr(placement, "run_tmux", recording)
+    monkeypatch.setattr(placement, "session_exists", lambda name, environ=None: False)
+    placed = placement.place_in_tmux(plan, "agents", "scout", False, environ={})
+    assert placed.created_session and placed.window_id == "@9"
+    assert os.path.exists(trampoline_of(plan))
+    assert "placed, but could not select the new window" in capsys.readouterr().err
 
 
 def test_in_the_current_session_new_window_takes_no_target(tmp_path, monkeypatch):
@@ -637,17 +688,41 @@ def test_a_pane_minted_placement_that_fails_leaves_no_temp_dir(tmp_path, monkeyp
 
 
 def test_the_receipt_names_who_where_the_window_id_and_the_session(tmp_path):
+    """A caller INSIDE tmux: the line is byte-for-byte what it always was."""
+    inside = {"TMUX": "/x,1,2"}
     plan = live_plan(tmp_path)
     sid = plan.identity.session_id
-    created = placement.receipt(plan, placement.TmuxPlacement("eng", "scout", "@5", True))
+    created = placement.receipt(plan, placement.TmuxPlacement("eng", "scout", "@5", True),
+                                environ=inside)
     assert created == (f"session start: placed scout in tmux window 'scout' (@5) of "
                        f"session 'eng' (created) -- session {sid}")
-    here = placement.receipt(plan, placement.TmuxPlacement("", "w", "@6", False))
-    assert "of the current session -- session" in here
+    here = placement.receipt(plan, placement.TmuxPlacement("", "w", "@6", False),
+                             environ=inside)
+    assert here.endswith("of the current session -- session " + sid)
     (tmp_path / "k").mkdir()
     pane = placement.receipt(keyed_tmux_plan(tmp_path / "k"),
-                             placement.TmuxPlacement("eng", "scout", "@7", False))
+                             placement.TmuxPlacement("eng", "scout", "@7", False),
+                             environ=inside)
     assert pane.endswith("-- session id minted in the pane")
+
+
+def test_a_receipt_outside_tmux_says_how_to_attach(tmp_path):
+    """A caller outside tmux is never switched to the window, so the line
+    names the session it made (or reused) and how to reach it."""
+    plan = live_plan(tmp_path)
+    sid = plan.identity.session_id
+    created = placement.receipt(plan, placement.TmuxPlacement("agents", "scout", "@5", True),
+                                environ={})
+    assert created == (f"session start: placed scout in tmux window 'scout' (@5) of "
+                       f"session 'agents' (created) -- session {sid}; "
+                       f"attach: tmux attach -t agents")
+    reused = placement.receipt(plan, placement.TmuxPlacement("agents", "scout", "@6", False),
+                               environ={})
+    assert "of session 'agents' -- session" in reused
+    assert reused.endswith("; attach: tmux attach -t agents")
+    odd = placement.receipt(plan, placement.TmuxPlacement("my work", "scout", "@7", False),
+                            environ={})
+    assert odd.endswith("; attach: tmux attach -t 'my work'")
 
 
 # ---------- main, in-process: dry runs and the usage refusals ----------------------------------
@@ -684,16 +759,27 @@ def test_the_tmux_dry_run_touches_no_tmux(tmp_path, monkeypatch, capsys):
     assert dry_run_main(tmp_path, monkeypatch, "--tmux-target", "eng", "scout") == EXIT_OK
 
 
-def test_nowhere_to_place_is_a_usage_refusal(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("AGENTS_DIR", make_agents_root(tmp_path))
-    assert start.main(["--in-tmux", "scout"]) == EXIT_USAGE
-    assert "nowhere to place the window" in capsys.readouterr().err
-    assert not (tmp_path / "agents" / "sessions").exists()
+def test_in_tmux_outside_tmux_dry_run_says_the_session_it_would_create(
+        tmp_path, monkeypatch, capsys):
+    """No target and no tmux: the dry run names the default session the
+    live launch would create (or reuse), and touches no tmux."""
+    monkeypatch.setattr(placement, "run_tmux", no_tmux)
+    monkeypatch.setattr(placement._tmux, "run", no_tmux)
+    assert dry_run_main(tmp_path, monkeypatch, "--in-tmux", "scout") == EXIT_OK
+    captured = capsys.readouterr()
+    assert "mode:     tmux window 'scout' in session 'agents'\n" in captured.out
+    assert "nowhere" not in captured.err
 
 
-def test_contradictory_switch_flags_win_over_nowhere_to_place(tmp_path, monkeypatch, capsys):
-    """Both refusals at once: `--switch --no-switch` is wrong wherever it
-    was typed, so the more specific complaint is the one said."""
+def test_in_tmux_with_only_a_window_outside_tmux_uses_the_default_session(
+        tmp_path, monkeypatch, capsys):
+    assert dry_run_main(tmp_path, monkeypatch, "--tmux-target", ":win", "scout") == EXIT_OK
+    assert "mode:     tmux window 'win' in session 'agents'\n" in capsys.readouterr().out
+
+
+def test_contradictory_switch_flags_are_refused_outside_tmux(tmp_path, monkeypatch, capsys):
+    """`--switch --no-switch` is wrong wherever it was typed: refused
+    outside tmux too, where a bare `--in-tmux` would otherwise place."""
     monkeypatch.setenv("AGENTS_DIR", make_agents_root(tmp_path))
     assert start.main(["--in-tmux", "--switch", "--no-switch", "scout"]) == EXIT_USAGE
     err = capsys.readouterr().err
@@ -1119,11 +1205,41 @@ def test_contradictory_switch_flags_are_refused_before_anything_is_minted(tmp_pa
     assert no_session_dirs(tmp_path), "minted an identity before a usage question"
 
 
-def test_a_placement_with_nowhere_to_go_is_refused_before_anything_is_minted(tmp_path):
-    result, _record, _work = tmux_launch_e2e(tmp_path, "--in-tmux", "scout")
-    assert result.returncode == EXIT_USAGE, result.stdout
-    assert "nowhere to place the window" in result.stderr
-    assert no_session_dirs(tmp_path), "minted an identity before a usage question"
+@needs_tmux
+def test_in_tmux_outside_tmux_creates_the_named_default_session(tmp_path):
+    """A plain terminal, no server, no target: `--in-tmux` creates session
+    `agents` (detached), places the agent there with its window current,
+    and the receipt says so and how to attach. A second launch reuses it."""
+    assert tmux_in("list-sessions").returncode != 0, "the private server already runs"
+    # launched from inside a seat that holds a credential: the server this
+    # launch births must hold neither (born the ST-270 way)
+    inherited = {"CLAUDE_CODE_AGENT": "claude", "ANTHROPIC_API_KEY": "not-a-real-key"}
+    result, record, _work = tmux_launch_e2e(tmp_path, "--in-tmux", "scout",
+                                            extra_env=inherited)
+    assert result.returncode == 0, result.stderr
+    assert "placed scout in tmux window 'scout'" in result.stdout
+    assert "of session 'agents' (created)" in result.stdout
+    assert result.stdout.rstrip().endswith("; attach: tmux attach -t agents")
+    assert pane_ran(record), result.stdout
+    window_id = window_id_of(result.stdout)
+    sessions = tmux_in("list-sessions", "-F", "#{session_name}").stdout.split()
+    assert sessions == ["agents"]
+    active = tmux_in("display-message", "-p", "-t", "=agents:", "#{window_id}").stdout.strip()
+    assert active == window_id, "an attach would land on window 0, not the agent"
+    server = tmux_in("show-environment", "-g").stdout
+    for name in inherited:
+        assert name not in server, f"the server was born holding {name}"
+    second = tmp_path / "second"
+    second.mkdir()
+    # The first pane still holds scout (its claim moved to that pane), so the
+    # second launch is a second holder on purpose: it says so.
+    again, _record, _work = tmux_launch_e2e(second, "--in-tmux", "--allow-second-holder",
+                                            "scout")
+    assert again.returncode == 0, again.stderr
+    assert "of session 'agents' -- session" in again.stdout     # reused, not created
+    names = tmux_in("list-windows", "-t", "=agents", "-F", "#{window_name}").stdout.split()
+    assert names.count("scout") == 2
+    assert tmux_in("list-sessions", "-F", "#{session_name}").stdout.split() == ["agents"]
 
 
 @needs_tmux

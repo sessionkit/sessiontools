@@ -551,3 +551,29 @@ def test_the_restart_report_helpers_name_seats_and_never_a_token():
     assert u.holds_token({"CLAUDE_CODE_OAUTH_TOKEN": f" {token}\n"}, token) is True
     assert u.holds_token({"CLAUDE_CODE_OAUTH_TOKEN": synthetic_token()}, token) is False
     assert u.holds_token({}, token) is False
+
+
+# --- the oauthAccount note ---------------------------------------------------------------
+
+
+def test_the_token_file_plan_says_the_display_profile_is_not_changed(world, capsys):
+    (world.home / ".claude.json").write_text(json.dumps(
+        {"oauthAccount": {"emailAddress": "ai@example.com", "organizationName": "org-NOT-SHOWN"}}))
+    before = (world.home / ".claude.json").read_bytes()
+    assert world.run(yes=False) == 3
+    lines = world.out.getvalue().splitlines()
+    assert lines[1] == (
+        "  note:    ~/.claude.json names ai@example.com (Claude's /status and 'claude auth "
+        "status' read it); use does not change it. The token decides billing: check with "
+        "'session account verify'")
+    assert "org-NOT-SHOWN" not in world.text()
+    assert world.run() == 0
+    assert (world.home / ".claude.json").read_bytes() == before
+    assert_no_leak(world, capsys)
+
+
+def test_the_token_file_plan_with_no_profile_says_it_names_none(world, capsys):
+    assert world.run(yes=False) == 3
+    assert world.out.getvalue().splitlines()[1].startswith(
+        "  note:    ~/.claude.json names no account (Claude's")
+    assert_no_leak(world, capsys)

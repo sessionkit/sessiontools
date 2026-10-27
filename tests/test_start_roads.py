@@ -12,7 +12,13 @@ import os
 import subprocess
 
 import pytest
-from start_support import TIMEOUT_S, clean_env, make_agents_root, session_cmd
+from start_support import (
+    TIMEOUT_S,
+    clean_env,
+    make_agents_root,
+    pretend_a_terminal,
+    session_cmd,
+)
 
 from sessiontools import start
 from sessiontools.start import placement
@@ -22,6 +28,13 @@ ASK = "you@example.invalid"
 RESUME_ID = "0f0f0f0f-0000-4000-8000-000000000000"
 FABLE = "claude:\n  model: fable\n"
 SECRETS = "environment:\n  secrets:\n    T: pass:x/y\n"
+
+
+@pytest.fixture(autouse=True)
+def from_a_terminal(monkeypatch):
+    """Each road is driven as if typed at a terminal, so the refusal under
+    test is the one reached, not the no-terminal refusal before it."""
+    pretend_a_terminal(monkeypatch)
 
 
 @pytest.fixture

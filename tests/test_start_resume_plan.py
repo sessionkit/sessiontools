@@ -296,6 +296,8 @@ def test_a_live_resume_plans_its_files_like_a_fresh_launch(tmp_path):
     plan = plan_for(tmp_path, EFFORT, argv_tail=["--resume", SID],
                     flags=["--first-message-file-over", "0"], extra_env=home_of(tmp_path))
     kinds = sorted(type(item).__name__ for item in plan.files)
-    assert kinds == sorted([PlannedPlugin.__name__, PlannedFile.__name__])
-    message = next(item for item in plan.files if isinstance(item, PlannedFile))
+    # beside the settings door's file (the launcher's tui default)
+    assert kinds == sorted([PlannedPlugin.__name__, PlannedFile.__name__, PlannedFile.__name__])
+    message = next(item for item in plan.files if isinstance(item, PlannedFile)
+                   and "first-message" in os.path.basename(item.path))
     assert message.text.startswith("Session restarted. Current date and time: ")

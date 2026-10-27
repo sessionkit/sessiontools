@@ -36,16 +36,49 @@
   window with no reset metric prints no reset clause in text and a null
   `resets_at` in `--json`; a time is never guessed.
 
+  **A window whose reset has passed is STALE**, on either source: `7d
+  STALE: window ended ISO (6d ago), figure not shown`. A used-percent of a
+  window that is over is not a reading of anything current, so the figure
+  is withheld (`percent` null, `expired` and `stale` true in `--json`),
+  never guessed to be 0. "Passed" is told by `gather`'s clock, at or before
+  now. `--no-resets` does not hide it: it is the finding, not a reset time.
+
+  **Each figure's age**, when the source can tell it. An exporter sample may
+  carry the exposition format's optional timestamp (milliseconds, the third
+  field of the line); a usage sample that does shows `(3m old)` in its
+  window's clause and `age_seconds` in `--json`. When the exporter sends
+  none, the line says `age not reported by the exporter` once, and
+  `age_seconds` is null: an age is never guessed. A window with none beside
+  one with a timestamp says `age not reported` in its own clause. A
+  timestamp more than `AGE_SLACK` seconds ahead of the clock, or one that
+  is not a whole number, is no age.
+
   When the exporter has no answer, the host may name a second source: the
   limits file, the `session` setting `account.limits_file` (see
   `limits`). Unset, nothing changes. Set, its windows are shown with the
   file's age, `STALE` past `limits.STALE_AFTER`, labelled `usage of the host
   account`; a file that cannot be used adds its reason to the exporter's.
 
+- **Which account does Claude's own display name?** `~/.claude.json`'s
+  `oauthAccount.emailAddress` (`profile.read_profile`), which `/status` and
+  `claude auth status` read: `profile: EMAIL (~/.claude.json, display
+  only)`, with `<- differs from the host account` when it is not the host
+  account's registry email (compared without case). It is a display
+  profile, not the token: `use` never changes it. No file or no account is
+  `profile: none (...)`; a file that cannot be read is `profile: unreadable
+  (~/.claude.json: REASON)`, exit 0. Only the address is ever shown. The
+  line comes last, so the host, seat and usage lines keep their places.
+
 `--json` is `{host: {name, email, via}, seat: {name, via}, usage: {...} |
-null}`. When `usage` is null, `usage_unavailable` carries the reason.
-From the limits file, `usage` is `{source: "limits_file", file, label,
-written_at, age_seconds, stale, windows}`, each window with `expired`.
+null, profile: {email, source, matches_host, reason}}`. When `usage` is
+null, `usage_unavailable` carries the reason (before `profile`).
+`matches_host` is null when either address is unknown; `reason` is null
+unless the file could not be read.
+From the exporter, `usage` is `{url, label, windows}`; from the limits file,
+`{source: "limits_file", file, label, written_at, age_seconds, stale,
+windows}`. Every window, from either source, is `{window, account, percent,
+expired, stale, age_seconds, resets_at}` (`resets_at` absent under
+`--no-resets`); a limits-file window's `age_seconds` is the file's age.
 
 `list` prints the registry in its order: name, email, source kinds and
 their cost, whether the fp is known, and `<- host` on the account `status`
@@ -89,6 +122,7 @@ from pathlib import Path
 from typing import TextIO
 
 from sessiontools.account import keychain as kc
+from sessiontools.account import profile as pf
 from sessiontools.account import registry as reg
 from sessiontools.account import tokenfile as tf
 
@@ -103,6 +137,9 @@ USAGE_URL = "http://localhost:9103/metrics"
 USAGE_METRIC = "claude_plan_usage_percent"
 RESET_METRIC = "claude_plan_window_reset_timestamp_seconds"
 USAGE_TIMEOUT = 2.0
+#: A sample timestamp this far ahead of the clock is jitter, read as 0s old;
+#: further ahead it is no age at all (as `limits.FUTURE_SLACK`).
+AGE_SLACK = 60
 CONFIG_KEYS = ("host_read", "usage_url")
 
 VIA_KEYCHAIN = "Keychain, fp match"
@@ -123,6 +160,7 @@ USAGE_LABEL = "usage of the live account"
 FILE_LABEL = "usage of the host account"
 SOURCE_FILE = "limits_file"
 HOST_MARK = "<- host"
+DIFFERS_MARK = "<- differs from the host account"
 
 
 class StatusError(Exception):
@@ -327,7 +365,8 @@ def seat_of(registry: reg.Registry, host: Who, env: Mapping[str, str], *,
 #: `fetch(url) -> text`. Raises (anything) when the exporter is unreachable.
 Fetcher = Callable[[str], str]
 
-_SAMPLE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})?\s+(\S+)(?:\s+\S+)?\s*$")
+_SAMPLE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})?\s+(\S+)(?:\s+(\S+))?\s*$")
+_STAMP = re.compile(r"-?[0-9]{1,19}")
 _LABEL = re.compile(r'\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"\s*,?')
 
 
@@ -352,9 +391,11 @@ def _labels(text: str | None) -> dict[str, str] | None:
     return labels
 
 
-def parse_metrics(text: str) -> list[tuple[str, dict[str, str], float]]:
-    """Prometheus text exposition -> (name, labels, value), in order. A
-    comment, or a line that does not parse, is skipped."""
+def parse_metrics(text: str) -> list[tuple[str, dict[str, str], float, int | None]]:
+    """Prometheus text exposition -> (name, labels, value, timestamp), in
+    order. The timestamp is the line's optional third field, milliseconds
+    since the epoch, or None when the line carries none or one that is not a
+    whole number. A comment, or a line that does not parse, is skipped."""
     samples = []
     for line in text.splitlines():
         line = line.strip()
@@ -370,7 +411,9 @@ def parse_metrics(text: str) -> list[tuple[str, dict[str, str], float]]:
             value = float(match.group(3))
         except ValueError:
             continue
-        samples.append((match.group(1), labels, value))
+        stamp = match.group(4)
+        samples.append((match.group(1), labels, value,
+                        int(stamp) if stamp and _STAMP.fullmatch(stamp) else None))
     return samples
 
 
@@ -381,7 +424,12 @@ class Window:
     #: None only for an `expired` window: the window it measured is over.
     percent: float | None
     resets_at: float | None = None
+    #: The reset has passed: the window is STALE and its figure withheld.
     expired: bool = False
+    #: Seconds since the figure was measured, or None when it cannot be told.
+    age_s: int | None = None
+    #: For an `expired` window, seconds since it ended.
+    ended_s: int | None = None
 
 
 @dataclass(frozen=True)
@@ -405,9 +453,8 @@ class Usage:
         from_file = self.source == SOURCE_FILE
         rows = []
         for w in self.windows:
-            row: dict = {"window": w.window, "account": w.account, "percent": w.percent}
-            if from_file:
-                row["expired"] = w.expired
+            row: dict = {"window": w.window, "account": w.account, "percent": w.percent,
+                         "expired": w.expired, "stale": w.expired, "age_seconds": w.age_s}
             if resets:
                 row["resets_at"] = _iso(w.resets_at)
             rows.append(row)
@@ -418,10 +465,27 @@ class Usage:
                 "stale": self.stale, "windows": rows}
 
 
-def usage_of(url: str, fetch: Fetcher | None = None) -> Usage:
-    """The plan usage the exporter reports. Unreachable, or reachable with
-    no usage series, is `unavailable` with the reason; never an exit."""
+def _since(now: float, then: float) -> int:
+    return max(0, int(now - then))
+
+
+def sample_age(now: float, stamp_ms: int | None) -> int | None:
+    """Seconds from a sample's timestamp (ms) to NOW, or None: no stamp, or
+    one more than AGE_SLACK ahead of the clock. A little ahead is 0."""
+    if stamp_ms is None:
+        return None
+    age = now - stamp_ms / 1000
+    return None if age < -AGE_SLACK else _since(now, stamp_ms / 1000)
+
+
+def usage_of(url: str, fetch: Fetcher | None = None, now: float | None = None) -> Usage:
+    """The plan usage the exporter reports, as of NOW (epoch seconds; the
+    real clock when None). A window whose reset is at or before NOW is
+    `expired`, its percent withheld; a usage sample's timestamp is its age.
+    Unreachable, or reachable with no usage series, is `unavailable` with
+    the reason; never an exit."""
     fetch = fetch_url if fetch is None else fetch
+    now = datetime.now(UTC).timestamp() if now is None else now
     try:
         text = fetch(url)
     except Exception:  # noqa: BLE001 - any failure to fetch is "no exporter"
@@ -431,17 +495,22 @@ def usage_of(url: str, fetch: Fetcher | None = None) -> Usage:
     # NaN and +-Inf are legal exposition values, but no percent or time: a
     # sample carrying one is skipped (it would crash the text and make
     # `--json` emit NaN, which is not JSON).
-    samples = [(name, labels, value) for name, labels, value in parse_metrics(text)
-               if math.isfinite(value)]
+    samples = [sample for sample in parse_metrics(text) if math.isfinite(sample[2])]
     resets = {(labels.get("account"), labels.get("window")): value
-              for name, labels, value in samples if name == RESET_METRIC}
-    windows = tuple(
-        Window(labels.get("window") or "?", labels.get("account"), value,
-               resets.get((labels.get("account"), labels.get("window"))))
-        for name, labels, value in samples if name == USAGE_METRIC)
+              for name, labels, value, _stamp in samples if name == RESET_METRIC}
+    windows = []
+    for name, labels, value, stamp in samples:
+        if name != USAGE_METRIC:
+            continue
+        resets_at = resets.get((labels.get("account"), labels.get("window")))
+        expired = resets_at is not None and resets_at <= now
+        windows.append(Window(labels.get("window") or "?", labels.get("account"),
+                              None if expired else value, resets_at, expired=expired,
+                              age_s=sample_age(now, stamp),
+                              ended_s=_since(now, resets_at) if expired else None))
     if not windows:
         return Usage(url, unavailable=f"no {USAGE_METRIC} at {url}")
-    return Usage(url, windows)
+    return Usage(url, tuple(windows))
 
 
 def _iso(ts: float | None) -> str | None:
@@ -465,24 +534,43 @@ def age_text(seconds: int) -> str:
     return f"{seconds}s"
 
 
+def stale_text(w: Window) -> str:
+    """An expired window, the same on both sources: when it ended, how long
+    ago, and that its figure is withheld."""
+    when = _iso(w.resets_at)
+    ended = f" {when}" if when is not None else ""
+    return (f"{w.window} STALE: window ended{ended} ({age_text(w.ended_s or 0)} ago), "
+            "figure not shown")
+
+
 def usage_line(usage: Usage, resets: bool = True) -> str:
     if usage.unavailable is not None:
         return f"usage: unavailable ({usage.unavailable})"
+    from_file = usage.source == SOURCE_FILE
     accounts = {w.account for w in usage.windows}
+    # The exporter's ages: per window when any sample carried a timestamp,
+    # else said once for the line. The file's age is the file's, at the end.
+    any_age = any(w.age_s is not None for w in usage.windows)
     parts = []
     for w in usage.windows:
-        if w.percent is None:
-            text = f"{w.window} reset since written"
+        if w.expired or w.percent is None:
+            text = stale_text(w)
         else:
             text = f"{w.window} {_pct(w.percent)}"
+            clauses = []
+            if resets and (when := _iso(w.resets_at)) is not None:
+                clauses.append(f"resets {when}")
+            if not from_file and any_age:
+                clauses.append("age not reported" if w.age_s is None
+                               else f"{age_text(w.age_s)} old")
+            if clauses:
+                text += f" ({', '.join(clauses)})"
         if len(accounts) > 1 and w.account:
             text = f"{w.account} {text}"
-        # An expired window's reset is already said (`reset since written`).
-        if resets and not w.expired and (when := _iso(w.resets_at)) is not None:
-            text += f" (resets {when})"
         parts.append(text)
-    if usage.source != SOURCE_FILE:
-        return f"usage: {', '.join(parts)}  ({USAGE_LABEL})"
+    if not from_file:
+        note = "" if any_age else ", age not reported by the exporter"
+        return f"usage: {', '.join(parts)}  ({USAGE_LABEL}{note})"
     age = f"{age_text(usage.age_s or 0)} old"
     return (f"usage: {', '.join(parts)}  ({FILE_LABEL}, limits file, "
             f"{'STALE: ' + age if usage.stale else age})")
@@ -497,6 +585,7 @@ class Status:
     seat: Who
     usage: Usage
     resets: bool = field(default=True)
+    profile: pf.Profile = field(default=pf.Profile(None))
 
     def to_json(self) -> dict:
         data = {"host": self.host.to_json(),
@@ -504,12 +593,26 @@ class Status:
                 "usage": self.usage.to_json(self.resets)}
         if self.usage.unavailable is not None:
             data["usage_unavailable"] = self.usage.unavailable
+        data["profile"] = {"email": self.profile.email, "source": pf.SOURCE,
+                           "matches_host": pf.matches(self.profile, self.host.email),
+                           "reason": self.profile.reason}
         return data
 
     def text(self) -> str:
         return "\n".join((f"host:  {_who_text(self.host)}",
                           f"seat:  {_seat_text(self.seat)}",
-                          usage_line(self.usage, self.resets)))
+                          usage_line(self.usage, self.resets),
+                          profile_line(self.profile, self.host)))
+
+
+def profile_line(profile: pf.Profile, host: Who) -> str:
+    """The display profile, named as such; marked when it is not the host's."""
+    if profile.reason is not None:
+        return f"profile: unreadable ({pf.SOURCE}: {profile.reason})"
+    if profile.email is None:
+        return f"profile: none ({pf.SOURCE} names no account)"
+    mark = f"  {DIFFERS_MARK}" if pf.matches(profile, host.email) is False else ""
+    return f"profile: {profile.email} ({pf.SOURCE}, display only){mark}"
 
 
 def _who_text(who: Who) -> str:
@@ -534,7 +637,8 @@ def _paths(home, registry_path, config_file) -> tuple[Path, Path, Path]:
     return rpath, cpath, rpath.parent / LEDGER_NAME
 
 
-#: `clock() -> datetime`, timezone-aware. The limits file's age is told by it.
+#: `clock() -> datetime`, timezone-aware. Every age, and whether a window's
+#: reset has passed, is told by it.
 Clock = Callable[[], datetime]
 
 
@@ -544,7 +648,7 @@ def gather(*, keychain: kc.Keychain | None = None, fetch: Fetcher | None = None,
            registry_path: str | os.PathLike | None = None,
            config_file: str | os.PathLike | None = None,
            clock: Clock | None = None) -> Status:
-    """The three answers. Raises RegistryError or StatusError (exit 5) on a
+    """The answers. Raises RegistryError or StatusError (exit 5) on a
     refused registry or config; nothing else stops it. The limits file is
     asked only when the exporter has no answer (`limits.fallback`)."""
     from sessiontools.account import limits
@@ -556,11 +660,11 @@ def gather(*, keychain: kc.Keychain | None = None, fetch: Fetcher | None = None,
     host = host_of(registry, config, keychain=keychain, ledger=ledger, environ=environ,
                    home=home)
     seat = seat_of(registry, host, environ, token_file=on_token_file(environ, home))
-    usage = usage_of(config.usage_url, fetch)
+    now = (datetime.now(UTC) if clock is None else clock()).timestamp()
+    usage = usage_of(config.usage_url, fetch, now)
     if usage.unavailable is not None:
-        now = (datetime.now(UTC) if clock is None else clock()).timestamp()
         usage = limits.fallback(usage, now, environ, home)
-    return Status(host, seat, usage, resets)
+    return Status(host, seat, usage, resets, pf.read_profile(home))
 
 
 def status(*, as_json: bool = False, resets: bool = True,

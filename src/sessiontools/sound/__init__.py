@@ -61,14 +61,12 @@ def port(env: Mapping[str, str] | None = None) -> int:
 
 
 def home(env: Mapping[str, str] | None = None) -> Path:
-    """`$SESSIONTOOLS_SOUND_HOME`, else `~/.local/share/sessiontools/sound`.
-    The hook shim reads the same rule."""
-    e = _env(env)
-    raw = e.get(HOME_ENV, "")
-    if raw:
-        return Path(raw)
-    base = e.get("HOME") or str(Path.home())
-    return Path(base) / ".local" / "share" / "sessiontools" / "sound"
+    """The sound leaf, `settings.sound_root`: `$SESSIONTOOLS_SOUND_HOME`,
+    else the old `~/.local/share/sessiontools/sound/` while it is real, else
+    `~/.sessionkit/tools/state/sound/` (settings.leaf_path). The hook shim
+    (hooks/busy-sound) carries the same rule in bash."""
+    from sessiontools import settings  # here: settings imports this module
+    return settings.sound_root(_env(env))
 
 
 def sender(env: Mapping[str, str] | None = None) -> Path:

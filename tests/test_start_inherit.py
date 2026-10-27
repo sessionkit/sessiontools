@@ -22,7 +22,13 @@ import stat
 import subprocess
 
 import pytest
-from start_support import TIMEOUT_S, clean_env, make_agents_root, plan_for, session_cmd
+from start_support import (
+    TIMEOUT_S,
+    at_a_terminal,
+    clean_env,
+    make_agents_root,
+    plan_for,
+)
 
 from sessiontools.start import plan as plan_module
 from sessiontools.start import run, secrets
@@ -259,7 +265,7 @@ def launch_holding_a_token(tmp_path, front_matter):
     for name in CREDENTIAL_VARS:
         env.pop(name, None)
     env.update({NAME: TOKEN, "ANTHROPIC_API_KEY": "sk-ant-api03-FAKE-ST143-e2e"})
-    result = subprocess.run(session_cmd("scout", "hello"), capture_output=True, text=True,
+    result = subprocess.run(at_a_terminal("scout", "hello"), capture_output=True, text=True,
                             timeout=TIMEOUT_S, cwd=str(tmp_path / "work"), env=env,
                             check=False)
     assert result.returncode == 0, result.stderr

@@ -26,7 +26,7 @@ from sessiontools import tmux as _tmux
 from sessiontools.start.agents import Agent
 from sessiontools.start.context import PlannedFile, discard, materialize
 from sessiontools.start.environment import host_environ
-from sessiontools.start.errors import PROG, LaunchError
+from sessiontools.start.errors import EXIT_USAGE, PROG, LaunchError
 from sessiontools.start.identity import SessionIdentity
 from sessiontools.start.plan import LaunchPlan
 from sessiontools.start.record import RECORD_DIR, ensure_record_dir, record_path
@@ -124,6 +124,38 @@ def discard_files(written: list) -> None:
     for item in written:
         if isinstance(item, MadeDir):
             shutil.rmtree(item.path, ignore_errors=True)
+
+
+#: Typed passthrough that asks the vendor for no terminal: its own print
+#: mode, and its help and version, which print and exit.
+NEEDS_NO_TERMINAL = frozenset({"-p", "--print", "-h", "--help", "-v", "--version"})
+
+NO_TERMINAL = ("no terminal here: an interactive session needs stdin and stdout "
+               "to both be a terminal. Run it from a terminal, or add --in-tmux "
+               "to start it in a tmux window")
+
+
+def check_terminal(rest: list[str], dry_run: bool, interactive: bool | None = None) -> None:
+    """Refuse an in-place launch with no terminal to run in, before anything
+    is claimed, minted or written. The vendor, exec'd with this process's
+    stdio, needs stdin AND stdout to be terminals: with stdout piped it
+    falls into its own print mode and fails asking for a prompt, and with
+    stdin redirected it cannot read the keyboard. A dry run launches
+    nothing, and a typed print, help or version flag asks for no terminal,
+    so those pass. `interactive` stands in for the measurement in tests."""
+    if dry_run or any(token.split("=", 1)[0] in NEEDS_NO_TERMINAL for token in rest):
+        return
+    if interactive is None:
+        interactive = _isatty(sys.stdin) and _isatty(sys.stdout)
+    if not interactive:
+        raise LaunchError(NO_TERMINAL, code=EXIT_USAGE)
+
+
+def _isatty(stream) -> bool:
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError, OSError):   # closed, or no such method
+        return False
 
 
 def execute(plan: LaunchPlan) -> None:

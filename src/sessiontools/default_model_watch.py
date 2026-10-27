@@ -222,10 +222,13 @@ def rendered_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     return out
 
 
+#: The agent's log file, in the tools package's log directory.
+LOG_NAME = "default-model.log"
+
+
 def log_path(environ: Mapping[str, str] | None = None) -> Path:
-    e = os.environ if environ is None else environ
-    home = Path(e.get("HOME") or os.path.expanduser("~"))
-    return home / "Library" / "Logs" / "sessiontools" / "default-model.log"
+    from sessiontools import settings
+    return settings.log_dir(settings.PACKAGES["session"], environ) / LOG_NAME
 
 
 def _preflight(environ: Mapping[str, str] | None) -> tuple[Path, str | None]:

@@ -32,9 +32,10 @@ passes or exits, and **the item is not written before step 8**:
    may sign in from a token file (`tokenfile`), and `use` does not guess.
    If this process has `CLAUDE_CODE_OAUTH_TOKEN`, the message says so
    (exit 5);
-4. show the plan: from, to, the item, the token's source, the seats that
-   move and the cache that cold-starts (an injected seat scan), the backup
-   directory, and the witness (or MISSING);
+4. show the plan: from, to, a note on the display profile (below), the
+   item, the token's source, the seats that move and the cache that
+   cold-starts (an injected seat scan), the backup directory, and the
+   witness (or MISSING);
 5. the gates, after the plan: no `--witness` is exit 2, no `--yes` is
    exit 3. Neither writes a file or runs `claude`;
 6. preflight the token before any write: one `claude -p` in a tmp cwd,
@@ -72,6 +73,19 @@ The file route, where it differs:
    never changed. A failed commit or verify restores the backup's bytes:
    exit 6; a restore that fails is exit 7, naming the backup and the
    manual `install` line.
+
+**The display profile is not changed.** Both plans carry one `note:` line
+after the target: which account `~/.claude.json` names (its
+`oauthAccount.emailAddress`, read by `profile.read_profile`: read only,
+size-capped, only the address shown), that Claude's `/status` and `claude
+auth status` read it, that `use` does not change it, and that the token
+decides billing (`session account verify` proves which). A file that names
+no account, or cannot be read, is said so on the same line. No gate, no
+exit code: it is a caveat, and `use` never writes that file (Claude Code
+owns it and rewrites it at runtime).
+
+A `--witness` over 64 characters is refused naming its length (`--witness
+is 65 characters; at most 64`), never its value.
 
 Exit codes: 0 done or already there; 2 usage, unknown name, no witness
 (after the plan); 3 plan shown, no `--yes`; 4 token unresolvable or
@@ -123,6 +137,7 @@ from pathlib import Path
 from typing import TextIO
 
 from sessiontools.account import keychain as kc
+from sessiontools.account import profile as pf
 from sessiontools.account import registry as reg
 from sessiontools.account import setuptoken as st
 from sessiontools.account import tokenfile as tf
@@ -447,7 +462,10 @@ def _witness(witness: str | None) -> str | None:
     who = (witness or "").strip()
     if not who:
         return None
-    if (len(who) > _MAX_WITNESS or not who.isprintable()
+    if len(who) > _MAX_WITNESS:
+        raise UseError(f"--witness is {len(who)} characters; at most {_MAX_WITNESS} "
+                       "(the value is not shown)", EXIT_USAGE)
+    if (not who.isprintable()
             or reg._TOKEN_SHAPE.search(who)):
         raise UseError(f"--witness must be a short name (at most {_MAX_WITNESS} "
                        "printable characters; the value is not shown)", EXIT_USAGE)
@@ -569,7 +587,7 @@ def _use(name: str, *, witness: str | None, yes: bool,
     common = {"who": who, "yes": yes, "preflight": preflight, "seat_scan": seat_scan,
               "clock": clock, "by": by, "out": out}
     if isinstance(route, tf.TokenFile):
-        return _use_token_file(target, route, environ=environ, **common)
+        return _use_token_file(target, route, environ=environ, home=home, **common)
     return _use_keychain(target, route, environ=environ, home=home, **common)
 
 
@@ -635,6 +653,7 @@ def _use_keychain(target: _Target, keychain: kc.Keychain, *, who: str | None, ye
     except Exception as error:  # noqa: BLE001 - the cost is shown, never a gate
         cost = f"unknown (the seat scan failed: {type(error).__name__})"
     print(f"use {name} ({account.email}): the host moves from {from_name} to {name}\n"
+          f"{pf.note_line(pf.read_profile(home))}\n"
           f"  item:    {keychain.describe()}\n"
           f"  token:   {target.resolved.source} (preflight: runs before the write)\n"
           f"  cost:    {cost}\n"
@@ -741,7 +760,7 @@ def _restore_file(route: tf.TokenFile, backup_blob: bytes) -> tuple[bool, str]:
 def _use_token_file(target: _Target, route: tf.TokenFile, *, who: str | None, yes: bool,
                     preflight: Preflight, seat_scan: SeatScan,
                     clock: Callable[[], datetime], by: str, environ: Mapping[str, str],
-                    out: TextIO) -> int:
+                    home, out: TextIO) -> int:
     """The file route (module doc). Nothing here runs `security`."""
     name, account = target.name, target.account
 
@@ -765,6 +784,7 @@ def _use_token_file(target: _Target, route: tf.TokenFile, *, who: str | None, ye
               f"{START_NOTICE}\n"
               f"  this seat holds the old token: {this_seat}")
     print(f"use {name} ({account.email}): the host moves from {from_name} to {name}\n"
+          f"{pf.note_line(pf.read_profile(home))}\n"
           f"  file:    {route.describe()}\n"
           "  keychain: not read: a seat that signs in from it does not move\n"
           f"  token:   {target.resolved.source} (preflight: runs before the write)\n"

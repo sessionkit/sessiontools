@@ -23,7 +23,13 @@ from start_support import make_agents_root
 from sessiontools import start
 from sessiontools.start import homefolder
 from sessiontools.start.environment import Environment
-from sessiontools.start.errors import EXIT_HELD, EXIT_INTERRUPTED, EXIT_OK, LaunchError
+from sessiontools.start.errors import (
+    EXIT_HELD,
+    EXIT_INTERRUPTED,
+    EXIT_OK,
+    EXIT_USAGE,
+    LaunchError,
+)
 from sessiontools.start.homefolder import (
     HOME_FOLDER_NOTICE,
     MAKE,
@@ -481,12 +487,13 @@ def at_a_terminal(tmp_path, home, monkeypatch):
     plans = []
     monkeypatch.setattr(start, "execute", plans.append)
 
-    def run(stdin, *argv, cwd=None):
+    def run(stdin, *argv, cwd=None, err_tty=True):
         if cwd is not None:
             monkeypatch.chdir(cwd)
-        err = Terminal()
+        err = Terminal(tty=err_tty)
         monkeypatch.setattr(sys, "stdin", stdin if isinstance(stdin, Terminal)
                             else Terminal(stdin))
+        monkeypatch.setattr(sys, "stdout", Terminal())
         monkeypatch.setattr(sys, "stderr", err)
         plans.clear()
         code = start.main(list(argv) or ["scout"])
@@ -535,11 +542,23 @@ def test_main_ctrl_c_exits_130_with_nothing_minted(at_a_terminal, home, tmp_path
     assert not (home / "work").exists()
 
 
-def test_main_no_terminal_is_the_tip_behaviour(at_a_terminal, home):
-    code, plan, err = at_a_terminal(Terminal("y\n", tty=False))
+def test_main_no_terminal_for_the_question_is_the_tip_behaviour(at_a_terminal, home):
+    """stdin and stdout a terminal (the launch can run) but stderr not:
+    there is nowhere to ask, so it says the tip and starts at home."""
+    code, plan, err = at_a_terminal("y\n", err_tty=False)
     assert (code, plan.work_dir) == (EXIT_OK, str(home))
     assert err.count(WORDING) == 1
     assert "[Y/n]" not in err
+
+
+def test_main_no_terminal_at_all_is_refused_before_the_question(at_a_terminal, home):
+    """stdin not a terminal: the in-place launch could not run, so it is
+    refused before anything is asked, minted or made."""
+    code, plan, err = at_a_terminal(Terminal("y\n", tty=False))
+    assert (code, plan) == (EXIT_USAGE, None)
+    assert "no terminal here" in err
+    assert "[Y/n]" not in err and WORDING not in err
+    assert not (home / "work").exists()
 
 
 def test_main_dry_run_never_asks(at_a_terminal, home, monkeypatch):

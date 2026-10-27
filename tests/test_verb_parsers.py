@@ -81,6 +81,7 @@ def test_hand_dispatched_groups():
     assert set(verbs.resolve(cli.PARSERS["sound"]).subs) == {"engine"}
     assert set(verbs.resolve(cli.PARSERS["pane-state"]).subs) == {"agent"}
     assert set(verbs.resolve(cli.PARSERS["statusline"]).subs) == {"install", "check", "sample"}
+    assert set(verbs.resolve(cli.PARSERS["path"]).subs) == {"migrate"}
 
 
 class _Captured(BaseException):

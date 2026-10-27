@@ -41,6 +41,8 @@ from sessiontools.start.secrets import SecretError
 
 FORBIDDEN = ("security", "pass", "claude")
 AT = ANCHOR_SUMMER
+#: The exporter's 5h reset, ahead of AT: a window that is not over yet.
+FIVE_RESET = AT.timestamp() + 3 * 3600
 
 
 def _argv0(args, kwargs) -> str:
@@ -131,7 +133,7 @@ class World:
     def fetch(self, url: str) -> str:
         return ('claude_plan_usage_percent{account="default",window="5h"} 40\n'
                 'claude_plan_window_reset_timestamp_seconds{account="default",'
-                'window="5h"} 1907254800\n')
+                f'window="5h"}} {FIVE_RESET:.0f}\n')
 
     @property
     def cfg(self) -> Path:
@@ -579,7 +581,7 @@ def test_status_flags_reach_status(world, capsys):
     assert found["host"] == {"name": "a", "email": "ai@example.com",
                              "via": st.VIA_KEYCHAIN}
     assert found["seat"]["via"] == st.VIA_FOLLOWS
-    assert "2030-06-09" in json.dumps(found["usage"])       # resets are the default
+    assert st._iso(FIVE_RESET) in json.dumps(found["usage"])  # resets are the default
     assert world.run("status", "--json", "--no-resets") == 0
     assert "resets" not in json.dumps(json.loads(world.take())["usage"])
     assert world.run("status", "--no-resets") == 0

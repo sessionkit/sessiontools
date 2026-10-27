@@ -1,7 +1,8 @@
 """Which agent a name means, and where its sessions live.
 
-The agents folder is `$AGENTS_DIR`, else `~/.session/agents`, the default by
-design. (The old launcher defaulted to `~/.claude/agents`,
+The agents folder is `$AGENTS_DIR`, else the agent leaf's `config/`
+(settings.agent_root) once it exists, else the pre-4.2 flat folder
+(settings.legacy_agents_dir), the default by design. (The old launcher defaulted to `~/.claude/agents`,
 where an agent's folder could be a directory with no `<name>.md` - so every
 caller without AGENTS_DIR, the launchd jobs among them, could not start it.)
 
@@ -11,10 +12,15 @@ own name, `default_seat.word()`) resolves to the package's built-in template;
 a user's file of that name shadows it. `--list-agents` answers from
 exactly the same rules, so a picker never offers a name that will not start.
 
-Every session's directory is `~/.session/sessions/<sid>/`, whatever its
-agent. It was `<agents dir>/sessions/`, or `<agent>/home/sessions/`
-when that existed; the old `~/.session/agents/sessions` is a symlink to
-the new root. `$SESSIONS_DIR` still overrides.
+Every session's directory is `<sessions>/<sid>/` (settings.sessions_root),
+whatever its agent. It was `<agents dir>/sessions/`, or
+`<agent>/home/sessions/` when that existed; the old flat agents folder's
+`sessions` is a symlink to the sessions root. `$SESSIONS_DIR` still
+overrides.
+
+AGENTS_DIR moves the agent-file lookup here and nothing else: the agent
+leaf, an agent's home (`agent_home`, a SESSION_HOME) and the settings
+reader's agent file (`agent_config`) never read it.
 """
 
 from __future__ import annotations
@@ -27,14 +33,17 @@ from sessiontools import settings as _settings
 from sessiontools.start.errors import EXIT_USAGE, LaunchError
 
 AGENTS_DIR_ENV = "AGENTS_DIR"
-DEFAULT_AGENTS_DIR = "~/.session/agents"
-#: The new agents folder under the session root (4.2): `agent/config/`.
+#: The pre-4.2 flat agents folder, `~/` + its path under HOME, for importers.
+DEFAULT_AGENTS_DIR = f"~/{_settings.SESSION_DIR}/{_settings.OLD_AGENTS_DIR}"
+#: The agents folder under the OLD root (4.2): `agent/config/`, for importers.
+#: agents_root joins `config` to the agent leaf (settings.agent_root).
 AGENT_CONFIG_DIR = ("agent", "config")
 # One root for every session's directory (task 4.1): the settings reader's
 # `sessiontools.settings.sessions_root` computes it, and `sessions_root`
 # below is that, as a str. These two names stay for their importers.
 SESSIONS_DIR_ENV = _settings.SESSIONS_DIR_ENV
-DEFAULT_SESSIONS_DIR = (".session", "sessions")
+#: The sessions leaf's OLD path under HOME, for importers.
+DEFAULT_SESSIONS_DIR = (_settings.SESSION_DIR, "sessions")
 
 # The agent that means "none" on a command line that goes on to carry a
 # first message or vendor flags: argparse hands the first bare word to the
@@ -64,18 +73,17 @@ BARE_AGENT = Agent(name="", file="", directory="", home="")
 
 
 def agents_root(environ: Mapping[str, str] | None = None) -> str:
-    """`$AGENTS_DIR`, else `~/.session/agent/config` once it
-    exists, else the old
-    `~/.session/agents`, which keeps a symlink per agent after the move."""
+    """`$AGENTS_DIR`, else the agent leaf's `config/` once it exists, else
+    the pre-4.2 flat folder, which keeps a symlink per agent after the move."""
     environ = os.environ if environ is None else environ
     if environ.get(AGENTS_DIR_ENV):
         return os.path.expanduser(environ[AGENTS_DIR_ENV])
-    config = os.path.join(str(_settings.session_root(environ)), *AGENT_CONFIG_DIR)
+    config = os.path.join(str(_settings.agent_root(environ)), AGENT_CONFIG_DIR[-1])
     if os.path.isdir(config):
         return config
     # The same HOME as the branch above:
     # a caller passing a foreign HOME gets that HOME's old folder.
-    return str(_settings.session_root(environ) / "agents")
+    return str(_settings.legacy_agents_dir(environ))
 
 
 def resolve_agent(name: str, root: str | None = None,
@@ -183,7 +191,7 @@ def agent_subject(agent: Agent) -> str:
 
 def sessions_root(agent: Agent, root: str | None = None,
                   environ: Mapping[str, str] | None = None) -> str:
-    """`$SESSIONS_DIR`, else `$HOME/.session/sessions`: one root whatever the
+    """settings.sessions_root (`$SESSIONS_DIR`, else the sessions leaf): one root whatever the
     agent (task 4.1). `agent` and `root` no longer move it; they are kept so
     no caller changes. HOME is read from `environ`, as the settings reader
     reads it, so a launch and `session settings` agree on the directory."""

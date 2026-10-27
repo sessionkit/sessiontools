@@ -6,7 +6,7 @@ differences: what it runs, the environment it gives the job, and how `on`
 proves the job is up.
 
     plist     ~/Library/LaunchAgents/<LABEL>.plist
-    log       ~/Library/Logs/sessiontools/pane-state.log
+    log       ~/.sessionkit/tools/log/pane-state.log (settings.log_dir)
     runs      <the install's own `session`> pane-state watch
 
 WHAT IT RUNS. launchd runs no shell and does no PATH lookup, so the plist
@@ -73,7 +73,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from sessiontools import pane_state
+from sessiontools import pane_state, settings
 
 #: The launchd label: the one constant. The plist's name, the launchctl
 #: target, the plist's Label and the help text all derive from it, so a
@@ -128,8 +128,12 @@ def legacy_plist_path(env: Mapping[str, str] | None = None) -> Path:
     return plist_path(env, LEGACY_LABEL)
 
 
+#: The job's log file, in the tools package's log directory.
+LOG_NAME = "pane-state.log"
+
+
 def log_path(env: Mapping[str, str] | None = None) -> Path:
-    return _home(env) / "Library" / "Logs" / "sessiontools" / "pane-state.log"
+    return settings.log_dir(settings.PACKAGES["session"], env) / LOG_NAME
 
 
 # --- what the job runs, and with what -----------------------------------------------
@@ -471,6 +475,7 @@ def cmd_status(as_json: bool) -> int:
          f"loaded {s['loaded']}" + (f", pid {s['pid']}" if s["pid"] else ""),
          _lock_line(lk),
          f"log    {s['log']}",
+         *settings.legacy_log_pointer(LOG_NAME),  # drop after 0.3.3 (the old-log pointer)
          *_legacy_note(s["legacy"]))
     if s["loaded"] and lk["held"] and not lk["ours"]:
         _say("note   another publisher holds the lock: the job exits at each start and "

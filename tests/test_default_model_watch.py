@@ -391,8 +391,16 @@ def test_launchd_is_a_plist_naming_the_absolute_session_and_the_watched_paths(
     assert data["RunAtLoad"] is True
     assert "KeepAlive" not in data
     assert data["ThrottleInterval"] == dmw.THROTTLE
-    log = str(home / "Library" / "Logs" / "sessiontools" / "default-model.log")
+    log = str(home / ".sessionkit" / "tools" / "log" / "default-model.log")
     assert data["StandardOutPath"] == data["StandardErrorPath"] == log
+
+
+def test_log_path_is_the_tools_log_dir_under_home(tmp_path):
+    env = {"HOME": str(tmp_path)}
+    assert dmw.log_path(env) == tmp_path / ".sessionkit" / "tools" / "log" / "default-model.log"
+    from sessiontools import settings
+    assert dmw.log_path(env).parent == settings.log_dir(settings.PACKAGES["session"], env)
+    assert not dmw.log_path(env).parent.exists()          # a print verb's path, never made
 
 
 def test_launchd_watches_the_pin_files_too(home, claude, capsys, no_service_manager):
@@ -553,7 +561,8 @@ def test_help_gives_both_install_steps_and_run_one_pinner(capsys):
     assert f"mv {dmw.LABEL}.plist ~/Library/LaunchAgents/" in out
     assert "unit launchd > ~/Library/LaunchAgents/" not in out
     assert f"launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{dmw.LABEL}.plist" in out
-    assert "mkdir -p ~/Library/Logs/sessiontools" in out
+    assert "mkdir -p ~/.sessionkit/tools/log" in out
+    assert "Library/Logs" not in out                 # the old dir, gone from the help (ST-263)
     assert f"systemctl --user enable --now {dmw.SYSTEMD_PATH_UNIT}" in out
     assert "Run one pinner" in " ".join(out.split())
     assert "nothing here installs or loads one" in " ".join(out.split())

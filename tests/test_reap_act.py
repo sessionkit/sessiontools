@@ -12,6 +12,7 @@ import dataclasses
 import json
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 from git_support import hermetic_env
@@ -110,7 +111,7 @@ def swap(fleet: Fleet, row, **changes):
 
 
 def log_lines():
-    path = snapshot.state_dir() / "reap.log"
+    path = Path(os.environ["HOME"]) / ".sessionkit/tools/log/reap.log"
     return path.read_text().splitlines() if path.exists() else []
 
 
@@ -620,16 +621,40 @@ def test_the_worktree_half_asks_for_the_top_first(tmp_path):
                               "--ignore-submodules=none"]
 
 
-def test_log_act_never_raises_when_the_state_dir_cannot_be_written(tmp_path, monkeypatch,
-                                                                   capsys):
+def test_log_act_never_raises_when_the_log_dir_cannot_be_written(tmp_path, monkeypatch,
+                                                                 capsys):
     blocker = tmp_path / "file"
     blocker.write_text("x")
-    monkeypatch.setenv("SESSION_STATE_DIR", str(blocker / "state"))
+    monkeypatch.setenv("HOME", str(blocker / "home"))
     f = Fleet()
     row = f.seat(task_dir(tmp_path))
     v = reap.Verdict(row, 2 * HOUR, reap.CLOSE, "x")
     reap.log_act(reap.Act(v, reap.CLOSED, "x"))
     assert "reap.log not written" in capsys.readouterr().err
+
+
+# --- ST-263: reap.log moves to the tools log root -------------------------------------------
+
+def test_reap_log_lands_in_the_log_root_and_the_state_dir_is_unchanged(tmp_path, monkeypatch):
+    """`~/.sessionkit/tools/log/reap.log` under HOME, from settings.log_dir;
+    snapshot.state_dir() still answers SESSION_STATE_DIR, and the act writes
+    no reap.log there."""
+    from sessiontools import settings
+    home = tmp_path / "h"
+    state = tmp_path / "state"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("SESSION_STATE_DIR", str(state))
+    f = Fleet()
+    row = f.seat(task_dir(tmp_path))
+    v = reap.Verdict(row, 2 * HOUR, reap.CLOSE, "x")
+    reap.log_act(reap.Act(v, reap.CLOSED, "why"), now=NOW)
+    log = home / ".sessionkit" / "tools" / "log" / "reap.log"
+    assert log == settings.log_dir(settings.PACKAGES["session"]) / "reap.log"
+    fields = log.read_text().splitlines()[0].split("\t")
+    assert fields[5:] == ["closed", "why"]
+    assert snapshot.state_dir() == state                # unchanged: it still follows the env
+    assert not (state / "reap.log").exists()            # and the act no longer writes there
+    assert not (home / "Library").exists()              # nothing under ~/Library/Logs
 
 
 # --- ST-146 do-004: the hardening (R1, R2, m1, m2, m10) -------------------------------------

@@ -179,9 +179,16 @@ key names. Any other key is named on stderr and dropped.
 | `statusLine.padding` | integer, 0 or more | none | Claude Code's status line padding. | all five |
 | `statusLine.refreshInterval` | integer, 1 or more | none | Claude Code's status line refresh interval. | all five |
 | `statusLine.hideVimModeIndicator` | boolean | none | Claude Code's vim mode indicator switch. | all five |
+| `tui` | string | `default`, when nothing else names `tui` | Claude Code's renderer (`default` or `fullscreen`). Naming it, here or in Claude's own settings, stops the fullscreen offer. | all five |
 
-- **With no `claude-code` file anywhere**, `session start` adds no
-  `--settings` of its own.
+- **The launcher's `tui` default** is added only when no layer, no
+  typed `--settings` and none of Claude Code's own settings files (the
+  user's, and the working directory's `.claude/settings.json` and
+  `.claude/settings.local.json`) names `tui`. Those files are read,
+  never written.
+- **With no `claude-code` file anywhere**, `session start` adds a
+  `--settings` holding only that default. When your own Claude settings
+  name `tui`, it adds none.
 - **A `--settings` typed on the command line** is folded in on top:
   its keys win over every layer, except a key a lower file locks with
   `_locked`. Claude Code still gets one `--settings` file.

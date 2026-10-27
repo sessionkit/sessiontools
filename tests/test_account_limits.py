@@ -114,7 +114,7 @@ def test_unset_is_todays_text_and_json_adds_only_the_reason(down, capsys):
     down.write(gauge())                         # a file that nobody names is not read
     assert down.line() == f"usage: unavailable ({NO_EXPORTER})"
     data = down.json()
-    assert list(data) == ["host", "seat", "usage", "usage_unavailable"]
+    assert list(data) == ["host", "seat", "usage", "usage_unavailable", "profile"]
     assert data["host"]["via"] == "Keychain, fp match"
     assert data["seat"] == {"name": data["host"]["name"], "via": "follows the host"}
     assert data["usage"] is None and data["usage_unavailable"] == NO_EXPORTER
@@ -142,9 +142,9 @@ def test_the_file_answers_when_the_exporter_is_down(down, capsys):
         "source": "limits_file", "file": str(down.path), "label": "usage of the host account",
         "written_at": st._iso(NOW - 120), "age_seconds": 120, "stale": False,
         "windows": [{"window": "5h", "account": None, "percent": 3.0, "expired": False,
-                     "resets_at": st._iso(FIVE_RESET)},
+                     "stale": False, "age_seconds": 120, "resets_at": st._iso(FIVE_RESET)},
                     {"window": "7d", "account": None, "percent": 1.0, "expired": False,
-                     "resets_at": st._iso(WEEK_RESET)}]}
+                     "stale": False, "age_seconds": 120, "resets_at": st._iso(WEEK_RESET)}]}
     down.world.assert_no_leak(capsys)
 
 
@@ -178,7 +178,8 @@ def test_the_exporter_answers_first_and_the_file_is_never_opened(tmp_path, monke
 
     monkeypatch.setattr(lm, "limits_setting", boom)
     monkeypatch.setattr(lm, "read_limits", boom)
-    assert found.line(resets=False) == "usage: 5h 75%, 7d 52.5%  (usage of the live account)"
+    assert found.line(resets=False) == \
+        "usage: 5h 75%, 7d 52.5%  (usage of the live account, age not reported by the exporter)"
     data = found.json()
     assert "usage_unavailable" not in data and "source" not in data["usage"]
     found.world.assert_no_leak(capsys)
@@ -238,12 +239,15 @@ def test_a_window_whose_reset_has_passed_shows_no_percent(tmp_path, capsys):
     down = Gauge(make_world(tmp_path / "pytest-5388", metrics=None))
     down.write(gauge(age=6 * 3600, five=88, five_reset=NOW - 3600))
     down.setting()
-    # The reset is already said, so the expired window takes no reset clause in text.
-    assert down.line() == (f"usage: 5h reset since written, 7d 1%{R7}  "
+    # The expired window reads as the exporter's does: STALE, when it ended, and how
+    # long ago; its figure is withheld and it takes no reset clause.
+    assert down.line() == (f"usage: 5h STALE: window ended {st._iso(NOW - 3600)} (1h ago), "
+                           f"figure not shown, 7d 1%{R7}  "
                            "(usage of the host account, limits file, STALE: 6h old)")
     data = down.json()
     windows = data["usage"]["windows"]
     assert windows[0] == {"window": "5h", "account": None, "percent": None, "expired": True,
+                          "stale": True, "age_seconds": 6 * 3600,
                           "resets_at": st._iso(NOW - 3600)}
     assert windows[1]["percent"] == 1.0 and windows[1]["expired"] is False
     # The expired 88 is carried by no field. Checked leaf by leaf, never as a substring
@@ -574,3 +578,26 @@ def test_read_limits_never_raises_and_names_no_content(tmp_path):
     path.write_text(json.dumps({"five_hour": {"used_percentage": secret}, "written_at": NOW}))
     usage = lm.read_limits(path, NOW)
     assert usage.unavailable is not None and secret not in usage.unavailable
+
+
+def test_a_window_over_a_week_ago_reads_as_the_exporter_says_it(tmp_path, capsys):
+    """One rendering for both sources: the limits file's ended window is the
+    exporter's text, word for word, and `--json` marks it stale on both."""
+    ended = NOW - 7 * 86400
+    down = Gauge(make_world(tmp_path, metrics=None))
+    down.write(gauge(five=None, week=97, week_reset=ended))
+    down.setting()
+    said = f"7d STALE: window ended {st._iso(ended)} (7d ago), figure not shown"
+    assert down.line() == f"usage: {said}  (usage of the host account, limits file, 2m old)"
+    [row] = down.json()["usage"]["windows"]
+    assert (row["expired"], row["stale"], row["percent"]) == (True, True, None)
+
+    (tmp_path / "up").mkdir()
+    up = Gauge(make_world(tmp_path / "up", metrics=(
+        'claude_plan_usage_percent{window="7d"} 97\n'
+        f'claude_plan_window_reset_timestamp_seconds{{window="7d"}} {ended:.0f}\n')))
+    assert up.line().startswith(f"usage: {said}  (usage of the live account")
+    [row] = up.json()["usage"]["windows"]
+    assert (row["expired"], row["stale"], row["percent"]) == (True, True, None)
+    for gauge_ in (down, up):
+        gauge_.world.assert_no_leak(capsys)

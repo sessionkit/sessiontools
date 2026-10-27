@@ -27,6 +27,9 @@ from sessiontools.start.errors import LaunchError
 SID = "11111111-2222-3333-4444-555555555555"
 TOOL = "claude-code"
 FM = "claude:\n  effort: high\n"
+#: The launcher's default when nothing names Claude's renderer: these test
+#: HOMEs have no ~/.claude, so every door carries it.
+TUI = {"tui": "default"}
 
 
 def w(path: Path, obj) -> Path:
@@ -37,6 +40,11 @@ def w(path: Path, obj) -> Path:
 
 def host_file(home: Path) -> Path:
     return host(home, TOOL) / f"{TOOL}.json"
+
+
+def chose_a_renderer(home: Path) -> None:
+    """The user ran `/tui fullscreen`: their own file names `tui`."""
+    w(home / ".claude" / "settings.json", {"tui": "fullscreen"})
 
 
 @pytest.fixture
@@ -236,7 +244,7 @@ def test_a_crew_settings_is_folded_into_one_door(tmp_path, scratch, capsys, spel
     tail = (("--settings", str(crew)) if spelling == "two" else (f"--settings={crew}",))
     p = plan(tmp_path, scratch, argv_tail=(*tail, "--model", "fake-cli"))
     assert door(p) == {"effortLevel": "fake-e", "model": "fake-crew",
-                       "claudeMdExcludes": ["fake/x"]}
+                       "claudeMdExcludes": ["fake/x"], **TUI}
     assert str(crew) not in [str(t) for t in p.argv]
     assert not any(str(t).startswith("--settings=") for t in p.argv)
     # The CLI --model still rides after the door, where claude makes it win.
@@ -251,7 +259,7 @@ def test_a_host_lock_beats_the_crew_at_launch(tmp_path, scratch):
     w(host_file(scratch), {"model": "fake-host", "_locked": ["model"]})
     crew = w(tmp_path / "crew.json", {"model": "fake-crew"})
     p = plan(tmp_path, scratch, argv_tail=("--settings", str(crew)))
-    assert door(p) == {"model": "fake-host"}
+    assert door(p) == {"model": "fake-host", **TUI}
     assert door_source(p).startswith("computed: claude-code settings: model from host ")
 
 
@@ -259,7 +267,7 @@ def test_a_relative_crew_settings_is_read_under_the_working_directory(tmp_path, 
     w(host_file(scratch), {"model": "fake-host"})
     w(tmp_path / "work" / "crew.json", {"effortLevel": "fake-work"})
     p = plan(tmp_path, scratch, argv_tail=("--settings", "crew.json"))
-    assert door(p) == {"model": "fake-host", "effortLevel": "fake-work"}
+    assert door(p) == {"model": "fake-host", "effortLevel": "fake-work", **TUI}
 
 
 def test_a_dry_run_folds_and_names_the_file(tmp_path, scratch):
@@ -272,17 +280,40 @@ def test_a_dry_run_folds_and_names_the_file(tmp_path, scratch):
 
 
 def test_with_no_claude_code_file_the_crew_settings_is_not_read(tmp_path, scratch, capsys):
-    """No computed door: the argv is as before, and the crew file is not
-    even opened (it does not exist here)."""
+    """No computed door (no `claude-code` file, and the user's own settings
+    name `tui`): the argv is as before, and the crew file is not even
+    opened (it does not exist here)."""
+    chose_a_renderer(scratch)
     p = plan(tmp_path, scratch, argv_tail=("--settings", "no-such.json"))
     assert p.argv[p.argv.index("--settings") + 1] == "no-such.json"
     assert p.argv.count("--settings") == 1
     assert "claude-code" not in capsys.readouterr().err
 
 
+def test_with_no_claude_code_file_the_crew_settings_is_folded_for_the_tui_default(
+        tmp_path, scratch, capsys):
+    """A fresh host: no `claude-code` file, no renderer chosen. The door
+    exists for the `tui` default, so the crew file is folded into it, as on
+    a host that has a `claude-code` file."""
+    crew = w(tmp_path / "crew.json", {"model": "fake-crew"})
+    p = plan(tmp_path, scratch, argv_tail=("--settings", str(crew)))
+    assert door(p) == {"model": "fake-crew", **TUI}
+    assert p.argv.count("--settings") == 1 and str(crew) not in p.argv
+    assert "claude-code" not in capsys.readouterr().err
+
+
+def test_a_crew_settings_that_names_tui_wins_over_the_default(tmp_path, scratch):
+    crew = w(tmp_path / "crew.json", {"tui": "fullscreen"})
+    p = plan(tmp_path, scratch, argv_tail=("--settings", str(crew)))
+    assert door(p) == {"tui": "fullscreen"}
+    assert f"tui from {cs.PASSTHROUGH} {crew}" in door_source(p)
+
+
 def test_a_fold_with_nothing_to_render_keeps_the_crew_tokens(tmp_path, scratch, capsys):
     """The fold leaves no data (the host has only a key v1 does not render,
-    the crew file is empty): no door, and claude reads the crew file alone."""
+    the crew file is empty, and the user's settings name `tui`, so there
+    is no default either): no door, and claude reads the crew file alone."""
+    chose_a_renderer(scratch)
     w(host_file(scratch), {"theme": "fake"})
     crew = w(tmp_path / "crew.json", {})
     p = plan(tmp_path, scratch, argv_tail=("--settings", str(crew)))
@@ -364,7 +395,8 @@ def test_a_live_launch_writes_the_folded_file(tmp_path):
     path = Path(argv[argv.index("--settings") + 1])
     assert path.parent.name == "launch"
     assert json.loads(path.read_text()) == {"claudeMdExcludes": ["fake/x"],
-                                            "effortLevel": "fake-e", "model": "fake-crew"}
+                                            "effortLevel": "fake-e", "model": "fake-crew",
+                                            **TUI}
     assert json.loads(crew.read_text()) == {"model": "fake-crew",
                                             "claudeMdExcludes": ["fake/x"]}   # untouched
 
@@ -433,15 +465,33 @@ def test_the_rehearsal_refuses_before_the_mint(tmp_path, scratch, monkeypatch, t
 
 
 def test_with_no_claude_code_file_a_missing_crew_settings_still_launches(tmp_path):
-    """No fold, no rehearsal: with no claude-code file anywhere, the crew's
-    `--settings` goes to claude as given, even one that does not exist."""
+    """No fold, no rehearsal: with no claude-code file anywhere and a
+    renderer chosen (no `tui` default), the crew's `--settings` goes to
+    claude as given, even one that does not exist."""
     home = tmp_path / "scratch-home"
     home.mkdir()
+    chose_a_renderer(home)
     result, record, _work = launch_e2e(tmp_path, "scout", "--settings", "nope.json",
                                        extra_env={"HOME": str(home)})
     assert result.returncode == 0, result.stderr
     argv = recorded_argv(record)
     assert argv[argv.index("--settings") + 1] == "nope.json"
+
+
+def test_on_a_fresh_host_a_missing_crew_settings_is_refused_before_the_mint(tmp_path):
+    """No claude-code file and no renderer chosen: the door carries the
+    `tui` default, so the crew file is folded, and one that cannot be read
+    is refused (exit 2) before anything is minted, as on any host with a
+    claude-code file."""
+    home = tmp_path / "scratch-home"
+    home.mkdir()
+    result, record, _work = launch_e2e(tmp_path, "scout", "--settings", "nope.json",
+                                       extra_env={"HOME": str(home)})
+    assert result.returncode == 2, result.stdout
+    assert "nope.json" in result.stderr and "cannot be read" in result.stderr
+    assert not (record / "argv").exists()
+    sessions = tmp_path / "agents" / "sessions"
+    assert not sessions.exists() or not list(sessions.iterdir()), "minted an identity"
 
 
 def test_a_resume_rehearses_the_fold_before_the_mint(tmp_path, scratch, monkeypatch, capsys):

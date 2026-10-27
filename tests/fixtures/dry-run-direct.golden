@@ -14,6 +14,8 @@ command:
   <TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md  <- computed: injected context (system prompt)
   --plugin-dir                                  <- computed: the agent's own definition, so --agent resolves from any directory
   <TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin  <- computed: the agent's own definition, so --agent resolves from any directory
+  --settings                                    <- computed: claude-code settings: tui from the launcher default (no settings file sets it)
+  <TMP>/home/.session/sessions/<SESSION-ID>/launch/settings.json  <- computed: claude-code settings: tui from the launcher default (no settings file sets it)
   --agent                                       <- computed: identity door (the agent named on the command line)
   scout                                         <- computed: identity door (the agent named on the command line)
   --effort                                      <- front matter: claude: effort
@@ -30,7 +32,7 @@ secrets:  (dry run: backends not called, no file written)
   DEMO_TOKEN  <- pass:demo/token
 launch script:
   # session start: launch script (generated; do not edit)
-  unset CLAUDE_CODE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_SESSION_AGENT_SOCK CLAUDE_SESSION_AGENT_PID CLAUDE_SESSION_PUB GIT_CONFIG_COUNT SESSIONTOOLS_LAUNCH_INFO ${!GIT_CONFIG_KEY_@} ${!GIT_CONFIG_VALUE_@} CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+  unset CLAUDE_CODE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_SESSION_AGENT_SOCK CLAUDE_SESSION_AGENT_PID CLAUDE_SESSION_PUB GIT_CONFIG_COUNT SESSIONTOOLS_LAUNCH_INFO CLAUDE_CODE_AGENT ${!GIT_CONFIG_KEY_@} ${!GIT_CONFIG_VALUE_@} CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
   __ss_shred() { rm -f <TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env; }
   trap __ss_shred EXIT HUP INT TERM
   # session identity
@@ -57,12 +59,14 @@ launch script:
   <PYTHON> -I -c 'import sys; from sessiontools.settings import birth_main; sys.exit(birth_main())' --dir <TMP>/home/.session/sessions/<SESSION-ID> || :
   # launch record: env (secrets masked), command, startup files
   # -> <TMP>/home/.session/sessions/<SESSION-ID>/launch/ (written once, 0600, git-ignored)
-  <PYTHON> -I -c 'import sys; from sessiontools.start.record import main; sys.exit(main())' --dir <TMP>/home/.session/sessions/<SESSION-ID> --start-command '<PYTHON> -m sessiontools.cli start --dry-run scout review the auth' --cwd <TMP>/work --file agent-file=<TMP>/agents/scout.md --file system-prompt=<TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md --file plugin=<TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin --file secrets=<TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env --secret DEMO_TOKEN -- claude --session-id <SESSION-ID> --append-system-prompt-file <TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md --plugin-dir <TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin --agent scout --effort high --add-dir /shared/tools -- '<!-- source: echo golden briefing -->
+  <PYTHON> -I -c 'import sys; from sessiontools.start.record import main; sys.exit(main())' --dir <TMP>/home/.session/sessions/<SESSION-ID> --start-command '<PYTHON> -m sessiontools.cli start --dry-run scout review the auth' --cwd <TMP>/work --file agent-file=<TMP>/agents/scout.md --file system-prompt=<TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md --file plugin=<TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin --file settings=<TMP>/home/.session/sessions/<SESSION-ID>/launch/settings.json --file secrets=<TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env --secret DEMO_TOKEN -- claude --session-id <SESSION-ID> --append-system-prompt-file <TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md --plugin-dir <TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin --settings <TMP>/home/.session/sessions/<SESSION-ID>/launch/settings.json --agent scout --effort high --add-dir /shared/tools -- '<!-- source: echo golden briefing -->
   golden briefing
   
   review the auth
   ' || :
-  exec claude --session-id <SESSION-ID> --append-system-prompt-file <TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md --plugin-dir <TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin --agent scout --effort high --add-dir /shared/tools -- '<!-- source: echo golden briefing -->
+  # identity block: who this session is, at launch -> <session dir>/identity.md (0600, never argv)
+  <PYTHON> -I -c 'import sys; from sessiontools.start.boot_identity import main; sys.exit(main())' --dir <TMP>/home/.session/sessions/<SESSION-ID> --self-pid "$$" || :
+  exec claude --session-id <SESSION-ID> --append-system-prompt-file <TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md --plugin-dir <TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin --settings <TMP>/home/.session/sessions/<SESSION-ID>/launch/settings.json --agent scout --effort high --add-dir /shared/tools -- '<!-- source: echo golden briefing -->
   golden briefing
   
   review the auth

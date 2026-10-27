@@ -6,6 +6,7 @@
     session start --idle <agent>           boot self-directed, run no generators
     session start --converse <agent>       tell the agent this session can speak
     session start --in-tmux <agent>        in a new tmux window, not in place
+                                           (outside tmux: in session `agents`)
     session start <agent> review the auth  trailing words = the first message
 
 The agent's own front matter IS the launch configuration: native keys reach
@@ -31,9 +32,15 @@ package does not carry it.
 THE FRONT DOOR (`holders`). A hand launch - no claude
 `-n`/`--name` - of an agent a live Claude Code session already holds is
 refused before anything is minted, naming the holder and its age;
-`--allow-second-holder` launches anyway, saying so. A session in the
-launcher's own tmux pane (`$TMUX_PANE`) is being replaced, not doubled
-(a `respawn-pane -k`), and holds nothing.
+`--allow-second-holder` launches anyway, saying so. A holder is a live
+sidecar or a live claim. A session in the launcher's own tmux pane
+(`$TMUX_PANE`) is being replaced, not doubled, only on the direct path and
+only when it is not the launcher's ancestor (a `respawn-pane -k`); a tmux
+placement, or a start nested in the holder's own shell, replaces nothing.
+A free agent is CLAIMED under its lock before the exec (`door_start`), so
+two near-simultaneous launches give one holder; on the tmux path the claim
+moves to the new pane's process after placement. A lock or a claim that
+cannot be had warns once and launches with no claim.
 
 THE DEFAULT SEAT (`default_seat`). A bare `session start` - no
 agent named - takes the host's one default seat, named for the vendor, when
@@ -67,6 +74,7 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import NamedTuple
 
+from sessiontools import procs
 from sessiontools.start import default_seat, holders
 from sessiontools.start.agents import NO_AGENT, list_agent_rows, list_agents
 from sessiontools.start.args import parse_args
@@ -84,6 +92,7 @@ from sessiontools.start.homefolder import home_folder_notice, offer_work_folder
 from sessiontools.start.identity import SessionIdentity
 from sessiontools.start.placement import (
     check_placeable,
+    default_session,
     parse_tmux_target,
     place_in_tmux,
     receipt,
@@ -99,6 +108,7 @@ from sessiontools.start.plan import (
     resolve,
 )
 from sessiontools.start.run import (
+    check_terminal,
     default_window_name,
     execute,
     render_dry_run_report,
@@ -126,12 +136,18 @@ def main(argv: list[str]) -> int:
         session, window = parse_tmux_target(args.tmux_target)
         switch = False
         if in_tmux:
-            # Both tmux usage refusals BEFORE anything is minted or written.
-            # `--switch --no-switch` first: it is wrong wherever it was
-            # typed, while "nowhere to place" also depends on the
-            # environment, so the more specific complaint wins.
+            # The usage refusal BEFORE anything is minted or written. With
+            # no target typed, a caller outside tmux places into the default
+            # session (created detached if it is missing), so the guard
+            # after it holds for the library's sake and never fires here.
             switch = should_switch(args.switch, args.no_switch)
+            session = default_session(session)
             check_placeable(session)
+        else:
+            # In place, the vendor runs on this process's stdio; with no
+            # terminal there it cannot be interactive. Refused before the
+            # seat's gates, claim and mint. A tmux pane has its own.
+            check_terminal(args.rest, args.dry_run)
         seat = door = None
         try:
             if args.agent is None or args.agent == default_seat.word():
@@ -147,18 +163,20 @@ def main(argv: list[str]) -> int:
                 launch = resolve(args)
                 # THE FRONT DOOR: after resolve (it names the agent),
                 # before mint - a refusal leaves nothing minted, written or placed.
-                door = front_door(launch.agent.name, launch.cli_args, launch.environ)
-                if not args.dry_run:
-                    enforce(door, args.allow_second_holder, warn=_warn)
-                elif door is not None and door.unmeasured:
-                    _warn(f"the second-holder check could not run: {door.unmeasured}")
+                # A free agent is claimed here, under its lock; the claim's
+                # SeatStart rides as `seat` so the tmux path re-points it.
+                door, seat = door_start(args, launch, in_tmux)
                 if args.agent == NO_AGENT:
                     _resumed(launch, in_tmux)
-                # THE HOME-FOLDER OFFER: after the front door (a refused launch
-                # is asked nothing), before mint (Ctrl-C at the question leaves
-                # nothing minted). Only at a terminal, in the home folder itself.
-                launch, noticed = _offer(launch)
-                minted = mint(launch)
+                if seat is not None:
+                    launch, minted, noticed = seat.launch, seat.minted, seat.noticed
+                else:
+                    # THE HOME-FOLDER OFFER: after the front door (a refused
+                    # launch is asked nothing), before mint (Ctrl-C at the
+                    # question leaves nothing minted). Only at a terminal, in
+                    # the home folder itself.
+                    launch, noticed = _offer(launch)
+                    minted = mint(launch)
         except _Interrupted:
             print(file=sys.stderr)
             return EXIT_INTERRUPTED
@@ -387,6 +405,85 @@ def named_seat_start(args: argparse.Namespace, in_tmux: bool,
     return SeatStart(launch, mint(launch), noticed=noticed)
 
 
+def door_start(args: argparse.Namespace, launch: Launch, in_tmux: bool,
+               warn: Callable[[str], None] = _warn,
+               offer: Offer = _offer) -> tuple[holders.Door | None, SeatStart | None]:
+    """THE FRONT DOOR for a named agent that is not the seat word: (the
+    door, the claimed start or None).
+
+    The door does not apply to a plain session or a spawner's `-n` launch:
+    (None, None). A dry run reads the door (the claim and the sidecars,
+    under the narrow own-pane rule) and takes no lock, writes nothing. A
+    live launch takes the AGENT's lock (`holders.locked`) and, under it,
+    runs the door: a measured live holder refuses (exit 3), or with
+    `--allow-second-holder` starts beside it and takes no claim. A free
+    agent is claimed for this pid (`via` the front door) before the lock is
+    let go; then the home-folder offer, the mint and the claim again with
+    the minted id (`_finish`). The door's rule is fail OPEN, loudly: a lock
+    that cannot be had, a claim that cannot be written, or a name that
+    cannot carry one warns once and launches with no claim, and a door
+    that could not measure warns once (`enforce`) and takes none."""
+    agent = launch.agent.name
+    environ = launch.environ
+    direct = not in_tmux
+    allowed = bool(args.allow_second_holder)
+    if args.dry_run:
+        door = front_door(agent, launch.cli_args, environ, direct=direct)
+        if door is not None and door.unmeasured:
+            warn(f"the second-holder check could not run: {door.unmeasured}")
+        return door, None
+    if not agent or holders.names_the_seat(launch.cli_args):
+        return None, None
+    try:
+        holders.claim_paths(agent, environ)
+    except ValueError as error:
+        door = front_door(agent, launch.cli_args, environ, direct=direct)
+        enforce(door, allowed, warn=warn)
+        if not door.held and not door.unmeasured:
+            warn(_no_claim_line(agent, str(error)))
+        return door, None
+    table = _once(procs.table)
+    resumed = (launch.resume.session_id or None) if launch.resume is not None else None
+    with holders.locked(agent, environ) as lock:
+        door = front_door(agent, launch.cli_args, environ, table=table, direct=direct)
+        enforce(door, allowed, warn=warn)
+        if door.held or door.unmeasured:
+            return door, None
+        if not lock.ok:
+            claimed = lock.why
+        else:
+            try:
+                fields = default_seat.claim_fields(resumed, os.getpid(), table(), environ,
+                                                   via=default_seat.VIA_DOOR)
+            except Exception as error:   # noqa: BLE001 - fail open on ANY failure, loudly
+                claimed = (_unwritten(error) if isinstance(error, OSError)
+                           else f"the process table could not be read ({error})")
+            else:
+                claimed = _claim(agent, fields, environ)
+    if isinstance(claimed, str):
+        warn(_no_claim_line(agent, claimed))
+        return door, None
+    return door, _finish(agent, launch, claimed, resumed, environ, warn, offer)
+
+
+def _no_claim_line(agent: str, why: str) -> str:
+    """The front door's one fail-open line when a free agent's claim cannot
+    be taken."""
+    return (f"{agent}'s claim could not be taken ({why}) -- launching with no claim, "
+            "so a second launch starting now is not held off")
+
+
+def _once(table: Callable[[], dict]) -> Callable[[], dict]:
+    """TABLE, read at most once: the door and the claim share one read."""
+    read: dict = {}
+
+    def once() -> dict:
+        if "procs" not in read:
+            read["procs"] = table()
+        return read["procs"]
+    return once
+
+
 def _respect(seat: str, args: argparse.Namespace, launch: Launch, holder, hand: bool,
              allowed: bool, environ: Mapping[str, str],
              warn: Callable[[str], None], offer: Offer = _offer) -> SeatStart:
@@ -465,8 +562,9 @@ def _unwritten(error: OSError) -> str:
 def _finish(seat: str, launch: Launch, fields: dict, session_id: str | None,
             environ: Mapping[str, str], warn: Callable[[str], None],
             offer: Offer) -> SeatStart:
-    """After the claim, with the seat's lock let go: the home-folder offer,
-    the mint, then the claim again with the minted id."""
+    """After the claim, with SEAT's lock let go (the default seat's, or a
+    named agent's at the front door): the home-folder offer, the mint, then
+    the claim again with the minted id."""
     launch, noticed = offer(launch)
     minted = mint(launch)
     claim = _record_id(seat, fields, minted, session_id, fields["pid"], environ, warn)
@@ -504,8 +602,12 @@ def _record_id(seat: str, fields: dict, minted, session_id: str | None, pid: int
     if why is not None:
         # The first claim stands: it holds the seat by this pid; only the
         # id is missing, and a reader finds it from the sidecar.
-        warn(f"the default seat's claim could not record the session id "
-             f"({why}); it still holds the seat by pid {pid}")
+        if seat == default_seat.word():
+            warn(f"the default seat's claim could not record the session id "
+                 f"({why}); it still holds the seat by pid {pid}")
+        else:
+            warn(f"{seat}'s claim could not record the session id ({why}); "
+                 f"it still holds {seat} by pid {pid}")
         return fields
     return rewritten
 
@@ -526,15 +628,22 @@ def _resumed(launch: Launch, in_tmux: bool, warn: Callable[[str], None] = _warn)
 
 def _repoint(start: SeatStart, plan: LaunchPlan, placed,
              warn: Callable[[str], None] = _warn) -> None:
-    """The tmux path: the claim moves from this launcher to the new pane."""
+    """The tmux path: the claim moves from this launcher to the new pane,
+    for the agent the claim holds (the default seat, or a named agent the
+    front door claimed): the launch's own agent word."""
     if start.claim is None:
         return
-    seat = default_seat.word()
+    agent = start.launch.agent.name
     sid = plan.identity.session_id if plan.identity is not None else None
-    why = default_seat.repoint(seat, start.claim, placed.pane_pid, placed.pane_id, sid,
+    why = default_seat.repoint(agent, start.claim, placed.pane_pid, placed.pane_id, sid,
                                start.launch.environ)
-    if why:
-        warn(default_seat.repoint_failed_line(seat, why))
+    if not why:
+        return
+    if agent == default_seat.word():
+        warn(default_seat.repoint_failed_line(agent, why))
+    else:
+        warn(f"placed, but {agent}'s claim could not move to the new pane ({why}); "
+             f"{agent} reads free until that session writes its sidecar")
 
 
 __all__ = [

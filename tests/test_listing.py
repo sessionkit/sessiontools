@@ -54,8 +54,8 @@ def test_rows_are_the_live_sessions_with_their_panes(fleet):
 
 def test_json_carries_every_key_callers_read_and_nulls_what_is_not_ported(fleet):
     row = json.loads(listing.render_json(listing.rows(), now=NOW))[0]
-    assert list(row) == ["session_id", "short", "pid", "name", "agent", "status", "state", "repo",
-                         "project", "cwd", "version", "tmux_pane", "tmux_socket",
+    assert list(row) == ["session_id", "short", "pid", "name", "seat", "agent", "status", "state",
+                         "repo", "project", "cwd", "version", "tmux_pane", "tmux_socket",
                          "runtime_s", "idle_s", "recap", "context_used", "context_peak",
                          "context_window", "context_pct", "context_model"]
     assert (row["agent"], row["status"], row["pid"], row["tmux_pane"]) == ("bob", "busy", 100, "%11")

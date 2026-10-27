@@ -9,10 +9,11 @@ dir (it can be a versioned cache) and nothing in a deploy checkout:
               system `swiftc -O -swift-version 5`; each beside a
               `<name>.source-sha256` naming the source it was built from
     plist     ~/Library/LaunchAgents/<LABEL>.plist
-    log       ~/Library/Logs/sessiontools/sound-engine.log
+    log       ~/.sessionkit/tools/log/sound-engine.log (settings.log_dir)
 
-`<sound home>` is `sessiontools.sound.home()`:
-`$SESSIONTOOLS_SOUND_HOME`, else `~/.local/share/sessiontools/sound`.
+`<sound home>` is `sessiontools.sound.home()`, the sound leaf
+(settings.sound_root): `$SESSIONTOOLS_SOUND_HOME`, else its old folder
+while that is real, else its folder under tools' state.
 
 ON and OFF are the plist's presence plus its load. A plist in
 LaunchAgents loads again at the next login, so writing it is part of the
@@ -54,7 +55,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from sessiontools import sound
+from sessiontools import settings, sound
 
 #: The launchd label: the one constant. The plist's name, the launchctl
 #: target, the plist's Label and the help text all derive from it.
@@ -103,8 +104,12 @@ def legacy_plist_path(env: Mapping[str, str] | None = None) -> Path:
     return plist_path(env, LEGACY_LABEL)
 
 
+#: The engine's log file, in the tools package's log directory.
+LOG_NAME = "sound-engine.log"
+
+
 def log_path(env: Mapping[str, str] | None = None) -> Path:
-    return _home(env) / "Library" / "Logs" / "sessiontools" / "sound-engine.log"
+    return settings.log_dir(settings.PACKAGES["session"], env) / LOG_NAME
 
 
 def source(name: str) -> Path:
@@ -281,14 +286,29 @@ def _legacy_note(old: dict) -> list[str]:
     return [f"legacy {old['label']} still there ({what}): the next `on` or `off` retires it"]
 
 
+def engine_sessions(env: Mapping[str, str] | None = None) -> Path:
+    """The sessions root the engine reads records under: the sessions leaf
+    (settings.sessions_root) as the host resolves it, with the installer's
+    own `$SESSIONS_DIR` set aside. The engine has never followed that
+    variable, so the plist pins the host's root, never one seat's."""
+    e = dict(os.environ if env is None else env)
+    e.pop(settings.SESSIONS_DIR_ENV, None)
+    return settings.sessions_root(e)
+
+
 def plist(env: Mapping[str, str] | None = None) -> dict:
     """The agent's plist, with exactly these keys (ThrottleInterval is
-    THROTTLE). No EnvironmentVariables: the
-    records carry the mouth dir, and the sessions root defaults."""
+    THROTTLE). No EnvironmentVariables: the records carry the mouth dir,
+    and `--sessions` passes the root python resolved (engine_sessions), so
+    the engine's own default (`engine.swift`, the old root) is read only
+    under a plist written before 0.3.2: `build` rebuilds the binary without
+    rewriting the plist, so the binary keeps that default rather than refuse
+    and respawn. `on` rewrites the plist."""
     log = str(log_path(env))
     return {
         "Label": LABEL,
-        "ProgramArguments": [str(bin_dir(env) / ENGINE), "--port", str(sound.port(env))],
+        "ProgramArguments": [str(bin_dir(env) / ENGINE), "--port", str(sound.port(env)),
+                             "--sessions", str(engine_sessions(env))],
         "RunAtLoad": True,
         "KeepAlive": True,
         "ThrottleInterval": THROTTLE,
@@ -543,6 +563,7 @@ def cmd_status(as_json: bool) -> int:
          f"loaded {s['loaded']}" + (f", pid {s['pid']}" if s["pid"] else ""),
          _pong_line(s["pong"]) if s["pong"] else f"pong   none on 127.0.0.1:{s['port']}",
          f"log    {s['log']}",
+         *settings.legacy_log_pointer(LOG_NAME),  # drop after 0.3.3 (the old-log pointer)
          *_legacy_note(s["legacy"]))
     return 0
 

@@ -2,7 +2,7 @@
   "name": "sessiontools",
   "metadata": {
     "description": "Self-hosting marketplace for the sessiontools plugin: the session skill.",
-    "version": "0.3.1"
+    "version": "0.3.2"
   },
   "owner": {
     "name": "Mike Bailey",

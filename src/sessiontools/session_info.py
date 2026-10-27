@@ -1,18 +1,29 @@
 """The session-info hooks: at SessionStart, a session title that carries the
 short session id, and a short block of the session's facts as context.
 
-Both run as the plugin's SessionStart hooks (`hooks/session-info`, a POSIX
+All run as the plugin's SessionStart hooks (`hooks/session-info`, a POSIX
 shim that runs `main([verb])`), one registration per verb:
 
     title     emits `sessionTitle`: the first 8 characters of `session_id`.
     context   emits `additionalContext`: session id, working directory,
               source and transcript path, one line each.
+    identity  emits `additionalContext`: the identity block `session start`
+              wrote for this session (`identity.md`), byte for byte, the
+              same text `session identity` prints.
 
-Both are DEFAULT OFF. Each has its own switch, read from the environment
-the hook inherits:
+Title and context are DEFAULT OFF. Each has its own switch, read from the
+environment the hook inherits:
 
     SESSIONTOOLS_HOOK_TITLE          on / 1 / true / yes: the title verb runs.
     SESSIONTOOLS_HOOK_SESSION_INFO   on / 1 / true / yes: the context verb runs.
+
+Identity is ON: its switch is the file. A session `session start` did not
+launch has no block, so the verb is silent there; it costs one python
+start and one failed open. SESSIONTOOLS_HOOK_IDENTITY=off (or 0 / false /
+no) switches it off. It fires on every source: after `resume`, `clear` or
+`compact` the payload's session id names the block, and a session with a
+new id (a `clear`) has none, so it says nothing. Every fact in the block
+that can change is labelled "at launch".
 
 The shim checks the switch before python starts; `main` checks it again, so
 the module is safe to call directly.
@@ -49,12 +60,16 @@ from collections.abc import Mapping, Sequence
 
 TITLE_ENV = "SESSIONTOOLS_HOOK_TITLE"
 CONTEXT_ENV = "SESSIONTOOLS_HOOK_SESSION_INFO"
+IDENTITY_ENV = "SESSIONTOOLS_HOOK_IDENTITY"
 LAUNCH_INFO_ENV = "SESSIONTOOLS_LAUNCH_INFO"
 
 #: Any of these, in any case, switches a verb on. The shim matches the word
 #: exactly, so a value with surrounding space stays off through the hook;
 #: `switched_on` also strips it, which only a direct caller sees.
 ON_WORDS = frozenset({"on", "1", "true", "yes"})
+
+#: Any of these, in any case, switches a DEFAULT-ON verb (identity) off.
+OFF_WORDS = frozenset({"off", "0", "false", "no"})
 
 EVENT = "SessionStart"
 
@@ -75,6 +90,17 @@ SWITCHES = {"title": TITLE_ENV, "context": CONTEXT_ENV}
 
 def switched_on(env: Mapping[str, str], name: str) -> bool:
     return (env.get(name) or "").strip().lower() in ON_WORDS
+
+
+def switched_off(env: Mapping[str, str], name: str) -> bool:
+    return (env.get(name) or "").strip().lower() in OFF_WORDS
+
+
+def enabled(verb: str, env: Mapping[str, str]) -> bool:
+    """VERB may run: identity unless switched off, the others only when on."""
+    if verb == "identity":
+        return not switched_off(env, IDENTITY_ENV)
+    return verb in SWITCHES and switched_on(env, SWITCHES[verb])
 
 
 def _text(payload: Mapping[str, object], key: str) -> str:
@@ -149,7 +175,28 @@ def context_output(payload: object, env: Mapping[str, str]) -> dict | None:
     return _output(additionalContext=context_block(payload, env))
 
 
-VERBS = {"title": title_output, "context": context_output}
+def identity_output(payload: object, env: Mapping[str, str]) -> dict | None:
+    """The identity hook's JSON: the session's identity block as context, or
+    None when it should say nothing (switched off, a subagent's payload, no
+    block, or any fault reading it). The text is the file's bytes, decoded
+    as UTF-8 and never re-worded: what `session identity` prints."""
+    if switched_off(env, IDENTITY_ENV):
+        return None
+    sid = _session_id(payload)
+    if not sid:
+        return None
+    from sessiontools import identity_block
+    try:
+        data = identity_block.read_block(sid, env)
+    except identity_block.IdentityError:
+        return None
+    text = data.decode("utf-8")
+    if not text.strip():
+        return None
+    return _output(additionalContext=text)
+
+
+VERBS = {"title": title_output, "context": context_output, "identity": identity_output}
 
 
 def main(argv: Sequence[str] | None = None, stdin=None, stdout=None,
@@ -163,7 +210,7 @@ def main(argv: Sequence[str] | None = None, stdin=None, stdout=None,
         stdout = sys.stdout if stdout is None else stdout
         verb = argv[0] if argv else ""
         decide = VERBS.get(verb)
-        if decide is None or not switched_on(env, SWITCHES[verb]):
+        if decide is None or not enabled(verb, env):
             return 0            # before reading stdin: nothing asked, nothing done
         result = decide(json.loads(stdin.read() or "null"), env)
         if result is not None:

@@ -28,10 +28,10 @@ from pathlib import Path
 import pytest
 from start_support import (
     STUB_SID,
+    at_a_terminal,
     clean_env,
     launch_e2e,
     make_agents_root,
-    session_cmd,
     write_key_init_stub,
 )
 
@@ -331,7 +331,7 @@ def test_simultaneous_bare_starts_give_one_holder(tmp_path):
                                f"{os.pathsep}{os.environ['PATH']}"))
     (tmp_path / "work").mkdir()
     barrier = tmp_path / "go"
-    command = " ".join(f"'{part}'" for part in session_cmd())
+    command = " ".join(f"'{part}'" for part in at_a_terminal())
     script = f'while [ ! -e "{barrier}" ]; do sleep 0.01; done; exec {command}'
     runs = [subprocess.Popen(["sh", "-c", script], cwd=tmp_path / "work", env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

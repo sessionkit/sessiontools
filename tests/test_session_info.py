@@ -428,3 +428,178 @@ def test_the_module_imports_only_the_standard_library():
     imports = re.findall(r"^(?:from|import) ([\w.]+)", MODULE.read_text(), re.MULTILINE)
     assert {i.split(".")[0] for i in imports} <= {"__future__", "json", "os", "sys",
                                                   "collections"}, imports
+
+
+# 8. The identity verb: the block `session start` wrote, as context -------------
+#
+# ON by default; its switch is the file. The block is planted under a
+# sessions root of the test's own (SESSIONS_DIR), and the hook must emit the
+# very bytes `session identity` prints.
+
+IDENTITY_TEXT = ("# Who you are (at launch)\n\n- **Session ID**: " + SID + "\n"
+                 "- **Pane**: %271\n- **Nickname**: café ✓\n\n"
+                 "Seat-mates and call holder change after launch: re-check with "
+                 "`session list`.\n")
+
+
+@pytest.fixture
+def sessions(tmp_path: Path) -> Path:
+    root = tmp_path / "sessions"
+    root.mkdir()
+    return root
+
+
+def plant(root: Path, sid: str = SID, text: str | bytes = IDENTITY_TEXT) -> Path:
+    from sessiontools import identity_block
+    d = root / sid
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / identity_block.IDENTITY_FILE
+    path.write_bytes(text.encode() if isinstance(text, str) else text)
+    return path
+
+
+def roots(root: Path, **extra: str) -> dict:
+    return {"SESSIONS_DIR": str(root), **extra}
+
+
+@pytest.mark.parametrize("source", [*SOURCES, None])
+def test_identity_emits_the_block_on_every_source_with_no_switch_set(pybin, sessions, source):
+    plant(sessions)
+    out = emitted(run_shim("identity", payload(source=source), roots(sessions), pybin))
+    assert out == {"hookEventName": "SessionStart", "additionalContext": IDENTITY_TEXT}
+
+
+def test_identity_emits_the_same_bytes_session_identity_prints(pybin, sessions):
+    from sessiontools import identity_block
+    plant(sessions)
+    verb = io.BytesIO()
+    assert identity_block.main([SID], env=roots(sessions), stdout=verb,
+                               stderr=io.StringIO()) == 0
+    out = emitted(run_shim("identity", payload(), roots(sessions), pybin))
+    assert out["additionalContext"].encode("utf-8") == verb.getvalue()
+
+
+def test_identity_reads_the_payload_session_not_the_env(pybin, sessions):
+    plant(sessions, SID, "mine\n")
+    plant(sessions, OTHER, "theirs\n")
+    env = roots(sessions, CLAUDE_SESSION_ID=OTHER)
+    assert emitted(run_shim("identity", payload(), env, pybin))["additionalContext"] == "mine\n"
+
+
+def test_identity_is_silent_with_no_block(pybin, sessions):
+    assert_silent(run_shim("identity", payload(), roots(sessions), pybin))
+    (sessions / SID).mkdir()
+    assert_silent(run_shim("identity", payload(), roots(sessions), pybin))
+
+
+def test_identity_after_clear_names_the_new_session_and_is_silent(pybin, sessions):
+    plant(sessions, OTHER)          # the launched session's block, not this id's
+    assert_silent(run_shim("identity", payload(source="clear"), roots(sessions), pybin))
+
+
+@pytest.mark.parametrize("value", ["off", "OFF", "Off", "0", "false", "False", "no", "NO"])
+def test_identity_off_spellings_switch_it_off(pybin, sessions, value):
+    plant(sessions)
+    env = roots(sessions, **{session_info.IDENTITY_ENV: value})
+    assert_silent(run_shim("identity", payload(), env, pybin))
+    assert session_info.identity_output(payload(), env) is None
+
+
+@pytest.mark.parametrize("value", ["", "on", "1", "yes", "enabled", "offf"])
+def test_identity_anything_else_leaves_it_on(pybin, sessions, value):
+    plant(sessions)
+    env = roots(sessions, **{session_info.IDENTITY_ENV: value})
+    emitted(run_shim("identity", payload(), env, pybin))
+
+
+def test_identity_off_no_python_starts(tmp_path, sessions):
+    plant(sessions)
+    py, mark = marked_python(tmp_path)
+    env = roots(sessions, SESSIONTOOLS_PYTHON=str(py))
+    assert_silent(run_shim("identity", payload(), {**env, session_info.IDENTITY_ENV: "off"},
+                           None))
+    assert not mark.exists()
+    emitted(run_shim("identity", payload(), env, None))
+    assert mark.exists()
+
+
+def test_identity_switches_are_its_own(pybin, sessions):
+    """The title and context switches neither start nor stop identity."""
+    plant(sessions)
+    off = {session_info.TITLE_ENV: "off", session_info.CONTEXT_ENV: "off"}
+    emitted(run_shim("identity", payload(), roots(sessions, **off), pybin))
+    assert_silent(run_shim("context", payload(),
+                           roots(sessions, **{session_info.IDENTITY_ENV: "on"}), pybin))
+
+
+def test_identity_a_subagent_is_silent(pybin, sessions):
+    plant(sessions)
+    body = payload(agent_id="a1b2c3", agent_type="Explore")
+    assert_silent(run_shim("identity", body, roots(sessions), pybin))
+
+
+@pytest.mark.parametrize("body", ["", "not json", "[]", "null", "{}", '{"session_id": ""}',
+                                  '{"session_id": 5}', '{"session_id": "../x"}',
+                                  '{"session_id": ".."}'])
+def test_identity_garbage_stdin_is_silent(pybin, sessions, body):
+    plant(sessions)
+    assert_silent(run_shim("identity", body, roots(sessions), pybin))
+
+
+@pytest.mark.parametrize("data", [b"\xff\xfe not utf-8\n", b"", b"  \n\n",
+                                  b"x" * (16 * 1024 + 1)])
+def test_identity_a_block_it_cannot_use_is_silent(pybin, sessions, data):
+    plant(sessions, text=data)
+    assert_silent(run_shim("identity", payload(), roots(sessions), pybin))
+
+
+def test_identity_an_unreadable_block_is_silent(pybin, sessions):
+    path = plant(sessions)
+    path.chmod(0)
+    try:
+        if os.access(path, os.R_OK):
+            pytest.skip("this user reads a 0000 file")
+        assert_silent(run_shim("identity", payload(), roots(sessions), pybin))
+    finally:
+        path.chmod(0o600)
+
+
+def test_identity_no_python_or_a_crashing_one_is_silent(tmp_path, sessions):
+    plant(sessions)
+    assert_silent(run_shim("identity", payload(), roots(sessions), None, system=False))
+    bindir = tmp_path / "broken"
+    bindir.mkdir()
+    stub = bindir / "python3"
+    stub.write_text('#!/bin/sh\necho "Traceback: boom" >&2; exit 1\n')
+    stub.chmod(0o755)
+    assert_silent(run_shim("identity", payload(), roots(sessions), bindir))
+
+
+def test_identity_a_crash_inside_the_module_is_silent(monkeypatch):
+    def boom(*_args):
+        raise RuntimeError("boom")
+    monkeypatch.setitem(session_info.VERBS, "identity", boom)
+    out = io.StringIO()
+    assert session_info.main(["identity"], io.StringIO(json.dumps(payload())), out, {}) == 0
+    assert out.getvalue() == ""
+
+
+def test_identity_the_module_rechecks_the_switch(sessions):
+    plant(sessions)
+    env = roots(sessions, **{session_info.IDENTITY_ENV: "off"})
+    out = io.StringIO()
+    assert session_info.main(["identity"], io.StringIO(json.dumps(payload())), out, env) == 0
+    assert out.getvalue() == ""
+    on = io.StringIO()
+    session_info.main(["identity"], io.StringIO(json.dumps(payload())), on, roots(sessions))
+    assert json.loads(on.getvalue())["hookSpecificOutput"]["additionalContext"] == IDENTITY_TEXT
+
+
+def test_identity_is_registered_and_described():
+    spec = json.loads(HOOKS.read_text())
+    commands = [h["command"] for entry in spec["hooks"]["SessionStart"]
+                for h in entry["hooks"]]
+    assert commands.count('"${CLAUDE_PLUGIN_ROOT}/hooks/session-info" identity') == 1
+    description = spec["description"]
+    assert session_info.IDENTITY_ENV in description and "identity.md" in description
+    assert session_info.IDENTITY_ENV in SHIM.read_text()

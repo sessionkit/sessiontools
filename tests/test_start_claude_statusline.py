@@ -29,6 +29,9 @@ from sessiontools.start.context import PlannedFile, settings_argv
 SID = "11111111-2222-3333-4444-555555555555"
 TOOL = "claude-code"
 FIXTURES = Path(__file__).parent / "fixtures"
+#: The launcher's default when nothing names Claude's renderer: these test
+#: HOMEs have no ~/.claude, so every launched door carries it.
+TUI = {"tui": "default"}
 #: the claude-code tool's settings directory relative to HOME (settings.host_dir)
 KIT_REL = host(Path("/home-of-test"), TOOL).relative_to("/home-of-test")
 #: the command `session statusline install` writes (design §3), tilde form
@@ -329,10 +332,13 @@ def test_a_live_plan_writes_the_golden(tmp_path, scratch, capsys):
     w(kit(scratch) / "claude-code.json", {"model": "fake-host", "effortLevel": "fake-e"})
     drop_in(scratch)
     p = plan(tmp_path, scratch, dry_run=False)
-    assert door_item(p).text == (FIXTURES / "claude-settings-statusline.golden").read_text()
+    # the rendered cascade (claude-settings-statusline.golden) plus the
+    # launcher's tui default: no file here names Claude's renderer
+    assert door_item(p).text == (FIXTURES / "claude-settings-door.golden").read_text()
     (source,) = [s for t, s in p.provenance if t == "--settings"]
     assert source.endswith(
-        f"statusLine from host ~/{KIT_REL}/{DROP_IN}")
+        f"statusLine from host ~/{KIT_REL}/{DROP_IN}, "
+        "tui from the launcher default (no settings file sets it)")
     assert "claude-code:" not in capsys.readouterr().err       # nothing said
 
 
@@ -344,6 +350,7 @@ def test_a_status_line_alone_opens_the_door(tmp_path, scratch):
 
 def test_a_bad_status_line_alone_opens_no_door_and_says_so_once(tmp_path, scratch, capsys):
     drop_in(scratch, {"type": "command"})
+    w(scratch / ".claude" / "settings.json", {"tui": "fullscreen"})   # no tui default
     p = plan(tmp_path, scratch)
     assert "--settings" not in p.argv
     err = capsys.readouterr().err
@@ -356,7 +363,7 @@ def test_a_seat_overrides_the_host_command_in_the_file(tmp_path, scratch):
     w(seat_file(scratch), {"statusLine": {"command": "~/fake-seat.sh"}})
     p = plan(tmp_path, scratch, flags=("--seat", "s1"), dry_run=False)
     assert json.loads(door_item(p).text) == {
-        "statusLine": {**ENTRY, "command": "~/fake-seat.sh"}}
+        "statusLine": {**ENTRY, "command": "~/fake-seat.sh"}, **TUI}
 
 
 def test_an_agent_dotted_command_reaches_the_file(tmp_path, scratch):
@@ -365,7 +372,7 @@ def test_an_agent_dotted_command_reaches_the_file(tmp_path, scratch):
           "  claude-code.statusLine.command: ~/fake-agent.sh\n")
     p = plan(tmp_path, scratch, front_matter=fm, dry_run=False)
     assert json.loads(door_item(p).text) == {
-        "statusLine": {**ENTRY, "command": "~/fake-agent.sh"}}
+        "statusLine": {**ENTRY, "command": "~/fake-agent.sh"}, **TUI}
     (source,) = [s for t, s in p.provenance if t == "--settings"]
     assert source.startswith("computed: claude-code settings: statusLine from agent ")
 
@@ -391,7 +398,7 @@ def test_a_crew_settings_without_a_status_line_keeps_the_kit_one(tmp_path, scrat
     p = plan(tmp_path, scratch, argv_tail=("--settings", str(crew)), dry_run=False)
     assert p.argv.count("--settings") == 1 and str(crew) not in p.argv
     assert json.loads(door_item(p).text) == {"statusLine": ENTRY,
-                                             "claudeMdExcludes": ["fake/x"]}
+                                             "claudeMdExcludes": ["fake/x"], **TUI}
     assert "claude-code:" not in capsys.readouterr().err
 
 
@@ -401,6 +408,6 @@ def test_a_live_launch_hands_claude_the_status_line_and_never_makes_dot_claude(t
     result, record, _work = launch_e2e(tmp_path, "scout", extra_env={"HOME": str(home)})
     assert result.returncode == 0, result.stderr
     path = Path(settings_door(recorded_argv(record)))
-    assert json.loads(path.read_text()) == {"statusLine": ENTRY}
+    assert json.loads(path.read_text()) == {"statusLine": ENTRY, **TUI}
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not (home / ".claude").exists()

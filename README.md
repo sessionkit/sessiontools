@@ -45,6 +45,8 @@ eval "$(session completion bash)"
   category.
 - `session ledger --short`: each file read and command run, by tokens.
 - `session account status`: which Claude account this Mac is on.
+- `session account verify`: which account the API bills for this seat's
+  token, from one 1-token request.
 - `session start --list-agents`: the agents it can start.
 - `session reap`: seats idle past 1h, each CLOSE or KEEP, and why. A dry
   run.
@@ -113,8 +115,10 @@ it. Each line says what puts it there and what takes it away.
   sessiontools` drops this package's entries, and `uv cache prune` drops
   the ones nothing uses.
 - **Folders, each made by a verb you run:**
-  - `~/.session/state/list/`: the list cache, `snapshot.json` and
-    `list.lock`, at the first `session list`.
+  - `~/.sessionkit/tools/state/list/`: the list cache, `snapshot.json`
+    and `list.lock`, at the first `session list`. The state folders here
+    and below are on a fresh host; a host that still has
+    `~/.session/state/` keeps using it until it is moved.
   - `~/.session/sessions/<session-id>/`: one for each `session start`,
     holding `launch/`, `log/settings.jsonl` and `session-id`. It also
     gets `settings/<tool>.d/50-env.json`, one for each tool whose
@@ -123,14 +127,19 @@ it. Each line says what puts it there and what takes it away.
     `log/settings.jsonl` names each variable it read, never its value.
     The plugin's hooks and `session park` write only inside a folder
     that is already there.
-  - `~/.session/state/reap.log`: `session reap --yes`.
-  - `~/.session/state/pane-state/watch.lock`: the pane signal's service.
-  - `~/.session/state/default-model/`: `backups/` and `log.jsonl`, the
-    first time `session default-model enforce` changes settings.json.
+  - `~/.sessionkit/tools/state/pane-state/watch.lock`: the pane signal's
+    service.
+  - `~/.sessionkit/tools/state/default-model/`: `backups/` and
+    `log.jsonl`, the first time `session default-model enforce` changes
+    settings.json.
   - `~/.sessionkit/tools/accounts/`: `session account new` and `use`.
-  - `~/.local/share/sessiontools/sound/bin/`: `session sound engine on`
-    builds the sound engine there with `swiftc`.
-  - `~/Library/Logs/sessiontools/`: the two services' logs.
+  - `~/.sessionkit/tools/state/sound/bin/`: `session sound engine on`
+    builds the sound engine there with `swiftc` (in
+    `~/.local/share/sessiontools/sound/bin/` while that old folder is
+    still there).
+  - `~/.sessionkit/tools/log/`: the services' logs and `reap.log`
+    (Logs, below). An older release wrote them elsewhere, and those
+    files stay where they were.
   - `SESSIONS_DIR`, `SESSION_STATE_DIR` and `SESSIONTOOLS_SOUND_HOME`
     move these folders when set.
 - **Services (launchd agents):** none until you turn one on. Each `on`
@@ -172,6 +181,12 @@ it. Each line says what puts it there and what takes it away.
   With `model.default` set, `session default-model enforce` (and the
   unit or `watch` that runs it) rewrites the top-level `"model"` in
   `~/.claude/settings.json`, after a backup.
+- **Not changed by an upgrade: a live tmux server.** One born inside the
+  default seat by sessiontools 0.3.1 or earlier still hands
+  `CLAUDE_CODE_AGENT=claude` to every pane it makes, so a raw `claude`
+  there hears the seat's mail. Restarting that server, or running
+  `tmux set-environment -g -u CLAUDE_CODE_AGENT` on it, is yours to do
+  ([the default seat][default-seat]).
 
 ## Uninstall
 
@@ -192,23 +207,27 @@ uv tool uninstall sessiontools
 ```
 
 That leaves what the verbs made, listed above. The plugin's cached
-copy, the services' logs and the engine's folder are sessiontools'
-alone. To delete them:
+copy and the engine's folder are sessiontools' alone. To delete them:
 
 ```bash
 rm -rf "${HOME:?}/.claude/plugins/cache/sessiontools"
-rm -rf "${HOME:?}/Library/Logs/sessiontools"
 rm -rf "${HOME:?}/.local/share/sessiontools"
+rm -rf "${HOME:?}/.sessionkit/tools/state/sound"
 ```
+
+The logs are left in place: the new ones in `~/.sessionkit/tools/log/`,
+and an older release's in `~/Library/Logs/sessiontools/`. Nothing here
+deletes from `~/Library/Logs`.
 
 uv's cache stays too, with the other things uv installed; `uv cache
 clean sessiontools` drops this package's entries.
 
 The rest is your data: delete it by hand only if you want it gone.
-`~/.sessionkit/tools/` holds your settings and accounts, and the
-accounts folder keeps the backups of every token `session account use`
-replaced. `~/.session/` holds the session folders and the list cache,
-and the kit's other packages keep their files in it too.
+`~/.sessionkit/tools/` holds your settings, accounts, state and logs,
+and the accounts folder keeps the backups of every token `session
+account use` replaced. `~/.session/` holds the session folders (and, on
+a host that has not moved it, the old state folder), and the kit's other
+packages keep their files in it too.
 
 ## Docs
 
@@ -220,6 +239,10 @@ and the kit's other packages keep their files in it too.
 - [The `session list` cache][cache]: one computation, many readers
 - [Operator and privileged seats][operator]: who seats ask
 - [Closing idle seats][reap]: `session reap`, a dry run by default
+- [Where tools keeps its state][state-paths]: each folder, old and new,
+  the rule, and `session path`, the verb peers ask
+- [Moving tools' state][state-migrate]: `session path migrate`, one host
+  at a time, dry run first
 - [Shell completion][completion]: `session completion bash|zsh`, a static
   script built from the verbs' own parsers
 - [The Claude Code plugin][plugin]: the skill and the hooks
@@ -228,6 +251,8 @@ and the kit's other packages keep their files in it too.
 - [The busy sound][busy]: a sound while a tool batch runs long
 - [The session-info hooks][session-info]: the short session id as the
   session title, and the session's facts in context, both off by default
+- [The identity block][identity]: who a launched session is, in its
+  context on turn one and from `session identity`
 - [The sound engine][engine]: the busy sound from one resident process
 - [The status line][status-line]: `session statusline install` puts it in the
   kit's claude-code layer, never `~/.claude`. `session start` seats show it;
@@ -250,11 +275,28 @@ be set, and where each one lives ([configuration][configuration]):
 - **Settings files**, JSON in layers: `~/.sessionkit/tools/settings/session.json`
   (the operator, the list cache, the pane signal, accounts, a session's
   home, the default model), `~/.sessionkit/tools/settings/sounds.json` (the busy sound), and
-  `~/.sessionkit/tools/settings/claude-code.json` (the model, effort
-  and status line `session start` passes on). Every key, its default and
+  `~/.sessionkit/tools/settings/claude-code.json` (the model, effort,
+  status line and renderer `session start` passes on). Every key, its default and
   which layers it is read from: [settings][settings].
-- **Folders of its own:** `~/.session/` (sessions, seats, agent files, the
-  state dir) and `~/.sessionkit/tools/accounts/` (`session account`).
+- **Folders of its own:** `~/.sessionkit/tools/accounts/` (`session
+  account`), and its state, each leaf with an old and a new folder. A
+  fresh host starts `state` and `sound` in the new folder; an existing
+  one stays put until it is moved, and a moved one is followed
+  ([where tools keeps its state][state-paths]):
+  - `state`: `~/.session/state/`, new `~/.sessionkit/tools/state/`.
+  - `sessions`, `seats`, `agent` and `backups`: `~/.session/<leaf>/`, new
+    `~/.sessionkit/tools/state/<leaf>/`.
+  - `sound`: `~/.local/share/sessiontools/sound/`, new
+    `~/.sessionkit/tools/state/sound/`.
+  - **The rule, per leaf:** its variable when set; else the old folder
+    while it is real; else the new one when it exists; else the new one
+    for `state` and `sound`, the old one for the rest.
+  - **To see what is used:** `session path LEAF`, or `session path --json`.
+  - **To move `state` and `sound`:** `session path migrate --dry-run`,
+    then a real run with that host's go ([moving tools' state][state-migrate]).
+  - **Upgrade every copy of sessiontools on a host together,** other
+    packages' copies included: an older copy writes the old `state`
+    folder, and `session path --json` shows `stranded` when one lags.
 - **Environment variables:** the settle alert's `SESSION_SETTLE_AT`, the
   clock line's `SESSION_CLOCK_WARN_AT`, the hooks' `SESSIONTOOLS_HOOK_*`
   switches (`SESSIONTOOLS_HOOK_CLOCK=on` switches the clock line on), and
@@ -264,31 +306,43 @@ be set, and where each one lives ([configuration][configuration]):
 
 ## Logs
 
-- **The sound engine:** `~/Library/Logs/sessiontools/sound-engine.log`,
+- **The sound engine:** `~/.sessionkit/tools/log/sound-engine.log`,
   once `session sound engine on` has run.
-- **The pane signal's agent:** `~/Library/Logs/sessiontools/pane-state.log`,
+- **The pane signal's agent:** `~/.sessionkit/tools/log/pane-state.log`,
   once `session pane-state agent on` has run.
-- **The default model:** `~/.session/state/default-model/log.jsonl`, one
-  line per write to settings.json, and
-  `~/Library/Logs/sessiontools/default-model.log`, once you have loaded
+- **The default model:** `~/.sessionkit/tools/state/default-model/log.jsonl`
+  (`~/.session/state/default-model/log.jsonl` on a Mac that still has
+  its old state folder), one line per write to settings.json, and
+  `~/.sessionkit/tools/log/default-model.log`, once you have loaded
   the launchd agent `session default-model unit launchd` prints.
-- **`session reap --yes`:** `~/.session/state/reap.log`, one line for each
-  seat it closed or failed to close.
+- **`session reap --yes`:** `~/.sessionkit/tools/log/reap.log`, one line
+  for each seat it closed or failed to close.
 - **Each session's settings at birth:**
   `~/.session/sessions/<session-id>/log/settings.jsonl`, what `session
   start` read into that session's settings: each environment variable
   by name, never its value.
 - **The status line:** `~/.config/session/statusline-log.jsonl`, one line
   per render, only when `~/.config/session/` already exists.
+- **Old logs, 0.3.1 and before:** the three services logged to
+  `~/Library/Logs/sessiontools/`, and `session reap --yes` to
+  `$SESSION_STATE_DIR/reap.log` (`~/.session/state/reap.log`). Those
+  files are left in place. A service an older release installed keeps
+  writing its old log, at every login too, until its plist is written
+  again: `on` for the sound engine and the pane signal, the steps in
+  [the default model][default-model] for its agent. The sound engine's
+  and the pane signal's `status` name an old log while it is still there.
 
 Follow one as it grows with `tail -F`, for example
-`tail -F ~/Library/Logs/sessiontools/pane-state.log`.
+`tail -F ~/.sessionkit/tools/log/pane-state.log`.
 
 - **Health:** `session list` prints a row for each live session, with its
-  state and context. A session you know is running that is not listed is
-  one sessiontools cannot see.
+  state and context, and SEAT names the seat a session holds: `claude`
+  for the default seat, or an agent's name for its hand-launched
+  holder. A session you know is running that is not listed is one
+  sessiontools cannot see.
 
 [verbs]: docs/session.md
+[default-seat]: docs/session.md#the-default-seat
 [start]: docs/session-start-launcher.md
 [credentials]: docs/session-start-launcher.md#credentials-are-never-handed-down
 [account]: docs/account.md
@@ -296,11 +350,14 @@ Follow one as it grows with `tail -F`, for example
 [operator]: docs/operator-privileged-seats.md
 [reap]: docs/session-reap.md
 [completion]: docs/shell-completion.md
+[state-paths]: docs/tools-state-paths.md
+[state-migrate]: docs/tools-state-migrate.md
 [plugin]: docs/claude-code-plugin.md
 [settle]: docs/settle-alert-hook.md
 [clock]: docs/clock-line-hook.md
 [busy]: docs/busy-sound-hook.md
 [session-info]: docs/session-info-hook.md
+[identity]: docs/identity-block.md
 [engine]: docs/sound-engine-agent.md
 [status-line]: docs/status-line-script.md
 [pane-state]: docs/pane-state-signal.md
