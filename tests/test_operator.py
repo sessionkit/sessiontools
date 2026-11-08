@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
+from message_support import calls, message_answers_from, old_message
 from settings_support import host
 
 import sessiontools
@@ -31,11 +33,12 @@ PTR = "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa"
 
 
 @pytest.fixture(autouse=True)
-def _no_operator_from_the_caller(monkeypatch):
-    """The caller's own AGENT_OPERATOR_ADDR or mail root never leaks in, and
-    the FQDN never comes from the network."""
+def _no_operator_from_the_caller(monkeypatch, tmp_path):
+    """The caller's own AGENT_OPERATOR_ADDR or mail never leaks in, and the
+    FQDN never comes from the network: the first `message` on PATH answers
+    from an empty folder, never the live machine's boxes."""
     monkeypatch.delenv(op_mod.AGENT_OPERATOR_ADDR_ENV, raising=False)
-    monkeypatch.delenv(op_mod.SESSION_MAIL_ROOT_ENV, raising=False)
+    monkeypatch.setenv("PATH", message_answers_from(tmp_path / "no-boxes")["PATH"])
     for name in op_mod.MAIL_HOST_ENVS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(op_mod, "_resolve_fqdn", lambda: FQDN)
@@ -59,12 +62,13 @@ def _template_settings(data):
     (_settings_dir() / "session.template.json").write_text(json.dumps(data))
 
 
-def _mail_root(tmp_path, *boxes):
-    root = tmp_path / "mail" / "agents"
+def _mail(tmp_path, *boxes):
+    """An environ whose `message path` answers BOXES, and no other."""
+    root = tmp_path / "boxes"
     root.mkdir(parents=True)
     for box in boxes:
         (root / box).mkdir()
-    return str(root)
+    return message_answers_from(root)
 
 
 def _cli_json(capsys, argv=("operator",)):
@@ -94,7 +98,7 @@ def test_mailbox_and_privileged_list_with_a_local_maildir(tmp_path):
     """The success criterion: mailbox 'you' + privileged ['alice'] is
     {you, alice}, plus the derived address where it is deliverable."""
     _host_settings({"operator": {"mailbox": "you", "privileged": ["alice"]}})
-    op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "you")})
+    op = read_operator(_mail(tmp_path, "you"))
     assert op.address == f"you@{FQDN}"
     assert op.mailbox == "you"
     assert op.privileged == {"you", "alice", f"you@{FQDN}"}
@@ -102,9 +106,65 @@ def test_mailbox_and_privileged_list_with_a_local_maildir(tmp_path):
 
 def test_mailbox_not_local_is_privileged_by_name_but_has_no_address(tmp_path):
     _host_settings({"operator": {"mailbox": "you", "privileged": ["alice"]}})
-    op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path)})
+    op = read_operator(_mail(tmp_path))
     assert op.address is None
     assert op.privileged == {"you", "alice"}
+
+
+# ---------- whether the mailbox is local: sessionmail's answer ----------------
+
+def test_the_mailbox_is_asked_of_message_by_name_never_by_a_root(tmp_path):
+    _host_settings({"operator": {"mailbox": "you"}})
+    environ = _mail(tmp_path, "you")
+    assert read_operator(environ).address == f"you@{FQDN}"
+    assert calls(environ) == ["path you"]
+
+
+def test_no_message_on_path_derives_no_address(tmp_path):
+    """No sessionmail on this host: nothing is guessed (rule 6). The setting
+    still names the operator, privileged by name."""
+    _host_settings({"operator": {"mailbox": "you"}})
+    op = read_operator({"PATH": str(tmp_path / "empty")})
+    assert op.address is None
+    assert op.privileged == {"you"}
+
+
+def test_a_message_too_old_for_the_verb_derives_no_address(tmp_path):
+    _host_settings({"operator": {"mailbox": "you"}})
+    assert read_operator(old_message(tmp_path / "old")).address is None
+
+
+def test_message_path_says_box_no_box_or_why_not(tmp_path):
+    root = tmp_path / "boxes"
+    (root / "you").mkdir(parents=True)
+    env = message_answers_from(root)
+    assert op_mod.message_path("you", env) == op_mod.BoxPath(path=str(root / "you"))
+    assert op_mod.message_path("nobody", env) == op_mod.BoxPath(no_box=True)
+    old = op_mod.message_path("you", old_message(tmp_path / "old"))
+    assert old.path is None and not old.no_box
+    assert old.why == "`message path` refused the call: No such command 'path'."
+    gone = op_mod.message_path("you", {"PATH": str(tmp_path / "empty")})
+    assert gone == op_mod.BoxPath(why="`message` is not on PATH")
+
+
+@pytest.mark.parametrize("code, out, why", [
+    (1, "", "`message path` exited 1"),
+    (0, "", "`message path` printed no path"),
+])
+def test_message_path_names_any_other_answer(code, out, why):
+    def answer(argv, **kw):
+        return subprocess.CompletedProcess(argv, code, out, "")
+    assert op_mod.message_path("you", {}, run=answer) == op_mod.BoxPath(why=why)
+
+
+def test_a_message_that_hangs_is_no_answer():
+    def hang(argv, **kw):
+        assert argv == ["message", "path", "you"]
+        assert kw["timeout"] == op_mod.MESSAGE_PATH_TIMEOUT_S
+        raise subprocess.TimeoutExpired(argv, kw["timeout"])
+    _host_settings({"operator": {"mailbox": "you"}})
+    assert read_operator({}, run=hang).address is None
+    assert op_mod.message_path("you", {}, run=hang).why == "`message path` took over 5s"
 
 
 @pytest.mark.parametrize("fqdn", ["", "box7", "   ", None])
@@ -112,7 +172,7 @@ def test_an_fqdn_with_no_domain_derives_the_short_host(tmp_path, fqdn):
     """The bare short host is the name the local mail drop delivers to, so
     it is a real address, not a look-alike."""
     _host_settings({"operator": {"mailbox": "you", "privileged": ["alice"]}})
-    op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "you")},
+    op = read_operator(_mail(tmp_path, "you"),
                        resolve_fqdn=lambda: fqdn)
     assert op.address == f"you@{SHORT}"
     assert op.privileged == {"you", "alice", f"you@{SHORT}"}
@@ -121,7 +181,7 @@ def test_an_fqdn_with_no_domain_derives_the_short_host(tmp_path, fqdn):
 def test_no_short_host_and_no_fqdn_derives_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(op_mod, "_resolve_hostname", lambda: "")
     _host_settings({"operator": {"mailbox": "you", "privileged": ["alice"]}})
-    op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "you")},
+    op = read_operator(_mail(tmp_path, "you"),
                        resolve_fqdn=lambda: PTR)
     assert op.address is None
     assert op.privileged == {"you", "alice"}
@@ -134,7 +194,7 @@ def test_a_reverse_dns_fqdn_derives_the_short_host(tmp_path, fqdn):
     """getfqdn() on a host whose name has no forward record returns the
     loopback's PTR name; the address uses the short host instead."""
     _host_settings({"operator": {"mailbox": "admin"}})
-    op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "admin")},
+    op = read_operator(_mail(tmp_path, "admin"),
                        resolve_fqdn=lambda: fqdn)
     assert op.address == f"admin@{SHORT}"
     assert "arpa" not in "".join(op.privileged)
@@ -148,7 +208,7 @@ def test_the_default_lookup_patched_to_a_ptr_name_derives_the_short_host(
     monkeypatch.setattr(op_mod, "_resolve_hostname", REAL_RESOLVE_HOSTNAME)
     monkeypatch.setattr(op_mod.socket, "getfqdn", lambda *a: PTR)
     monkeypatch.setattr(op_mod.socket, "gethostname", lambda: "Box7.local")
-    monkeypatch.setenv(op_mod.SESSION_MAIL_ROOT_ENV, _mail_root(tmp_path, "admin"))
+    monkeypatch.setenv("PATH", _mail(tmp_path, "admin")["PATH"])
     _host_settings({"operator": {"mailbox": "admin"}})
     assert read_operator().address == "admin@box7"
     assert _cli_json(capsys)["operator"] == "admin@box7"
@@ -159,7 +219,7 @@ def test_the_default_lookup_patched_to_a_ptr_name_derives_the_short_host(
                                   "box.example.invalid", "example.invalid"])
 def test_an_fqdn_not_under_the_short_host_derives_the_short_host(tmp_path, fqdn):
     _host_settings({"operator": {"mailbox": "you"}})
-    op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "you")},
+    op = read_operator(_mail(tmp_path, "you"),
                        resolve_fqdn=lambda: fqdn)
     assert op.address == f"you@{SHORT}"
 
@@ -169,7 +229,7 @@ def test_an_fqdn_under_the_short_host_is_kept(tmp_path, fqdn):
     """A tailnet name stays the host part, so a privileged match against a
     drop-qualified sender does not change."""
     _host_settings({"operator": {"mailbox": "you"}})
-    op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "you")},
+    op = read_operator(_mail(tmp_path, "you"),
                        resolve_fqdn=lambda: fqdn)
     assert op.address == f"you@{fqdn.lower()}"
 
@@ -251,7 +311,7 @@ def test_a_reverse_dns_name_is_never_this_host_even_under_the_short_host():
 def test_the_address_setting_is_the_operator_and_is_privileged(tmp_path):
     _host_settings({"operator": {"address": "  you@host.example  ", "mailbox": "you",
                                  "privileged": ["alice", "bob"]}})
-    op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "you")})
+    op = read_operator(_mail(tmp_path, "you"))
     assert op.address == "you@host.example"
     assert op.privileged == {"you@host.example", "you", "alice", "bob"}
 
@@ -372,12 +432,12 @@ def test_an_unreadable_settings_file_grants_nothing():
 
 @pytest.mark.parametrize("mailbox", ["..", ".", "../you", "a/you", "you@box", ""])
 def test_a_mailbox_that_is_not_one_plain_local_name_derives_nothing(tmp_path, mailbox):
-    root = tmp_path / "mail" / "agents"
-    (root / "you").mkdir(parents=True)
+    environ = _mail(tmp_path, "you")
     _host_settings({"operator": {"mailbox": mailbox}})
-    op = read_operator({op_mod.SESSION_MAIL_ROOT_ENV: str(root)})
+    op = read_operator(environ)
     assert op.address is None
     assert not any("@" + FQDN in member for member in op.privileged)
+    assert calls(environ) == [], "a name that is not one plain name is never asked"
 
 
 # ---------- is_privileged and the value ---------------------------------------
@@ -416,7 +476,7 @@ def test_the_reader_is_re_exported_from_sessiontools():
 def test_policy_operator_ask_address_is_the_readers_address(tmp_path, monkeypatch):
     monkeypatch.setattr(policy, "_resolve_operator_fqdn", lambda: "box7.gate.example.invalid")
     _host_settings({"operator": {"mailbox": "you", "privileged": ["alice"]}})
-    environ = {op_mod.SESSION_MAIL_ROOT_ENV: _mail_root(tmp_path, "you")}
+    environ = _mail(tmp_path, "you")
     assert policy.operator_ask_address(environ) == "you@box7.gate.example.invalid"
     _host_settings({"operator": {"privileged": ["alice"]}})
     assert policy.operator_ask_address(environ) is None       # privilege is not an address
@@ -426,7 +486,7 @@ def test_policy_operator_ask_address_is_the_readers_address(tmp_path, monkeypatc
 
 def test_session_operator_prints_the_three_keys_privileged_sorted(capsys, monkeypatch,
                                                                   tmp_path):
-    monkeypatch.setenv(op_mod.SESSION_MAIL_ROOT_ENV, _mail_root(tmp_path, "you"))
+    monkeypatch.setenv("PATH", _mail(tmp_path, "you")["PATH"])
     _host_settings({"operator": {"mailbox": "you", "privileged": ["bob", "alice"]}})
     got = _cli_json(capsys)
     assert list(got) == ["operator", "mailbox", "privileged"]

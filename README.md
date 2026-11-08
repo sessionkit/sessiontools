@@ -118,8 +118,8 @@ it. Each line says what puts it there and what takes it away.
   - `~/.sessionkit/tools/state/list/`: the list cache, `snapshot.json`
     and `list.lock`, at the first `session list`. The state folders here
     and below are on a fresh host; a host that still has
-    `~/.session/state/` keeps using it until it is moved.
-  - `~/.session/sessions/<session-id>/`: one for each `session start`,
+    `~/.session/` keeps using its folders there until they are moved.
+  - `~/.sessionkit/tools/state/sessions/<session-id>/`: one for each `session start`,
     holding `launch/`, `log/settings.jsonl` and `session-id`. It also
     gets `settings/<tool>.d/50-env.json`, one for each tool whose
     settings name a variable that is set when the session starts. Each
@@ -280,8 +280,9 @@ be set, and where each one lives ([configuration][configuration]):
   which layers it is read from: [settings][settings].
 - **Folders of its own:** `~/.sessionkit/tools/accounts/` (`session
   account`), and its state, each leaf with an old and a new folder. A
-  fresh host starts `state` and `sound` in the new folder; an existing
-  one stays put until it is moved, and a moved one is followed
+  fresh host, one with no `~/.session/`, starts every leaf in the new
+  folder; an existing one stays put until it is moved, and a moved one
+  is followed
   ([where tools keeps its state][state-paths]):
   - `state`: `~/.session/state/`, new `~/.sessionkit/tools/state/`.
   - `sessions`, `seats`, `agent` and `backups`: `~/.session/<leaf>/`, new
@@ -290,7 +291,8 @@ be set, and where each one lives ([configuration][configuration]):
     `~/.sessionkit/tools/state/sound/`.
   - **The rule, per leaf:** its variable when set; else the old folder
     while it is real; else the new one when it exists; else the new one
-    for `state` and `sound`, the old one for the rest.
+    for `state` and `sound`, and for the rest the new one on a fresh host
+    and the old one on a host that has `~/.session/`.
   - **To see what is used:** `session path LEAF`, or `session path --json`.
   - **To move `state` and `sound`:** `session path migrate --dry-run`,
     then a real run with that host's go ([moving tools' state][state-migrate]).
@@ -317,6 +319,9 @@ be set, and where each one lives ([configuration][configuration]):
   the launchd agent `session default-model unit launchd` prints.
 - **`session reap --yes`:** `~/.sessionkit/tools/log/reap.log`, one line
   for each seat it closed or failed to close.
+- **Busy detection:** `~/.sessionkit/tools/log/busy.log`, one line each
+  time voice could not be asked where its mouth is, naming why and the
+  folder used instead ([the busy sound][busy]).
 - **Each session's settings at birth:**
   `~/.session/sessions/<session-id>/log/settings.jsonl`, what `session
   start` read into that session's settings: each environment variable

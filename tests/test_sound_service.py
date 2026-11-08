@@ -151,7 +151,7 @@ def test_the_plist_has_exactly_the_designs_keys(monkeypatch):
     assert p["Label"] == "dev.sessionkit.tools.sound-engine"
     assert p["ProgramArguments"] == [
         str(home / ".sessionkit/tools/state/sound/bin/sound-engine"), "--port", "44100",
-        "--sessions", str(home / ".session/sessions")]
+        "--sessions", str(home / ".sessionkit/tools/state/sessions")]   # fresh: new
     assert p["RunAtLoad"] is True and p["KeepAlive"] is True
     assert p["ProcessType"] == "Interactive" and p["LimitLoadToSessionType"] == "Aqua"
     log = str(home / ".sessionkit/tools/log/sound-engine.log")
@@ -167,7 +167,8 @@ def test_the_plist_passes_the_sessions_root_python_resolves(monkeypatch, tmp_pat
     monkeypatch.setenv("SESSIONS_DIR", str(tmp_path / "one-seats-own"))
     from sessiontools import settings
     old, new = settings.leaf_old("sessions"), settings.leaf_new("sessions")
-    assert service.plist()["ProgramArguments"][3:] == ["--sessions", str(old)]   # fresh: old
+    assert service.plist()["ProgramArguments"][3:] == ["--sessions", str(new)]   # fresh: new
+    assert not new.exists()                                                        # ...made by no one
     new.mkdir(parents=True)
     assert service.engine_sessions() == new                                        # new only
     old.parent.mkdir(parents=True)

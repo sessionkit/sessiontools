@@ -92,12 +92,24 @@ The speech guard lives in the waiter, so every trigger has it.
 - Any session's speech counts.
 - "Speaking" is `playing.json` in the mouth dir, counted only while
   `player.pid` there names a live process.
-- The mouth dir is found by sessionvoice's own rule, copied into
-  `busy.mouth_dir()`: `$MOUTH_DIR`, else `<home>/mouth`. The home is
-  `$SESSIONVOICE_HOME`, else `$VOICEMODE_BASE_DIR`, else
-  `~/.sessionvoice` if it holds a heard log, else `~/.voicemode` if it
-  holds one, else `~/.sessionvoice`. `$VOICEMODE_MOUTH_DIR` is still read
-  when `$MOUTH_DIR` is not set.
+- The mouth dir is sessionvoice's to say, and `busy.mouth_dir()` asks
+  it. `$MOUTH_DIR` comes first (`$VOICEMODE_MOUTH_DIR` is still read when
+  `$MOUTH_DIR` is not set), then `$SESSIONVOICE_HOME/mouth`, then
+  `$VOICEMODE_BASE_DIR/mouth`. Else it is `<root>/mouth`, where the root
+  is voice's own answer to `ears home state-dir --json` (or its stdlib
+  twin, `python -m ears.home state-dir --json`).
+- That answer is asked once and kept in
+  `voice-state-dir.json` in tools' state folder, beside its version. It
+  is asked again only when the `ears` file changes (an install or
+  upgrade) or a voice root appears, moves or gains a heard log. Until
+  then each lookup is a few stats and one small read, with no process.
+- Only when no voice can be asked (no `ears`, an `ears` too old to
+  answer, or an answer of a shape tools does not know) does it follow
+  voice's order itself: `~/.sessionvoice` if it holds a heard log, else
+  `~/.sessionkit/voice/state` if it holds one, else `~/.voicemode` if
+  it holds one, else `~/.sessionkit/voice/state`. A heard log counts
+  only as a real file, not a link. It says so once, in
+  `~/.sessionkit/tools/log/busy.log`.
 - That file is the mouth's internal state, not yet a blessed contract,
   so it is read only through `busy.mouth_speaking()`.
 - No mouth dir: the guard does nothing.

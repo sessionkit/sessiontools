@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 from git_support import HOOKS_OFF, hermetic_env
+from message_support import calls, message_answers_from, old_message
 
 from sessiontools import claude_code as cc
 from sessiontools import park, procs, reap
@@ -511,10 +512,11 @@ def test_a_harness_that_cannot_be_searched_is_unknown_not_pass(tmp_path):
 
 @pytest.fixture
 def mail(tmp_path, monkeypatch):
-    """A temp mail root and sessions dir; returns a helper that delivers."""
+    """A temp boxes folder that `message path` answers from, and a sessions
+    dir; returns a helper that delivers."""
     root, sessions = tmp_path / "mail", tmp_path / "sessions"
     (sessions / SID).mkdir(parents=True)
-    env = {"SESSION_MAIL_ROOT": str(root), "SESSIONS_DIR": str(sessions)}
+    env = {**message_answers_from(root), "SESSIONS_DIR": str(sessions)}
 
     class Box:
         dir = root / SID
@@ -552,6 +554,43 @@ def mail(tmp_path, monkeypatch):
 
 def test_no_box_means_nothing_was_ever_delivered(mail):
     assert mail.check() == park.Check("mail", park.PASS, "no session box: nothing was ever delivered")
+
+
+def test_the_box_is_asked_of_message_by_the_session_id(mail):
+    mail.make()
+    mail.check()
+    assert calls(mail.env) == [f"path {SID}"]
+
+
+def test_the_box_is_wherever_message_says_it_is(mail, tmp_path):
+    """A box under `stores/`, or any folder: sessionmail's answer is read,
+    the mail root is never spelled here."""
+    elsewhere = tmp_path / "root" / "stores"
+    (elsewhere / SID / "new").mkdir(parents=True)
+    (elsewhere / SID / "cur").mkdir()
+    (elsewhere / SID / "new" / "1792100001.M1P1.host").write_text("Message-ID: <1.a@h>\n\nx\n")
+    env = {**mail.env, **message_answers_from(elsewhere)}
+    assert park.check_mail(SID, env, []) == park.Check("mail", park.FAIL, "1 unread: <1.a@h>")
+
+
+def test_no_message_on_path_is_unknown_naming_why(mail, tmp_path):
+    mail.deliver("1.a@h")
+    env = {**mail.env, "PATH": str(tmp_path / "empty")}
+    got = park.check_mail(SID, env, [])
+    assert got == park.Check("mail", park.UNKNOWN, "session box unknown: `message` is not on PATH")
+
+
+def test_a_message_too_old_for_the_verb_is_unknown(mail, tmp_path):
+    env = {**mail.env, **old_message(tmp_path / "old")}
+    got = park.check_mail(SID, env, [])
+    assert got.word == park.UNKNOWN and "No such command 'path'" in got.why
+
+
+def test_a_message_that_hangs_is_unknown(mail):
+    def hang(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, kw["timeout"])
+    got = park.check_mail(SID, mail.env, [], run=hang)
+    assert got == park.Check("mail", park.UNKNOWN, "session box unknown: `message path` took over 5s")
 
 
 def test_an_empty_box_passes(mail):
@@ -641,10 +680,16 @@ def test_mail_reads_only_the_header_block(mail):
 
 
 @needs_non_root
-def test_a_mail_root_that_cannot_be_searched_is_unknown_not_no_box(mail):
+def test_a_named_box_whose_root_cannot_be_searched_is_unknown_not_no_box(mail):
+    """sessionmail names the box; its folder cannot be searched. Whether a
+    root that cannot be searched HAS the box is sessionmail's answer now
+    (`message path`); a box it names and we cannot stat is never no box."""
     mail.deliver("1.a@h")
+
+    def named(argv, **kw):
+        return subprocess.CompletedProcess(argv, 0, f"{mail.dir}\n", "")
     with locked(mail.dir.parent):
-        got = park._guarded("mail", mail.check)
+        got = park._guarded("mail", lambda: park.check_mail(SID, mail.env, [], run=named))
     assert got.word == park.UNKNOWN and "PermissionError" in got.why
 
 
@@ -687,7 +732,7 @@ def test_run_checks_runs_all_five_in_order_even_after_a_failure(tmp_path):
     s = Seat(cwd=str(tmp_path))
     s.shell("make test")
     w = park.World(SID, s.session, s.table, park.Facts(),
-                   env={"SESSION_MAIL_ROOT": str(tmp_path / "m"), "SESSIONS_DIR": str(tmp_path)},
+                   env={**message_answers_from(tmp_path / "m"), "SESSIONS_DIR": str(tmp_path)},
                    subscribe=[])
     got = park.run_checks(w, park.declare_promises(no_promises=True))
     assert [c.name for c in got] == list(park.CHECK_NAMES)

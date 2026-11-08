@@ -43,6 +43,8 @@ switch, closing idle seats and saying a seat has settled).
   peers; see [where tools keeps its state][state-paths]
 - `completion`: a completion script for bash or zsh; see
   [shell completion][completion]
+- `web`: the kit's web front door, its login for now (PROPOSED: the
+  kit-web-shell spike)
 
 ## Each verb's form and one example
 
@@ -185,11 +187,16 @@ switch, closing idle seats and saying a seat has settled).
   session park --check
   ```
 
-- `session path [LEAF [NAME]] [--json]`: one absolute path, the folder
-  tools uses for LEAF on this host (`state`, `sessions`, `seats`, `agent`,
-  `backups`, `sound` or `log`); NAME joins a session id under `sessions`
-  or a seat under `seats`. `--json` gives every leaf's `path` and
-  `source`. It reads only, and makes nothing.
+- `session path [LEAF [NAME]] [--json] [--config]`: one absolute path,
+  the folder tools uses for LEAF on this host (`state`, `sessions`,
+  `seats`, `agent`, `backups`, `sound` or `log`); NAME joins a session id
+  under `sessions`, a seat under `seats`, or an agent under `agent` (its
+  home). `--json` gives every leaf's `path` and `source`; with `agent
+  NAME`, the agent contract. `agent --config` prints the agents folder the
+  launcher looks in (on a fresh host, the agent leaf's `config/`, before
+  it exists), and `agent NAME --config` NAME's folder, or nothing for a
+  flat agent ([an agent's home and folder][agent-paths]). It reads only,
+  and makes nothing.
 
   ```sh
   session path sessions --json
@@ -211,6 +218,37 @@ switch, closing idle seats and saying a seat has settled).
 
   ```sh
   eval "$(session completion zsh)"
+  ```
+
+- `session web pair | logout [ID ... | --all] | rescan | serve [--host H]
+  [--port N] [--name NAME]...`: PROPOSED, a spike. `serve` runs the front
+  door (the login, the menu, [Settings][web-settings] read-only, and the
+  rooms) on `127.0.0.1:8750` by default; it refuses `0.0.0.0`, `::` and
+  host names as `--host` before any socket opens. A host name goes in
+  `--name` (repeat it, or list more in `SESSION_WEB_NAMES`, comma- or
+  space-separated): the front door is ALSO reached by that name, over
+  https through a TLS proxy that forwards to
+  `http://127.0.0.1:8750`. A name binds nothing. A request by a name must
+  carry an `https` Origin and gets a `Secure` cookie; a request to the
+  address stays plain http, so one front door answers the Mac's own
+  browser and a phone at once. `localhost` and addresses are refused as
+  names. `passkeys` lists the [passkeys][web-passkeys] kept for the front
+  door, and `passkeys --remove ID` removes one.
+  `pair` prints a one-time code for its `/login` (10 minutes, once, burned
+  by 5 wrong tries); `logout` ends sessions by id or `--all`, and bare
+  lists them and ends none; `rescan` finds the rooms again
+  (`sessionkit.web` entry points, then each catalog room's command on
+  `PATH`) and records them. Only hashes are kept, in
+  `~/.sessionkit/tools/web/`. Each room listens on a unix socket in
+  `~/.sessionkit/tools/web/run/` (0700; the socket 0600), or in
+  `$SESSION_WEB_RUN_DIR` when it is set. A unix socket path holds at most
+  103 bytes on macOS (107 on Linux): when a long `HOME` puts a room's
+  socket past that, `serve` refuses in one line and exits 2, before any
+  socket opens; set `SESSION_WEB_RUN_DIR` to a shorter directory of
+  yours:
+
+  ```sh
+  session web serve
   ```
 
 ## Gone on purpose
@@ -449,7 +487,85 @@ More: the claim, every line word for word, tmux and the dry run are in
   session's own record.
 - A tool whose files have not moved to the new paths reads "not moved".
 
+## `session web`: the Settings page
+
+- `/settings/` behind the login is READ-ONLY. It answers GET and HEAD,
+  and anything else gets 405; nothing on the page writes a file.
+- To change a setting, edit its file by hand. The page names the file
+  that set each value.
+- **Which tools:** every tool `session settings` knows, then every other
+  tool with an installed schema, by name.
+  - "Installed" means a `<tool>.schema.json` or `.<tool>.schema.json` in
+    any package's folder, `~/.sessionkit/<package>/settings/`.
+  - Under such a tool's heading, a line says it is not one sessiontools
+    reads, and names its folder. Its values are read from that folder
+    only.
+- **Which layers:** each tool's template and host layers (`<tool>.json`,
+  then `<tool>.d/*.json`). The page has no session, so no agent, seat or
+  session layer is shown; `session settings` shows those.
+- **A tool with a schema is laid out by it:**
+  - each key's title and hint, with its path;
+  - a switch reads On or Off, and a choice reads its option's title
+    when the option has one;
+  - an object is a group with its own heading;
+  - a key that is not set reads "unset", and shows the schema's default
+    when the schema has one.
+- **Beside every value:** the file that set it, and "locked by" the file
+  whose `_locked` covers it.
+- A set key the schema does not name is listed under "Other keys".
+- **A tool with no schema** is a plain table of its keys. A schema that
+  cannot be read falls back to that table, with a line saying why. A tool
+  whose own files cannot be read gets that line alone.
+- **"Not shown"** lists what the page found and left out:
+  - one name with a schema in two folders;
+  - a known tool's schema in a folder its own lookup never reads;
+  - a second schema name for one tool;
+  - a folder that cannot be listed.
+- To open it, start the front door. It prints its address:
+
+  ```sh
+  session web serve
+  ```
+
+- In a second terminal, print a one-time pairing code:
+
+  ```sh
+  session web pair
+  ```
+
+- Open the address, log in with the code, then choose Settings.
+- More on how settings stack: [docs/settings.md][settings].
+
+## `session web`: a passkey on the front door
+
+PROPOSED. A phone that reaches the front door by its name can sign in
+with a passkey (Touch ID, Face ID or a PIN) instead of a new pairing code
+each time. Every room behind the door gets the same login.
+
+- **What it needs:** the `passkey` extra (`uv tool install
+  'sessiontools[passkey]'`; the kit has it already) and a `--name` the
+  door is reached by over https, such as its host name behind
+  a TLS proxy. WebAuthn refuses an IP address, so the door at
+  `127.0.0.1` has no passkey: there it is the pairing code, as before.
+- **Adding one:** log in by the name with a pairing code. For the next 10
+  minutes the menu offers "Add a passkey for this device". The pairing
+  code is the only way to add a passkey: a session a passkey opened, or
+  one older than 10 minutes, cannot add one. The key must be P-256 or RSA
+  of at least 2048 bits, which is what phones and Macs make.
+- **Signing in:** the login page shows "Sign in with a passkey" beside the
+  code form once the name has a passkey. It opens the same 30-day session
+  a code does.
+- **Lost a phone:** `session web passkeys` lists them, each with an id, its
+  label, the name it is for, and when it was added and last used;
+  `session web passkeys --remove ID` removes one. Removing a passkey ends
+  no session: `session web logout` does. A new pairing code always works.
+- **Where they are kept:** `~/.sessionkit/tools/web/passkeys.json` (0600):
+  each passkey's public key, never a secret.
+
 [owner]: #whose-command-this-is
+[settings]: settings.md
+[web-settings]: #session-web-the-settings-page
+[web-passkeys]: #session-web-a-passkey-on-the-front-door
 [start]: session-start-launcher.md
 [identity]: identity-block.md
 [account]: account.md
@@ -465,6 +581,7 @@ More: the claim, every line word for word, tmux and the dry run are in
 [completion]: shell-completion.md
 [state-paths]: tools-state-paths.md
 [state-migrate]: tools-state-migrate.md
+[agent-paths]: tools-state-paths.md#an-agents-home-and-folder-session-path-agent
 [seat]: #the-default-seat
 [seat-launcher]: session-start-launcher.md#the-default-seat-one-per-host
 [front-door]: session-start-launcher.md#the-front-door-one-holder

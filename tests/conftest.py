@@ -38,7 +38,9 @@ the real agent file of a running agent, keyed. So, for every test:
   launch that declares secrets calls `pass`, which can raise a pinentry
   and wait for a YubiKey touch; the card-error retry kills the gpg-agent).
   A PATH a test builds for itself asks `start_support.walled_bin()` for
-  them, and `private_env` refuses one that reaches the host's;
+  them, and `private_env` refuses one that reaches the host's. A refusing
+  `ears` is walled the same way, and busy's stdlib twin of it is never
+  looked for (ST-290), so the host's voice never answers where the mouth is;
 - the teardown kills the private server BY ITS SOCKETS, with every TMUX*
   variable stripped: tmux follows `$TMUX` before `$TMUX_TMPDIR`, so a test
   that set one would otherwise have its teardown kill THAT server. A
@@ -64,7 +66,7 @@ import ledger_skip_support
 import pytest
 from start_support import WALLED_BIN, WALLED_STUBS
 
-from sessiontools import settings
+from sessiontools import busy, settings
 from sessiontools.account import registry as account_registry
 from sessiontools.settings import SETTINGS_FILE_ENV
 
@@ -129,6 +131,11 @@ def _walled_off_from_the_live_sessions(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(settings, "_said_stranded", set())
     # The same for the stranded accounts (ST-212), said once per process.
     monkeypatch.setattr(account_registry, "_said_stranded", False)
+    # Busy detection asks voice where the mouth is (ST-290): `ears` on PATH
+    # is walled below, and its stdlib twin is never looked for in this
+    # interpreter, so the host's voice never answers a test. A test that
+    # wants an answer puts its own stub `ears` (or twin) in place.
+    monkeypatch.setattr(busy, "_ears_twin", lambda: None)
     # No test reaches the host's `pass` or `gpgconf`: a real `pass show` can
     # raise a pinentry and wait for a YubiKey touch, and the card-error retry
     # runs `gpgconf --kill gpg-agent scdaemon` (R8 slice 4). A test that

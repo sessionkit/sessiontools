@@ -636,7 +636,7 @@ def test_golden_dry_run_direct(tmp_path):
     env = clean_env(AGENTS_DIR=root, HOME=str(tmp_path / "home"),
                     TMPDIR=str(tmp_path / "tmpdir"), TZ="UTC",
                     PATH=f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
-    env.pop("SESSIONS_DIR")          # the default root: <HOME>/.session/sessions
+    env.pop("SESSIONS_DIR")          # the default root: the sessions leaf (fresh: <HOME>/.sessionkit/tools/state/sessions)
     result = subprocess.run(session_cmd("--dry-run", "scout", "review", "the", "auth"),
                             capture_output=True, text=True, timeout=TIMEOUT_S,
                             cwd=str(tmp_path / "work"), env=env, check=False)

@@ -92,7 +92,8 @@ any path there, untouched, and the log says why.
 - `/Volumes/*`, `/net`, `/Network`, and any mount the kernel calls
   non-local or removable.
 - It checks the sound file, the mouth dir (`MOUTH_DIR`, or `mouth/` in
-  sessionvoice's home), the sessions root and each seat's record dir.
+  the root sessionvoice gives), the sessions root and each seat's record
+  dir.
 - A seat whose sound or mouth is refused stays silent: keep the busy
   sound and the mouth elsewhere.
 

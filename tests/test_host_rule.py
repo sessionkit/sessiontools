@@ -115,7 +115,7 @@ BINDING_EXTRAS = [
                                    "SESSION_MAIL_HOST": "\t"}, "Studio", "x", "studio"),
     ("b-setting-empty-tries-live", {}, "", "Box7", "box7"),
     ("c-env-older-dotted", {"SESSION_MAIL_HOST": "Foo.local"}, UNSET, "x", "foo.local"),
-    ("c-live-cut-deep", {}, UNSET, "Box7.tail1234.ts.net", "box7"),
+    ("c-live-cut-deep", {}, UNSET, "Box7.tail1234.example.net", "box7"),
     ("d-newer-beats-older", {"SESSIONMAIL_HOST": "Newer",
                              "SESSION_MAIL_HOST": "Older"}, "Setting", "live", "newer"),
     ("d6-env-pin", {"SESSIONMAIL_HOST": "MacBook-Air"}, UNSET,

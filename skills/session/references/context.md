@@ -70,4 +70,4 @@ for one session:
 {"context": {"near_pct": 10}}
 ```
 
-in `~/.session/sessions/<sid>/settings/session.json`.
+in `<sid>/settings/session.json` under the sessions leaf (`session path sessions`).

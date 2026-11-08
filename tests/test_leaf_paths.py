@@ -76,17 +76,98 @@ def test_the_leaves_and_their_paths_are_the_layout(tmp_path):
     assert settings.tools_state_dir(env).parent == settings.package_dir("tools", env).parent
 
 
-#: Each leaf's fresh default (wave 3): the new folder for state and sound.
-FRESH = {leaf: ("fresh-new" if leaf in ("state", "sound") else "fresh-old")
-         for leaf in settings.LEAVES}
+#: Each leaf's default on a fresh HOME (no ~/.session): the new folder, for
+#: every leaf (ST-288).
+FRESH = {leaf: "fresh-new" for leaf in settings.LEAVES}
 
 
-def test_wave_3_makes_state_and_sound_fresh_new_and_nothing_else():
-    """READY B: state and sound start NEW on a fresh host; the wave-4 leaves
-    (sessions, seats, agent, backups) keep OLD."""
+def test_wave_3_leaves_are_fresh_new_on_any_host_and_the_rest_by_the_root():
+    """state and sound start NEW wherever neither folder is (wave 3); the
+    other four start NEW only on a fresh host, no ~/.session of its own
+    (ST-288, the foreman's whole-root ruling)."""
     assert settings.FRESH_NEW == frozenset({"state", "sound"})
-    assert {leaf for leaf, src in FRESH.items() if src == "fresh-old"} == {
-        "sessions", "seats", "agent", "backups"}
+
+
+def test_a_fresh_host_starts_every_leaf_new(tmp_path):
+    """ST-288: a fresh install creates only
+    ~/.sessionkit, so on a HOME with no ~/.session every leaf is NEW."""
+    env = env_for(tmp_path)
+    assert settings.old_root_real(env) is False
+    for leaf in settings.LEAVES:
+        assert settings.leaf_path(leaf, env) == (settings.leaf_new(leaf, env), "fresh-new"), leaf
+
+
+def test_an_old_host_still_resolves_every_leaf_old(tmp_path):
+    """OLD-WINS-WHILE-REAL stays: a HOME that has every old folder answers
+    old for every leaf, so FRESH_NEW moves no live host (wave 4 does)."""
+    env = env_for(tmp_path)
+    for leaf in settings.LEAVES:
+        settings.leaf_old(leaf, env).mkdir(parents=True, exist_ok=True)
+    for leaf in settings.LEAVES:
+        assert settings.leaf_path(leaf, env) == (settings.leaf_old(leaf, env), "old"), leaf
+        assert ROOTS[leaf](env) == settings.leaf_old(leaf, env), leaf
+
+
+@pytest.mark.parametrize("held", ["", "sessions", "state,sessions,seats,backups"])
+def test_a_partly_old_host_keeps_its_missing_leaves_old(tmp_path, held):
+    """rca-001 C, the foreman's whole-root ruling: a HOME with a ~/.session of
+    its own is a live host. A leaf it has not made yet (say, no agent/) starts
+    OLD beside its siblings; only wave 3's state and sound start new. So the
+    answer is master's for every leaf on such a host."""
+    env = env_for(tmp_path)
+    settings.session_root(env).mkdir()
+    for leaf in filter(None, held.split(",")):
+        settings.leaf_old(leaf, env).mkdir()
+    assert settings.old_root_real(env) is True
+    for leaf in settings.LEAVES:
+        old, new = settings.leaf_old(leaf, env), settings.leaf_new(leaf, env)
+        if old.is_dir():
+            want = (old, "old")
+        elif leaf in settings.FRESH_NEW:
+            want = (new, "fresh-new")
+        else:
+            want = (old, "fresh-old")
+        assert settings.leaf_path(leaf, env) == want, leaf
+    assert not (tmp_path / ".sessionkit").exists()                # a read makes nothing
+
+
+def test_an_old_root_linked_to_tools_state_is_a_fresh_host(tmp_path):
+    """The migrated edge: ~/.session as a link to tools/state/ is moved, not
+    real, so a missing leaf starts NEW. A link anywhere else is real: OLD,
+    a link INTO tools/state/ (its sessions/) too: the edge is samefile with
+    EXACTLY tools/state, never "under it" (sessiontools+super 05:26, SM-1005
+    mirrors it)."""
+    env = env_for(tmp_path)
+    state = settings.tools_state_dir(env)
+    state.mkdir(parents=True)
+    settings.session_root(env).symlink_to(state)
+    assert settings.old_root_real(env) is False
+    assert settings.leaf_path("agent", env) == (settings.leaf_new("agent", env), "fresh-new")
+    settings.session_root(env).unlink()
+    (tmp_path / "elsewhere").mkdir()
+    settings.session_root(env).symlink_to(tmp_path / "elsewhere")
+    assert settings.old_root_real(env) is True
+    assert settings.leaf_path("agent", env) == (settings.leaf_old("agent", env), "fresh-old")
+    settings.session_root(env).unlink()
+    (state / "sessions").mkdir()
+    settings.session_root(env).symlink_to(state / "sessions")
+    assert settings.old_root_real(env) is True
+    assert settings.leaf_path("agent", env) == (settings.leaf_old("agent", env), "fresh-old")
+    # Steps a-c answer per leaf BEFORE the root test: the sessions leaf's new
+    # dir (tools/state/sessions) is there, so step c gives NEW; only a leaf
+    # that falls through to step d gets old (sessiontools+super 05:35). The
+    # hook's bash leaf() agrees on the one leaf it resolves.
+    sessions = settings.leaf_path("sessions", env)
+    assert sessions == (settings.leaf_new("sessions", env), "new")
+    assert bash_leaf(settings.leaf_old("sessions", env), settings.leaf_new("sessions", env),
+                     fresh_word("sessions", env)) == str(sessions[0])
+
+
+def test_a_plain_file_at_the_old_root_is_no_live_host(tmp_path):
+    env = env_for(tmp_path)
+    settings.session_root(env).write_text("not a folder")
+    assert settings.old_root_real(env) is False
+    assert settings.leaf_path("seats", env)[1] == "fresh-new"
 
 
 def test_an_unknown_leaf_is_refused():
@@ -317,20 +398,19 @@ def test_on_an_old_layout_home_every_writer_writes_where_it_did(tmp_path):
     assert made == []
 
 
-def test_on_a_fresh_home_state_and_sound_writers_write_new(tmp_path):
-    """A fresh host (neither folder): the state leaf's writers and the sound
-    engine's home go under tools/state/; sessions, seats and agent stay at
-    their 7ef0782 places until wave 4."""
+def test_on_a_fresh_home_every_writer_writes_new(tmp_path):
+    """A fresh host (neither folder): every leaf's writers go under
+    tools/state/, the session, seat and agent folders too (ST-288)."""
     env = env_for(tmp_path)
-    new_state, s = tmp_path / NEW["state"], tmp_path / ".session"
+    new_state = tmp_path / NEW["state"]
     assert writer_paths(env) == {
         "snapshot": new_state / "list/snapshot.json",
         "holders": new_state / "holders",
         "default-model": new_state / default_model.STATE_SUBDIR,
         "pane-state lock": new_state / pane_state.LOCK_DIR / pane_state.LOCK_NAME,
-        "session dir": s / "sessions" / SID,
-        "seat dir": s / "seats/scout",
-        "agent home": s / "agent/home/alice",
+        "session dir": tmp_path / NEW["sessions"] / SID,
+        "seat dir": tmp_path / NEW["seats"] / "scout",
+        "agent home": tmp_path / NEW["agent"] / "home/alice",
         "sound sender": tmp_path / NEW["sound"] / "bin" / sound.SENDER}
     write_state(env)
     assert snapshot.snapshot_path(env).exists()
@@ -369,8 +449,8 @@ def test_a_start_list_reap_cycle_on_a_fresh_home_makes_no_old_state(tmp_path, mo
     step: a start (its holder claim, its session dir and launch record), a
     list (the snapshot), default-model and pane-state writes, a sound engine
     install folder, and a reap (its log). tools writes no ~/.session/state
-    and no ~/.local/share; its only other top-level dot-dir is ~/.session
-    holding the sessions leaf, which moves in wave 4."""
+    and no ~/.local/share; since ST-288 it makes no ~/.session at all: the
+    session dir is under tools/state/sessions/."""
     from sessiontools import reap
     from sessiontools.start import record
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -390,10 +470,10 @@ def test_a_start_list_reap_cycle_on_a_fresh_home_makes_no_old_state(tmp_path, mo
     reap.log_act(act, now=1_800_000_000.0, env=env)
     assert (settings.log_dir(settings.PACKAGES["session"], env) / "reap.log").exists()
 
-    assert top_level(tmp_path) <= {".sessionkit", ".session"}
-    assert not (tmp_path / OLD["state"]).exists()
+    assert top_level(tmp_path) == {".sessionkit"}
+    assert not (tmp_path / ".session").exists()
     assert not (tmp_path / ".local").exists()
-    assert top_level(tmp_path / ".session") == {"sessions"}      # the wave-4 leaf only
+    assert session == tmp_path / NEW["sessions"] / SID
     assert (tmp_path / NEW["state"] / "list" / "snapshot.json").exists()
     assert (tmp_path / NEW["state"] / "holders" / "scout.json").exists()
     assert (tmp_path / NEW["sound"] / "bin").is_dir()
@@ -405,33 +485,71 @@ def test_a_start_list_reap_cycle_on_a_fresh_home_makes_no_old_state(tmp_path, mo
 def test_agents_dir_moves_only_the_launchers_lookup(tmp_path, layout):
     """decompose-001 review, gap 1: live seats set AGENTS_DIR to a
     taskmaster checkout. A seat's home and the settings reader's agent file
-    must stay where they resolved at 7ef0782."""
+    follow the agent leaf (old on an old host, new on a fresh one, ST-288),
+    never AGENTS_DIR."""
     if layout == "old":
         old_layout(tmp_path)
     elsewhere = tmp_path / "taskmaster" / "agents"
     elsewhere.mkdir(parents=True)
     env = env_for(tmp_path, AGENTS_DIR=str(elsewhere))
+    leaf = tmp_path / (OLD if layout == "old" else NEW)["agent"]
     assert ag.agents_root(env) == str(elsewhere)
-    assert settings.agent_root(env) == tmp_path / ".session/agent"
-    assert settings.agent_home("alice", env) == tmp_path / ".session/agent/home/alice"
-    assert settings.agent_config("alice", env).parent.parent in (
-        tmp_path / ".session/agent", tmp_path / ".session/agent/config")
+    assert settings.agent_root(env) == leaf
+    assert settings.agent_home("alice", env) == leaf / "home/alice"
+    assert settings.agent_config("alice", env).parent.parent in (leaf, leaf / "config")
     assert str(elsewhere) not in str(settings.agent_config("alice", env))
     assert settings.leaf_path("agent", env)[1] != "override"
 
 
 def test_agents_root_falls_back_to_the_pre_4_2_folder(tmp_path):
+    """On a live host (an old root of its own): the pre-4.2 folder until the
+    agent leaf's config/ is there. A fresh host is ST-291 R8's
+    (test_session_path's fresh-host tests): config/ before it exists."""
+    (tmp_path / ".session").mkdir()                                  # a live host
     env = env_for(tmp_path)
     assert ag.agents_root(env) == str(tmp_path / ".session/agents")
     (tmp_path / NEW["agent"] / "config").mkdir(parents=True)        # a moved agent leaf
     assert ag.agents_root(env) == str(tmp_path / NEW["agent"] / "config")
 
 
+@pytest.mark.parametrize("rung", ["AGENTS_DIR", "config", "agents"])
+def test_agents_rung_is_agents_roots_chain_naming_its_rung(tmp_path, rung):
+    """ST-291 (design §2): agents_root is agents_rung()[0] on every rung, so
+    `session path agent --config` and the launcher cannot disagree."""
+    if rung == "AGENTS_DIR":
+        (tmp_path / "elsewhere/agents").mkdir(parents=True)
+        env = env_for(tmp_path, AGENTS_DIR=str(tmp_path / "elsewhere/agents"))
+        want = tmp_path / "elsewhere/agents"
+    elif rung == "config":
+        old_layout(tmp_path)
+        (tmp_path / OLD["agent"] / "config").mkdir(parents=True, exist_ok=True)
+        env, want = env_for(tmp_path), tmp_path / OLD["agent"] / "config"
+    else:
+        (tmp_path / ".session/agents").mkdir(parents=True)
+        env, want = env_for(tmp_path), tmp_path / ".session/agents"
+    assert ag.agents_rung(env) == (str(want), rung)
+    assert ag.agents_rung(env)[0] == ag.agents_root(env)
+    assert ag.RUNGS == ("AGENTS_DIR", "config", "agents")
+
+
 # --- the bash copy in hooks/busy-sound agrees with python ------------------------------------
 
-def fresh_word(leaf: str) -> str:
-    """The hook's third `leaf` word for LEAF: python's fresh default."""
-    return "new" if leaf in settings.FRESH_NEW else "old"
+def fresh_word(leaf: str, env: dict) -> str:
+    """The hook's third `leaf` word for LEAF on ENV's HOME: python's fresh
+    default (new for a FRESH_NEW leaf or on a fresh host, else old)."""
+    return "new" if leaf in settings.FRESH_NEW or not settings.old_root_real(env) else "old"
+
+
+def bash_fresh(root: Path, state: Path) -> str:
+    """Run hooks/busy-sound's own `fresh` function, cut from the file."""
+    text = SHIM.read_text()
+    m = re.search(r"^fresh\(\) \{.*?^\}$", text, re.MULTILINE | re.DOTALL)
+    assert m, "hooks/busy-sound has no fresh() function"
+    r = subprocess.run(["/bin/sh", "-c",
+                        m.group(0) + '\nfresh "$1" "$2"; printf %s "$fw"',
+                        "sh", str(root), str(state)],
+                       capture_output=True, text=True, check=True, timeout=10)
+    return r.stdout
 
 
 def bash_leaf(old: Path, new: Path, fresh: str) -> str:
@@ -446,10 +564,13 @@ def bash_leaf(old: Path, new: Path, fresh: str) -> str:
     return r.stdout
 
 
-LAYOUTS = ["fresh", "old-only", "new-only", "migrated", "both-real", "old-elsewhere"]
+LAYOUTS = ["fresh", "old-only", "new-only", "migrated", "both-real", "old-elsewhere",
+           "partial-old"]
 
 
 def make(layout: str, old: Path, new: Path, tmp_path: Path) -> None:
+    if layout == "partial-old":                          # a live host's root, not this leaf
+        settings.session_root({"HOME": str(tmp_path)}).mkdir(exist_ok=True)
     if layout in ("old-only", "both-real"):
         old.mkdir(parents=True)
     if layout in ("new-only", "both-real", "migrated", "old-elsewhere"):
@@ -469,18 +590,51 @@ def test_the_hooks_bash_rule_is_pythons(tmp_path, leaf, layout):
     env = env_for(tmp_path)
     old, new = settings.leaf_old(leaf, env), settings.leaf_new(leaf, env)
     make(layout, old, new, tmp_path)
-    assert bash_leaf(old, new, fresh_word(leaf)) == str(settings.leaf_path(leaf, env)[0])
+    assert bash_leaf(old, new, fresh_word(leaf, env)) == str(settings.leaf_path(leaf, env)[0])
+
+
+ROOT_LAYOUTS = ["absent", "real", "file", "linked-to-state", "linked-into-state",
+                "linked-elsewhere"]
+
+
+@pytest.mark.parametrize("layout", ROOT_LAYOUTS)
+def test_the_hooks_bash_fresh_is_old_root_real(tmp_path, layout):
+    env = env_for(tmp_path)
+    root, state = settings.session_root(env), settings.tools_state_dir(env)
+    state.mkdir(parents=True)
+    if layout == "real":
+        root.mkdir()
+    elif layout == "file":
+        root.write_text("x")
+    elif layout == "linked-to-state":
+        root.symlink_to(state)
+    elif layout == "linked-into-state":                  # samefile EXACTLY, not "under"
+        (state / "sessions").mkdir()
+        root.symlink_to(state / "sessions")
+    elif layout == "linked-elsewhere":
+        (tmp_path / "elsewhere").mkdir()
+        root.symlink_to(tmp_path / "elsewhere")
+    assert bash_fresh(root, state) == ("old" if settings.old_root_real(env) else "new")
+    assert settings.old_root_real(env) is (
+        layout in ("real", "linked-into-state", "linked-elsewhere"))
 
 
 def test_the_hook_spells_each_leaf_as_settings_does():
     text = SHIM.read_text()
+    h = {"HOME": "/H"}
+
+    def spell(p: Path) -> str:
+        return p.as_posix().replace("/H", "$HOME", 1)
+    words = {"sessions": '"$fw"', "sound": "new"}
     for leaf in ("sessions", "sound"):
-        old = settings.leaf_old(leaf, {"HOME": "/H"}).as_posix().replace("/H", "$HOME", 1)
-        new = settings.leaf_new(leaf, {"HOME": "/H"}).as_posix().replace("/H", "$HOME", 1)
-        assert f'leaf "{old}" "{new}" {fresh_word(leaf)}\n' in text, leaf
+        old, new = spell(settings.leaf_old(leaf, h)), spell(settings.leaf_new(leaf, h))
+        assert f'leaf "{old}" "{new}" {words[leaf]}\n' in text, leaf
+    assert "sound" in settings.FRESH_NEW and "sessions" not in settings.FRESH_NEW
+    root, state = spell(settings.session_root(h)), spell(settings.tools_state_dir(h))
+    assert f'  fresh "{root}" "{state}"\n  leaf "{spell(settings.leaf_old("sessions", h))}"' in text
 
 
-@pytest.mark.parametrize("layout", ["old-only", "migrated", "new-only"])
+@pytest.mark.parametrize("layout", ["fresh", "old-only", "migrated", "new-only", "partial-old"])
 def test_the_turn_mark_lands_where_python_resolves_with_no_sessions_dir(tmp_path, layout):
     """End to end through the real hook, SESSIONS_DIR unset: the shim finds
     the session dir by the bash rule, python writes the mark by its own."""

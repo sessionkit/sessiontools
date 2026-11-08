@@ -9,7 +9,9 @@ These tests pin both fixes:
 - `uv version` carries --frozen, on the real path and the dry path alike;
 - a REAL release, in a throwaway git clone, leaves every line of uv.lock as
   it was except the root `sessiontools` version line, so every dependency
-  pin is byte-identical, and `uv lock --check` (offline) passes after it;
+  pin is byte-identical, and `uv lock --check` (offline) passes after it,
+  on any installed interpreter in requires-python (`lock_python`), while a
+  stale lock still fails it; with none installed, it skips and says so;
 - the root-line edit fails closed: no root block, two, or two version lines
   in it, and the release refuses before `uv version` writes anything;
 - an existing vX.Y.Z tag is refused before anything is written, real or dry,
@@ -135,6 +137,37 @@ def next_patch(version: str) -> str:
     return f"{major}.{minor}.{int(patch) + 1}"
 
 
+def lock_python(repo: Path) -> str:
+    """The interpreter `uv lock --check` runs on here, found by a probe in the
+    test's own env (offline, downloads `never`), or a loud skip.
+
+    `.python-version` pins one minor (3.13), while pyproject allows a range
+    (>=3.11,<3.15). A lock is universal over that range, so any interpreter in
+    it checks the same lock. A bare `uv lock --check` here honours the pin and,
+    with downloads off, fails on a host that has a supported Python but not the
+    pinned one: 3.14 only, say (ST-282). So: the pinned interpreter if uv finds
+    one, else any in requires-python, passed as `--python`. That one flag
+    overrides the pin and nothing else uv reads for the lock. Neither found
+    means this host cannot run the check at all: skip, naming what is missing,
+    never fail."""
+    pinned = run(repo, "uv", "python", "find")
+    if pinned.returncode == 0:
+        return pinned.stdout.strip()
+    spec = tomllib.loads((repo / "pyproject.toml").read_text())["project"]["requires-python"]
+    ranged = run(repo, "uv", "python", "find", spec)
+    if ranged.returncode == 0:
+        return ranged.stdout.strip()
+    pin_file = repo / ".python-version"
+    pin = pin_file.read_text().strip() if pin_file.exists() else "(no .python-version)"
+    pytest.skip(f"no Python interpreter for uv offline: neither the pinned {pin} nor any in "
+                f"requires-python {spec} is installed, and downloads are off "
+                f"(UV_PYTHON_DOWNLOADS=never). uv said: {ranged.stderr.strip()}")
+
+
+def lock_check(repo: Path, python: str) -> subprocess.CompletedProcess[str]:
+    return run(repo, "uv", "lock", "--check", "--python", python)
+
+
 def snapshot(repo: Path) -> dict[str, bytes]:
     files = ("pyproject.toml", "uv.lock", "CHANGELOG.md",
              ".claude-plugin/plugin.json", ".claude-plugin/marketplace.json")
@@ -222,13 +255,35 @@ def test_release_with_a_floor_pypi_does_not_have(clone: Path) -> None:
 
 @needs_uv_git
 def test_lock_check_passes_offline_after_the_release(clone: Path) -> None:
-    pre = run(clone, "uv", "lock", "--check")
+    python = lock_python(clone)
+    pre = lock_check(clone, python)
     assert pre.returncode == 0, f"uv lock --check fails offline BEFORE the release: {pre.stderr}"
     out = release(clone, "patch")
     assert out.returncode == 0, out.stdout + out.stderr
-    check = run(clone, "uv", "lock", "--check")
+    check = lock_check(clone, python)
     assert check.returncode == 0, check.stderr
     assert git(clone, "status", "--porcelain").strip() == ""
+
+
+@needs_uv_git
+@pytest.mark.parametrize("edit", [
+    pytest.param(lambda t: t.replace(f'version = "{tomllib.loads(t)["project"]["version"]}"',
+                                     'version = "99.0.0"', 1), id="project-version"),
+    pytest.param(lambda t: re.sub(r'"jsonschema>=[^"]+"', '"jsonschema>=4.0.1"', t, count=1),
+                 id="dependency-floor"),
+])
+def test_lock_check_still_fails_on_a_stale_lock(clone: Path, edit) -> None:
+    """The `--python` above must not weaken the check: a pyproject the lock no
+    longer matches still fails it, on the same interpreter."""
+    python = lock_python(clone)
+    pyproject = clone / "pyproject.toml"
+    text = pyproject.read_text()
+    stale = edit(text)
+    assert stale != text
+    pyproject.write_text(stale)
+    check = lock_check(clone, python)
+    assert check.returncode != 0, f"a stale uv.lock passed `uv lock --check`: {check.stdout}"
+    assert "No interpreter found" not in check.stderr, check.stderr
 
 
 @needs_uv_git

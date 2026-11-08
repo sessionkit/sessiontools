@@ -16,6 +16,8 @@ read from today.
   ([who reads which layers][layers]).
 - **See what applies:** `session settings <session-id> [tool]` prints each
   key with the file that set it.
+- **See it in a browser:** the web front door's Settings page lays each
+  tool out by its schema, read-only ([the Settings page][web-page]).
 - **How the layers stack**, for the whole family: the Session Kit
   settings guide, [sessionkit's docs/settings.md][kit-settings].
 
@@ -33,10 +35,13 @@ Settings are JSON. Paths are shown under `~`, your home folder.
   their files sit side by side in `~/.sessionkit/tools/settings/`. No
   other folder is read for them.
 - **The lower layers** are the same for every tool: an agent file's
-  `settings:` front matter (`~/.session/agent/config/<name>.md`), then
-  `~/.session/seats/<seat>/settings/<tool>.json`, then
-  `~/.session/sessions/<session-id>/settings/<tool>.json`. Each of the
-  last two may have a `<tool>.d/` folder too.
+  `settings:` front matter (`<agent>/config/<name>.md`), then
+  `<seats>/<seat>/settings/<tool>.json`, then
+  `<sessions>/<session-id>/settings/<tool>.json`. Each of the
+  last two may have a `<tool>.d/` folder too. `<agent>`, `<seats>` and
+  `<sessions>` are leaves of tools' state: the old `~/.session/<leaf>/`
+  while it is real, else `~/.sessionkit/tools/state/<leaf>/`
+  (`session path LEAF` prints each).
 - **In one layer,** `<tool>.json` is read first, then `<tool>.d/*.json` in
   name order. A later file wins.
 - **sessiontools installs no template.** A template file is read when one
@@ -119,7 +124,7 @@ drop-in in `~/.sessionkit/tools/settings/session.d/`.
 | Key | Type | Default | What it does | Layers read today |
 | --- | --- | --- | --- | --- |
 | `operator.address` | string | none | The operator's full mail address, used as written. `AGENT_OPERATOR_ADDR` wins over it, and grants no privilege. | template and host |
-| `operator.mailbox` | string | none | The operator's local mail box name. With no `address`, the address is `<mailbox>@<this host>`, when that box exists under `~/.mail/agents` (`SESSION_MAIL_ROOT` overrides). `<this host>` is the full name when it is under the short host, else the short host; never a reverse-DNS name. | template and host |
+| `operator.mailbox` | string | none | The operator's local mail box name. With no `address`, the address is `<mailbox>@<this host>`, when sessionmail knows that box on this host (`message path <mailbox>` answers it). `<this host>` is the full name when it is under the short host, else the short host; never a reverse-DNS name. | template and host |
 | `operator.privileged` | list of strings | empty: the operator alone | Seat names or addresses that may act as administrators. The operator is always one. A list that is not a list is ignored. | template and host |
 | `list.max_age` | number (seconds) | `2` | How old a `session list` snapshot may be and still be served. `0` turns the cache off. `SESSION_LIST_MAX_AGE` wins over it. | template and host |
 | `pane_state.listeners` | list of strings | `["pager listen"]` | Commands that do not count as work, so a seat running only these reads FREE. An empty list: every tool shell is work. | template and host |
@@ -201,10 +206,10 @@ key names. Any other key is named on stderr and dropped.
 `session start` writes these into the session layer at birth. They are not
 settings for you to set:
 
-- `~/.session/sessions/<session-id>/settings/session.json`: `agent`,
+- `<sessions>/<session-id>/settings/session.json`: `agent`,
   `agent_file` and `seat`, each when there is one. The readers take a
   session's agent and seat layers from here.
-- `~/.session/sessions/<session-id>/settings/<tool>.d/50-env.json`: each
+- `<sessions>/<session-id>/settings/<tool>.d/50-env.json`: each
   environment variable an installed schema names (`x-env`), read once. The
   environment is not a layer after that. sessiontools' own schema names no
   variable.
@@ -225,3 +230,4 @@ stack: the Session Kit settings guide,
 [layers]: #who-reads-which-layers
 [written]: #written-for-you
 [default-model]: default-model.md
+[web-page]: session.md#session-web-the-settings-page

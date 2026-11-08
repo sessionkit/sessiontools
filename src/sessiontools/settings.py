@@ -164,8 +164,9 @@ def settings_root(env: Mapping[str, str] | None = None) -> Path:
 
 def session_root(env: Mapping[str, str] | None = None) -> Path:
     """DEPRECATED: `~/.session/`, the OLD root of tools' state, sessions and
-    seats (before 0.3.2). Only leaf_old (the fallback rule) and the migrate
-    verb read it. Every other reader and writer takes its leaf's resolver:
+    seats (before 0.3.2). Only leaf_old and old_root_real (the fallback
+    rule), legacy_agents_dir and the migrate verb read it. Every other
+    reader and writer takes its leaf's resolver:
     state_root, sessions_root, seats_root, agent_root, backups_root,
     sound_root (leaf_path)."""
     return home(env) / SESSION_DIR
@@ -225,6 +226,36 @@ def accounts_dir(env: Mapping[str, str] | None = None) -> Path:
     shape is spelled, as package_dir is for settings: the package is
     PACKAGES["session"], never a literal."""
     return kit_root(env) / PACKAGES["session"] / ACCOUNTS_DIR
+
+
+#: The kit web front door's folder (`session web`), beside `settings/` and
+#: `accounts/`, never inside `settings/`: it holds the pending pairing
+#: code's hash and the live sessions' hashes, and keys are not settings.
+WEB_DIR = "web"
+
+
+def web_dir(env: Mapping[str, str] | None = None) -> Path:
+    """`~/.sessionkit/tools/web/`: the front door's pairing code, sessions
+    and (later) room sockets and logs. The ONE place the shape is spelled:
+    the package is PACKAGES["session"], never a literal."""
+    return kit_root(env) / PACKAGES["session"] / WEB_DIR
+
+
+#: Points the front door's room sockets somewhere other than `web/run/`: a
+#: unix socket path holds at most 103 bytes on macOS (107 on Linux), and a
+#: long HOME can put `web/run/<room>.sock` past it.
+WEB_RUN_DIR_ENV = "SESSION_WEB_RUN_DIR"
+
+
+def web_run_dir(env: Mapping[str, str] | None = None) -> Path:
+    """The directory the front door's room sockets are in: `$SESSION_WEB_RUN_DIR`
+    when it is set (made absolute), else `web_dir()/run/`. Either way the
+    supervisor makes it 0700 if it is missing and refuses it unless it is a
+    0700 directory of this user's."""
+    named = (os.environ if env is None else env).get(WEB_RUN_DIR_ENV) or ""
+    if named:
+        return Path(os.path.abspath(os.path.expanduser(named)))
+    return web_dir(env) / "run"
 
 
 def host_dir(tool: str, env: Mapping[str, str] | None = None) -> tuple[Path, str | None]:
@@ -505,13 +536,18 @@ AMBIGUOUS_SHOW = 10
 #   1. its override is set:                         that path   (override)
 #   2. old is a directory that is not new's:         old         (old)
 #   3. new is a directory (old a link to it, or gone): new       (new)
-#   4. neither:                                      the fresh default,
-#      old (fresh-old) or new (fresh-new): FRESH_NEW names the leaves whose is new.
+#   4. neither:                                      the fresh default:
+#      new (fresh-new) for a FRESH_NEW leaf, or on a FRESH HOST, one with no old
+#      root of its own (old_root_real); else old (fresh-old).
 # Old wins while it is real because the leaves NEST: a fresh write under
 # `tools/state/sound/` makes `tools/state/`, and "new wins" would then strand
 # a live `~/.session/state/`. Readers AND writers take the same answer, so on
 # a host that has the old folder no writer switches until its data moves (the
 # old path becomes a link); only a host with neither folder starts new.
+# Step 4 asks the ROOT, not just the leaf: a host with a `~/.session/` of its
+# own is a live host, so a leaf it has not made yet (say, no
+# `~/.session/agent/`) still starts OLD beside its siblings. A fresh install,
+# with no `~/.session/`, makes only `~/.sessionkit`.
 # hooks/busy-sound carries the ONE bash copy of this rule (sessions, sound).
 
 #: tools' state folder under its package's home, beside `settings/` and `log/`.
@@ -530,13 +566,31 @@ OLD_SOUND_DIR = (".local", "share", "sessiontools", "sound")
 #: The pre-4.2 flat agents folder under the old root, read only as the
 #: launcher's last fallback (start/agents.agents_root).
 OLD_AGENTS_DIR = "agents"
-#: The leaves whose FRESH default (neither path there) is NEW. Wave 3 (READY
-#: B, build-cut.md §3): state and sound, so a fresh host writes its state and
-#: installs its sound engine under `~/.sessionkit/tools/state/`. sessions,
-#: seats, agent and backups keep OLD until wave 4 (the all-seats-down move).
+#: The leaves whose FRESH default (neither path there) is NEW on ANY host,
+#: one with a `~/.session/` of its own too. Wave 3 (READY B, build-cut.md §3):
+#: state and sound. The other four start new only on a fresh host
+#: (old_root_real false), and keep OLD on a live host until wave 4 (per
+#: host), so no host that has `~/.session/` changes its answer.
 FRESH_NEW: frozenset[str] = frozenset({"state", "sound"})
 #: What `leaf_path` says it used.
 LEAF_SOURCES = ("override", "old", "new", "fresh-old", "fresh-new")
+
+
+def read_leaf_entry(obj: object) -> tuple[Path, str] | None:
+    """The ONE reader of a `{"path", "source"}` entry: the shape `session
+    path --json` writes for each leaf, and the shape a peer that answers in
+    the same words gives (sessionvoice's `ears home state-dir --json`, whose
+    root and items are entries like these). (path, source) when PATH is an
+    absolute string and SOURCE one of LEAF_SOURCES; other keys are ignored.
+    Anything else is None, never a guess. Never raises."""
+    if not isinstance(obj, dict):
+        return None
+    path, source = obj.get("path"), obj.get("source")
+    if not isinstance(path, str) or "\0" in path or not os.path.isabs(path):
+        return None
+    if not isinstance(source, str) or source not in LEAF_SOURCES:
+        return None
+    return Path(path), source
 
 
 def _leaf(leaf: str) -> str:
@@ -573,6 +627,16 @@ def legacy_agents_dir(env: Mapping[str, str] | None = None) -> Path:
     return session_root(env) / OLD_AGENTS_DIR
 
 
+def old_root_real(env: Mapping[str, str] | None = None) -> bool:
+    """True when `~/.session/` is a directory of its own: a live host, whose
+    missing non-FRESH_NEW leaves start OLD. False when it is absent, or the
+    same directory as tools' state folder (a host that linked its whole old
+    root into the new tree counts as moved). A link to anywhere else is real.
+    hooks/busy-sound's `fresh()` is this, by builtins (`-d`, `-ef`)."""
+    root = session_root(env)
+    return os.path.isdir(root) and not _same_dir(root, tools_state_dir(env))
+
+
 def leaf_override(leaf: str, env: Mapping[str, str] | None = None) -> Path | None:
     """LEAF's override as the path it names, else None (unset or empty).
     SESSION_STATE_DIR and SESSIONS_DIR are `~`-expanded, as they always were;
@@ -604,7 +668,7 @@ def leaf_path(leaf: str, env: Mapping[str, str] | None = None) -> tuple[Path, st
         return old, "old"
     if os.path.isdir(new):
         return new, "new"
-    if leaf in FRESH_NEW:
+    if leaf in FRESH_NEW or not old_root_real(env):
         return new, "fresh-new"
     return old, "fresh-old"
 
@@ -707,7 +771,8 @@ def agent_config(agent: str, env: Mapping[str, str] | None = None) -> Path:
     """The agent's MD under `agent/config/`: `<name>/<name>.md` beside its
     extras (avatar, portrait, letter, tour) when that directory exists,
     else the flat `<name>.md`. The directory layout wins, as the launcher's
-    does."""
+    does. It reads `config/` only: for an agent's folder (its face) as the
+    launcher finds it, use `paths.agent_report`."""
     config = agent_root(env) / "config"
     if _is_dir(config / agent):
         return config / agent / f"{agent}.md"
@@ -1051,6 +1116,124 @@ def check_schema(tool: str, values: dict, origins: Mapping[tuple, str],
             continue
         who = origins.get(path) or next((f for k, f in origins.items() if k[:len(path)] == path), "?")
         out.append(f"{_shown(path)}: {err.message} ({who})")
+    return out
+
+
+# --- discovery: the Settings page's other tools --------------------------------
+#
+# The web Settings page shows every tool that has an installed schema, not
+# only the ones PACKAGES names. Discovery is how it finds the others, and it
+# is for that page ALONE: schema_tools, env_keys, the birth and `session
+# settings` keep to the map, so a schema dropped into some package's folder
+# can never add a variable to a launch or a key to a reader. Nothing here
+# writes.
+
+#: A schema file discovery counts: an optional leading dot, the tool's name
+#: (a lowercase letter, then lowercase letters, digits or dashes, 32 in all
+#: at most), then `.schema.json`. The tool is read from the FILE's name and
+#: never from the folder's, since one package folder holds several tools.
+DISCOVERED_SCHEMA = re.compile(r"\.?([a-z][a-z0-9-]{0,31})\.schema\.json")
+
+
+class Discovered(NamedTuple):
+    """A tool PACKAGES does not name, found by its schema file: the tool,
+    the package settings folder it was found in, and the schema to read."""
+
+    tool: str
+    folder: Path
+    schema: Path
+
+
+def _schema_files(folder: Path) -> dict[str, list[Path]]:
+    """Each tool with a schema file in FOLDER (one level, no `.d/`), and its
+    files: the dot name first. A file reached under two names (a symlink to
+    its neighbour) is kept once. Raises SettingsUnreadable when FOLDER, or
+    an entry in it, cannot be looked at."""
+    out: dict[str, list[Path]] = {}
+    for entry in sorted(_entries(folder), key=lambda q: (q.name.lstrip("."), q.name[:1] != ".")):
+        m = DISCOVERED_SCHEMA.fullmatch(entry.name)
+        if m is None or not _is_file(entry):
+            continue
+        kept = out.setdefault(m.group(1), [])
+        if all(entry.resolve() != q.resolve() for q in kept):
+            kept.append(entry)
+    return out
+
+
+def discovered_tools(env: Mapping[str, str] | None = None) -> tuple[list[Discovered], list[str]]:
+    """(the tools found by their schema under `~/.sessionkit/*/settings/`
+    that PACKAGES does not name, sorted by tool; one line per thing seen
+    and not used).
+
+    Read-only, and for the web Settings page only. Each package folder is
+    looked at one level deep. Symlinks are followed, as every reader in this
+    module follows them; a dangling link or a loop is absent. A folder
+    reached twice (a package folder linked to another) is read once.
+
+    Lines, never errors: a kit root or package folder that cannot be listed
+    is named and skipped; a second schema name for one tool in one folder is
+    named as not read; a tool PACKAGES names, whose schema sits where its
+    own lookup (schema_candidates) never looks, is named as not read there;
+    a name with a schema in two or more folders is
+    not shown at all, and the line names every folder, since nothing says
+    which one is meant."""
+    root = kit_root(env)
+    notes: list[str] = []
+    try:
+        packages = sorted(_entries(root), key=lambda q: q.name)
+    except OSError as e:
+        if e.errno in _ABSENT:
+            return [], []
+        return [], [f"{root}: cannot be listed ({e.strerror}), so no other tool was looked for"]
+    seen: set[Path] = set()
+    by_tool: dict[str, list[tuple[Path, Path]]] = {}
+    for package in packages:
+        folder = package / "settings"
+        try:
+            if not _is_dir(folder) or folder.resolve() in seen:
+                continue
+            seen.add(folder.resolve())
+            files = _schema_files(folder)
+        except SettingsUnreadable as e:
+            notes.append(f"{folder}: cannot be listed ({e.strerror}), so it was skipped")
+            continue
+        except OSError as e:
+            if e.errno in _ABSENT:  # removed after it was seen: there is nothing to read
+                continue
+            raise
+        for tool, paths in files.items():
+            owner = PACKAGES.get(tool)
+            if owner is not None:
+                # Its own lookup (find_schema) decides; a file it can reach,
+                # by the package folder or a settings-file variable, is quiet.
+                reached = {c.resolve() for c in schema_candidates(tool, env)}
+                notes.extend(f"{q}: {tool} belongs to the {owner} package, so this "
+                             f"schema is not read" for q in paths if q.resolve() not in reached)
+                continue
+            notes.extend(f"{tool}: schema {q} is shadowed by {paths[0]} and not read"
+                         for q in paths[1:])
+            by_tool.setdefault(tool, []).append((folder, paths[0]))
+    found: list[Discovered] = []
+    for tool in sorted(by_tool):
+        hits = by_tool[tool]
+        if len(hits) > 1:
+            notes.append(f"{tool}: a schema in each of {', '.join(str(f) for f, _ in hits)}; "
+                         f"none is shown, since nothing says which one is meant")
+            continue
+        found.append(Discovered(tool, *hits[0]))
+    return found, notes
+
+
+def folder_sources(tool: str, folder: Path) -> list[Source]:
+    """A discovered TOOL's layers, from FOLDER and nowhere else: its template
+    `<tool>.template.json`, then the host layer as layer_files spells it.
+    No agent, seat or session layer. Ready for merge. Raises as
+    read_json_object raises for a file that is not a JSON object."""
+    out: list[Source] = []
+    template = folder / f"{tool}.template.json"
+    if _is_file(template):
+        out.append(Source("template", template, read_json_object(template)))
+    out.extend(Source("host", q, read_json_object(q)) for q in layer_files(folder, tool))
     return out
 
 

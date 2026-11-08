@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from conftest import ANCHOR_SUMMER
 from git_support import HOOKS_OFF, hermetic_env
+from message_support import message_answers_from
 
 from sessiontools import claude_code as cc
 from sessiontools import cli, park, procs, window
@@ -92,7 +93,7 @@ class Home:
         git(wt, "init", "-q")
         git(wt, "commit", "-q", "--allow-empty", "-m", "seed")
         self.env = {"CLAUDE_CODE_SESSION_ID": SID, "SESSIONS_DIR": str(self.sessions),
-                    "SESSION_MAIL_ROOT": str(self.mail),
+                    **message_answers_from(self.mail, log=False),
                     "CLAUDE_PROJECTS_DIR": str(root / "projects"),
                     "SESSION_SIDECAR_DIR": str(root / "sidecars"), "HOME": str(root / "home")}
         self.table: dict[int, Proc] = {1: Proc(1, 0, T0, "/sbin/launchd")}

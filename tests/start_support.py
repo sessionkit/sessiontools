@@ -30,9 +30,12 @@ ROOT = Path(__file__).resolve().parents[1]
 #: conftest's refusing stubs: a real `pass show` can raise a pinentry and
 #: wait for a YubiKey touch, and the card-error retry runs `gpgconf --kill
 #: gpg-agent scdaemon`. A real `passage show` (ST-159) runs `age`, which can
-#: ask for Touch ID or a key touch. They live in `$TMUX_TMPDIR/walled-bin`.
+#: ask for Touch ID or a key touch. A real `ears` (ST-290) would answer
+#: busy detection's ask with the HOST's voice root, so the walled one
+#: refuses and the mouth falls back to the test's own HOME. They live in
+#: `$TMUX_TMPDIR/walled-bin`.
 WALLED_BIN = "walled-bin"
-WALLED_STUBS = ("pass", "gpgconf", "passage", "age", "message")
+WALLED_STUBS = ("pass", "gpgconf", "passage", "age", "message", "ears")
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 TIMEOUT_S = 120      # a bound, and an assertion: a launcher must never hang here
 

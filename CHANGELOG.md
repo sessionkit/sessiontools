@@ -9,6 +9,86 @@ stamps this file.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-08
+
+### Changed
+
+- **sessiontools asks sessionmail for every box; it never spells the mail
+  root** (sessionmail 0.3.3, the mail root move). `SESSION_MAIL_ROOT` is
+  read by nothing here, and `sessiontools.operator.DEFAULT_MAIL_ROOT` and
+  `SESSION_MAIL_ROOT_ENV` (re-exported from `start.policy`) are gone. The
+  operator's `<mailbox>@<host>` is derived only when `message path
+  <mailbox>` answers the box; with no `message` on the PATH, or one too
+  old to answer, no address is derived. `session park`'s `mail` check
+  reads the box `message path <sid>` names: no box is a PASS, as before;
+  no answer at all is UNKNOWN, naming why. One reader,
+  `sessiontools.operator.message_path`, bounded at 5 s.
+
+- **A fresh host's agents folder is the agent leaf's `config/`** (ST-291
+  R8). With no `~/.session/` of its own and no `AGENTS_DIR`, the launcher
+  and `session path agent --config` answer
+  `~/.sessionkit/tools/state/agent/config/` (rung `config`, source
+  `fresh-new`) before it exists, not `~/.session/agents/`. A first agent
+  file written there (the kit's `claude.md`) makes nothing under
+  `~/.session/`, so no leaf turns `fresh-old`. A host with `~/.session/`
+  keeps the chain it had.
+
+- **A fresh host starts every tools leaf under `~/.sessionkit/tools/state/`**
+  (ST-288). On a host with no `~/.session/`, `sessions`, `seats`, `agent`
+  and `backups` now start in the new folder, as `state` and `sound`
+  already did, so a fresh install makes nothing under `~/.session/`. A
+  host that has `~/.session/` gets the same answer as before for every
+  leaf, even one it has not made yet, so no existing host moves. The
+  busy-sound hook's bash copy of the rule changes with it. Release with
+  sessionmail's SK-254 change (SM-1005), which copies the same rule.
+
+### Added
+
+- **`session path agent NAME` prints an agent's home, and `--config` its
+  folder** (ST-291). The home is `home/NAME` in the agent leaf, printed
+  whether or not it exists. `session path agent --config` prints the
+  agents folder the launcher looks in, and `agent NAME --config` NAME's
+  folder in it, or nothing for a flat agent or the built-in seat; a NAME
+  the launcher refuses exits 2. `session path agent NAME --json` gives
+  both in one document, `{version, root, items{home, agents, config}}`,
+  and Python peers get the same dict from `paths.agent_report`. Every
+  other `session path` output is unchanged. See
+  `docs/tools-state-paths.md`.
+- **`session web serve --name NAME` answers a host name over https.**
+  Behind a TLS proxy, the front door now answers
+  its tailnet name (repeat `--name`, or list more in `SESSION_WEB_NAMES`)
+  beside its own address. A request by a name needs an `https` Origin and
+  gets a `Secure` cookie; the address stays plain http. Before this, every
+  request through a TLS proxy was refused on its Host.
+- **A passkey on the front door** (the `passkey` extra,
+  `sessiontools[passkey]`). By a `--name`, a browser that logged in with a
+  pairing code can add a passkey within 10 minutes, then sign in with it
+  instead of a code; every room gets the same login. `session web
+  passkeys` lists them and `--remove ID` removes one. Without the extra,
+  or at `127.0.0.1`, the front door is the pairing code alone. See
+  `docs/session.md`.
+
+- **The web Settings page lays each tool out by its installed schema**
+  (ST-259). It stays read-only, shows each value's file and lock, and also
+  lists any other tool with an installed schema, marked as one sessiontools
+  does not read. See `docs/session.md`.
+
+### Fixed
+
+- **The busy sound's speech guard finds the mouth on a fresh host**
+  (ST-290). sessionvoice now keeps its state in
+  `~/.sessionkit/voice/state`, and tools used to look only in
+  `~/.sessionvoice` and `~/.voicemode`, so on a new install the guard
+  could not tell when the mouth was speaking. tools now ASKS voice: after
+  `$MOUTH_DIR` and `$SESSIONVOICE_HOME`, which still come first, the
+  mouth is `mouth/` in the root `ears home state-dir --json` answers. The
+  answer is asked once and kept in tools' state folder, beside its
+  version, so a lookup starts no process until `ears` is installed again
+  or a voice root moves. With no voice to ask, tools follows voice's
+  order itself and says so in `~/.sessionkit/tools/log/busy.log`. A Mac
+  whose `~/.sessionvoice` or `~/.voicemode` holds its heard log finds the
+  same mouth as before.
+
 ## [0.3.2] - 2026-10-28
 
 ### Added
@@ -124,8 +204,27 @@ stamps this file.
 
 ### Fixed
 
-- `session list` says which session holds the default seat, and which holds each hand-launched agent. It named the holder only by the name Claude Code gave it (such as `work-9d`), and its `agent` reads `claude` for any `claude` session, so nothing showed which one held the seat. A SEAT column after NAME, and a `seat` JSON key on every row, now carry the seat word for the session that holds it: `claude` for the default seat's holder, or an agent's own name (such as `scout`) for the session whose hand launch took that agent's claim. Every other session shows `-` or null, a seat started by a spawner's `-n` among them. NAME and the other columns keep their values; the columns after NAME move one place right (ST-264).
-- `session start <agent>` no longer starts a second holder from the holder's own tmux pane. The front door counted any session in the launcher's pane as being replaced; now only a direct start replaces it, and only when that session is not the launcher's ancestor (a `respawn-pane -k`). A start with `--in-tmux`, or one nested in the holder's own shell, is refused, exit 3. A hand launch of a free agent now also takes a per-agent claim under a lock before it execs, so two launches started together give one holder and the second is refused. A lock or claim that cannot be had warns once and launches unclaimed (ST-260).
+- `session list` says which session holds the default seat, and which
+  holds each hand-launched agent. It named the holder only by the name
+  Claude Code gave it (such as `work-9d`), and its `agent` reads
+  `claude` for any `claude` session, so nothing showed which one held
+  the seat. A SEAT column after NAME, and a `seat` JSON key on every
+  row, now carry the seat word for the session that holds it: `claude`
+  for the default seat's holder, or an agent's own name (such as
+  `scout`) for the session whose hand launch took that agent's claim.
+  Every other session shows `-` or null, a seat started by a spawner's
+  `-n` among them. NAME and the other columns keep their values; the
+  columns after NAME move one place right (ST-264).
+- `session start <agent>` no longer starts a second holder from the
+  holder's own tmux pane. The front door counted any session in the
+  launcher's pane as being replaced; now only a direct start replaces
+  it, and only when that session is not the launcher's ancestor (a
+  `respawn-pane -k`). A start with `--in-tmux`, or one nested in the
+  holder's own shell, is refused, exit 3. A hand launch of a free agent
+  now also takes a per-agent claim under a lock before it execs, so two
+  launches started together give one holder and the second is refused. A
+  lock or claim that cannot be had warns once and launches unclaimed
+  (ST-260).
 - **`session start` on a fresh Mac: no tmux server, no terminal, and the
   fullscreen offer.** `--in-tmux` from outside tmux with no
   `--tmux-target SESSION` was refused. It now places the window in
@@ -145,7 +244,17 @@ stamps this file.
   typed `--settings` is folded into it there too: one that cannot be
   read refuses the launch. The theme picker and the folder-trust
   question are still asked. See `docs/session-start-launcher.md`.
-- Only the default seat's holder hears the seat's mail. A plain session started from the seat's tree, directly or through a tmux server born there, inherited `CLAUDE_CODE_AGENT=claude`, so its sidecar named `claude` and it heard box `claude` while its line said it would not. `session start` now unsets `CLAUDE_CODE_AGENT` in the launch script and drops it from a tmux server it creates; a launch that names an agent still gets its word from `--agent` (ST-270). **Operator step, not run by the upgrade:** a tmux server born inside a seat before this fix keeps the word for every pane it makes until it is restarted, or until `tmux set-environment -g -u CLAUDE_CODE_AGENT` is run on it. See `docs/session.md`.
+- Only the default seat's holder hears the seat's mail. A plain session
+  started from the seat's tree, directly or through a tmux server born
+  there, inherited `CLAUDE_CODE_AGENT=claude`, so its sidecar named
+  `claude` and it heard box `claude` while its line said it would not.
+  `session start` now unsets `CLAUDE_CODE_AGENT` in the launch script
+  and drops it from a tmux server it creates; a launch that names an
+  agent still gets its word from `--agent` (ST-270). **Operator step,
+  not run by the upgrade:** a tmux server born inside a seat before this
+  fix keeps the word for every pane it makes until it is restarted, or
+  until `tmux set-environment -g -u CLAUDE_CODE_AGENT` is run on it. See
+  `docs/session.md`.
 
 ## [0.3.1] - 2026-10-25
 
@@ -188,13 +297,33 @@ stamps this file.
 
 ### Fixed
 
-- `make push` and the line `scripts/release.py` prints push the release tag by name, `git push origin vX.Y.Z`, never `--tags`; a missing tag is refused and nothing is pushed (ST-243).
-- A release changes no dependency pin: `scripts/release.py` runs `uv version --frozen`, dry and real, and writes the new version onto `uv.lock`'s root `sessiontools` line as text, refusing a lock without exactly one such line before it writes anything; `make release` runs it with `python3`, not a re-locking `uv run` (ST-243, SK-180).
-- `scripts/release.py` refuses an existing `vX.Y.Z` tag, a changelog with no `[Unreleased]` and a manifest with no version before any write, so a refused run leaves the tree clean (ST-243, ST-240).
-- `session start` names a credential it drops (set here, not declared by the agent file) and the `inherit:` fix, on stderr, never the value (ST-246).
-- `session list` on Linux shows the live session it runs in, instead of "No running sessions found." There, Claude Code records a session's process start in clock ticks since boot rather than as a date, and the liveness check now reads both forms. Every check that asks whether a session is still running gains the same fix (ST-250).
-- The example times in `docs/session-park.md`, `docs/status-line-script.md` and two docstrings are written in UTC (ST-253).
-- The launch info's Machine line shows the mail host: the pinned host when one is set (`SESSIONMAIL_HOST`, `SESSION_MAIL_HOST`, or the `mail` tool's `host` setting), else the hostname's first label, lowercased. It used to print the raw hostname, which could differ from the host in the seat's own address (ST-258).
+- `make push` and the line `scripts/release.py` prints push the release
+  tag by name, `git push origin vX.Y.Z`, never `--tags`; a missing tag
+  is refused and nothing is pushed (ST-243).
+- A release changes no dependency pin: `scripts/release.py` runs
+  `uv version --frozen`, dry and real, and writes the new version onto
+  `uv.lock`'s root `sessiontools` line as text, refusing a lock without
+  exactly one such line before it writes anything; `make release` runs
+  it with `python3`, not a re-locking `uv run` (ST-243, SK-180).
+- `scripts/release.py` refuses an existing `vX.Y.Z` tag, a changelog
+  with no `[Unreleased]` and a manifest with no version before any
+  write, so a refused run leaves the tree clean (ST-243, ST-240).
+- `session start` names a credential it drops (set here, not declared by
+  the agent file) and the `inherit:` fix, on stderr, never the value
+  (ST-246).
+- `session list` on Linux shows the live session it runs in, instead of
+  "No running sessions found." There, Claude Code records a session's
+  process start in clock ticks since boot rather than as a date, and the
+  liveness check now reads both forms. Every check that asks whether a
+  session is still running gains the same fix (ST-250).
+- The example times in `docs/session-park.md`,
+  `docs/status-line-script.md` and two docstrings are written in UTC
+  (ST-253).
+- The launch info's Machine line shows the mail host: the pinned host
+  when one is set (`SESSIONMAIL_HOST`, `SESSION_MAIL_HOST`, or the
+  `mail` tool's `host` setting), else the hostname's first label,
+  lowercased. It used to print the raw hostname, which could differ from
+  the host in the seat's own address (ST-258).
 
 ## [0.3.0] - 2026-10-24
 
@@ -207,7 +336,8 @@ stamps this file.
   file once through the mouth (`mouth play FILE`), so it lands after any
   line still speaking. `afplay` plays it instead only when the mouth is
   absent, exits non-zero or cannot be run; a mouth that times out or is
-  killed by a signal is not followed by `afplay`, so it never plays twice. The play is detached and
+  killed by a signal is not followed by `afplay`, so it never plays
+  twice. The play is detached and
   the hook never waits. Unset, a bad value or a subagent's Stop is
   silent, and `SESSIONTOOLS_HOOK_BUSY=off` silences it too. An OFF stamp,
   `sounds/stop/off`, written by the first arm or the first Stop, keeps a

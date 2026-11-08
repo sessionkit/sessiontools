@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
         "agent", nargs="?", default=None,
         help="agent name, resolved to <agents-dir>/<name>.md or "
              "<agents-dir>/<name>/<name>.md (agents-dir: $AGENTS_DIR, else "
-             f"the agent leaf's config/, else {DEFAULT_AGENTS_DIR}); omit it for the default seat (plain when "
+             f"the agent leaf's config/ (on a fresh host, before it exists), else {DEFAULT_AGENTS_DIR}); omit it for the default seat (plain when "
              "it is held or cannot hear), or write `-` for a plain vendor "
              "session with no agent file")
     parser.add_argument(

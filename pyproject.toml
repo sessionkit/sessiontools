@@ -1,6 +1,6 @@
 [project]
 name = "sessiontools"
-version = "0.3.2"
+version = "0.3.3"
 description = "The harness layer: sessions, status and idle, one driver per harness - a library first"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -34,6 +34,14 @@ dependencies = ["PyYAML>=6", "jsonschema>=4"]
 # aside: sessiontools provides it, same verbs, ported as package code.
 # Exactly one package owns `session` on the PATH; from here it is this one.
 # argparse and the library; PyYAML for `session start` alone (above).
+# The front door's passkey (`session web serve`, PROPOSED door-passkey):
+# WebAuthn verifies ECDSA and RSA signatures, which the standard library
+# cannot, so `cryptography` comes only with this extra and only
+# `sessiontools.web.passkey` imports it. Without it the front door is the
+# pairing code alone. Rule 3: an extra is the maintainer's call too.
+[project.optional-dependencies]
+passkey = ["cryptography>=42"]
+
 [project.urls]
 Homepage = "https://github.com/sessionkit/sessiontools"
 Repository = "https://github.com/sessionkit/sessiontools"
@@ -49,6 +57,8 @@ build-backend = "uv_build"
 dev = [
     "pytest>=8",
     "ruff>=0.6",
+    # the passkey extra's tests run its ceremonies with a software authenticator
+    "cryptography>=42",
 ]
 
 [tool.pytest.ini_options]

@@ -706,24 +706,30 @@ def _bare(root: Path) -> Path:
 
 
 def test_the_mouth_dir_is_sessionvoices_rule(tmp_path):
+    """No voice can be asked here (no PATH): the fallback is voice's own D1
+    order (EARS-492), copied. ST-290: the fresh default is the NEW root,
+    `~/.sessionkit/voice/state`, and a populated old root still wins."""
     h = tmp_path / "h"
     h.mkdir()
     home = {"HOME": str(h)}
     sv, vm = h / ".sessionvoice", h / ".voicemode"
+    new = h / ".sessionkit" / "voice" / "state"
 
-    # a fresh HOME: sessionvoice's default home
-    assert busy.mouth_dir(home) == sv / "mouth"
+    # a fresh HOME: voice's new root (red on 6552ee0, which said ~/.sessionvoice)
+    assert busy.mouth_dir(home) == new / "mouth"
     # existing but empty homes never decide
     _bare(vm)
-    assert busy.mouth_dir(home) == sv / "mouth"
+    _bare(sv)
+    assert busy.mouth_dir(home) == new / "mouth"
     vm.joinpath("mouth").mkdir()
-    assert busy.mouth_dir(home) == sv / "mouth"
-    # only ~/.voicemode holds a heard log: adopted in place
+    assert busy.mouth_dir(home) == new / "mouth"
+    # only ~/.voicemode holds a heard log: adopted in place (a host not yet moved)
     _heard(vm, "jsonl")
     assert busy.mouth_dir(home) == vm / "mouth"
-    _bare(sv)
-    assert busy.mouth_dir(home) == vm / "mouth"
-    # both hold one: ~/.sessionvoice
+    # the new root holds one too: the new root, ~/.voicemode never pulls a host out
+    _heard(new, "lock")
+    assert busy.mouth_dir(home) == new / "mouth"
+    # ~/.sessionvoice holds one: our own old root wins while it is real
     _heard(sv, "lock")
     assert busy.mouth_dir(home) == sv / "mouth"
 
@@ -735,7 +741,7 @@ def test_the_mouth_dir_is_sessionvoices_rule(tmp_path):
     assert busy.mouth_dir({**home, "SESSIONVOICE_HOME": "",
                            "VOICEMODE_BASE_DIR": "/b"}) == Path("/b/mouth")
     assert busy.mouth_dir({**home, "SESSIONVOICE_HOME": "",
-                           "VOICEMODE_BASE_DIR": ""}) == sv / "mouth"
+                           "VOICEMODE_BASE_DIR": ""}) == sv / "mouth"  # populated, above
     # the mouth's own variable, then its old name, by presence
     assert busy.mouth_dir({**home, "MOUTH_DIR": "/m"}) == Path("/m")
     assert busy.mouth_dir({**home, "VOICEMODE_MOUTH_DIR": "/o"}) == Path("/o")
@@ -769,11 +775,17 @@ def test_the_mouth_dir_is_sessionvoices_rule(tmp_path):
     assert busy.mouth_dir({**home, "MOUTH_DIR": "./~/m"}) == h / "m"
 
 
-def test_the_mouth_dir_creates_nothing(tmp_path):
+def test_the_mouth_dir_creates_nothing_under_voices_homes(tmp_path):
+    """Nothing under any home it looks in. ST-290: its own cache and debug
+    line are tools' files, under ~/.sessionkit/tools/ (state and log)."""
     h = tmp_path / "h"
     h.mkdir()
     busy.mouth_dir({"HOME": str(h)})
-    assert list(h.iterdir()) == []
+    made = sorted(str(p.relative_to(h)) for p in h.rglob("*") if p.is_file())
+    assert made == [".sessionkit/tools/log/busy.log",
+                    ".sessionkit/tools/state/voice-state-dir.json"]
+    assert not (h / ".sessionkit" / "voice").exists()
+    assert not (h / ".sessionvoice").exists() and not (h / ".voicemode").exists()
 
 
 def test_an_unreadable_conversations_dir_is_not_a_heard_log(tmp_path):
@@ -783,21 +795,33 @@ def test_an_unreadable_conversations_dir_is_not_a_heard_log(tmp_path):
     try:
         if os.access(convo, os.R_OK):
             pytest.skip("this user reads past a mode-0 dir")
-        assert busy.mouth_dir({"HOME": str(h)}) == h / ".sessionvoice" / "mouth"
+        assert busy.mouth_dir({"HOME": str(h)}) == h / ".sessionkit" / "voice" / "state" / "mouth"
     finally:
         convo.chmod(0o700)
 
 
 # sessionvoice's resolver, copied here (never imported: sessiontools does not
-# depend on sessionvoice) from its `ears/home.py` (`populated`,
-# `sessionvoice_home`), `ears/envnames.py` (`get` for MOUTH_DIR) and
-# `mouth/paths.py` (`mouth_dir`). It reads the PROCESS env and HOME, as
-# sessionvoice does; the table test below runs it under fake HOMEs.
+# depend on sessionvoice) from its `ears/home.py` (`populated`, `state_dir`,
+# EARS-492 D1), `ears/envnames.py` (`get` for MOUTH_DIR) and `mouth/paths.py`
+# (`mouth_dir`). It reads the PROCESS env and HOME, as sessionvoice does; the
+# table test below runs it under fake HOMEs, where no voice can be asked
+# (the walled `ears` refuses), so busy's fallback must equal it.
+
+def _sv_real(path: Path) -> bool:
+    return path.is_file() and not path.is_symlink()
+
 
 def _sv_populated(root) -> bool:
     d = Path(root) / "logs" / "conversations"
     try:
-        return (d / "heard.lock").exists() or any(d.glob("heard_*.jsonl"))
+        return _sv_real(d / "heard.lock") or any(_sv_real(f) for f in d.glob("heard_*.jsonl"))
+    except OSError:
+        return False
+
+
+def _sv_samefile(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
     except OSError:
         return False
 
@@ -808,11 +832,14 @@ def _sv_home() -> Path:
         if raw:
             return Path(os.path.expanduser(os.path.expandvars(raw)))
     h = Path(os.path.expanduser("~"))
-    if _sv_populated(h / ".sessionvoice"):
+    new = h / ".sessionkit" / "voice" / "state"
+    if _sv_populated(h / ".sessionvoice") and not _sv_samefile(h / ".sessionvoice", new):
         return h / ".sessionvoice"
-    if _sv_populated(h / ".voicemode"):
+    if _sv_populated(new):
+        return new
+    if _sv_populated(h / ".voicemode") and not _sv_samefile(h / ".voicemode", new):
         return h / ".voicemode"
-    return h / ".sessionvoice"
+    return new
 
 
 def _sv_envnames_get(new: str, old: str):
@@ -830,10 +857,16 @@ def _sv_mouth_dir() -> Path:
 
 
 #: (the env, with "@" for the fake HOME; the homes given a heard log
-#: ("sv"/"vm", by lock or jsonl); the homes that exist bare).
+#: ("sv"/"vm"/"new", by lock or jsonl); the homes that exist bare).
 MOUTH_TABLE = [
     ({}, (), ()),
     ({}, (), ("sv", "vm")),
+    ({}, (), ("sv", "vm", "new")),
+    ({}, (("new", "lock"),), ()),
+    ({}, (("new", "jsonl"),), ("sv",)),
+    ({}, (("new", "lock"), ("vm", "jsonl")), ()),
+    ({}, (("new", "lock"), ("sv", "jsonl")), ()),
+    ({}, (("new", "lock"), ("sv", "jsonl"), ("vm", "lock")), ()),
     ({}, (("sv", "lock"),), ()),
     ({}, (("sv", "jsonl"),), ("vm",)),
     ({}, (("vm", "lock"),), ()),
@@ -879,7 +912,8 @@ _MOUTH_VARS = ("MOUTH_DIR", "VOICEMODE_MOUTH_DIR", "SESSIONVOICE_HOME", "VOICEMO
 def test_the_mouth_dir_equals_sessionvoices_resolver(tmp_path, monkeypatch, env, heard, bare):
     h = tmp_path / "home"
     h.mkdir()
-    roots = {"sv": h / ".sessionvoice", "vm": h / ".voicemode"}
+    roots = {"sv": h / ".sessionvoice", "vm": h / ".voicemode",
+             "new": h / ".sessionkit" / "voice" / "state"}
     for key, kind in heard:
         _heard(roots[key], kind)
     for key in bare:

@@ -27,9 +27,13 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_the_default_agents_folder_is_session_agents(monkeypatch, tmp_path):
-    """The default by design. (The old launcher's was ~/.claude/agents.) AGENTS_DIR still overrides."""
+    """The default by design on a live host. (The old launcher's was
+    ~/.claude/agents.) AGENTS_DIR still overrides. A fresh host (no
+    ~/.session of its own) answers the agent leaf's config/ (ST-291 R8)."""
     assert ag.DEFAULT_AGENTS_DIR == "~/.session/agents"
     monkeypatch.setenv("HOME", str(tmp_path))
+    assert ag.agents_root({}) == str(tmp_path / ".sessionkit/tools/state/agent/config")
+    (tmp_path / ".session").mkdir()                                  # a live host
     assert ag.agents_root({}) == str(tmp_path / ".session" / "agents")
     assert ag.agents_root({"AGENTS_DIR": "/elsewhere"}) == "/elsewhere"
     (tmp_path / ".session" / "agents" / "alice").mkdir(parents=True)
@@ -98,19 +102,19 @@ def test_list_agents_mirrors_resolution(tmp_path):
 # ---------- where sessions live -----------------------------------------------
 
 def test_every_session_lands_in_the_one_root_under_home(tmp_path):
-    """Task 4.1: `$HOME/.session/sessions`, whatever the agent and its layout
-    (it was `<agents dir>/sessions`, or `<agent>/home/sessions`)."""
+    """Task 4.1: the one sessions leaf under HOME, whatever the agent and its
+    layout (it was `<agents dir>/sessions`, or `<agent>/home/sessions`). A
+    fresh HOME's is `~/.sessionkit/tools/state/sessions` (ST-288)."""
     home = str(tmp_path / "home")
+    want = os.path.join(home, ".sessionkit", "tools", "state", "sessions")
     for layout in ("file", "dir"):
         (tmp_path / layout).mkdir()
         root = make_agents_root(tmp_path / layout, layout=layout)
         if layout == "dir":
             os.makedirs(os.path.join(root, "scout", "home"))
         agent = ag.resolve_agent("scout", root=root)
-        assert ag.sessions_root(agent, root=root, environ={"HOME": home}) == \
-            os.path.join(home, ".session", "sessions")
-    assert ag.sessions_root(ag.BARE_AGENT, environ={"HOME": home}) == \
-        os.path.join(home, ".session", "sessions")
+        assert ag.sessions_root(agent, root=root, environ={"HOME": home}) == want
+    assert ag.sessions_root(ag.BARE_AGENT, environ={"HOME": home}) == want
 
 
 def test_the_launcher_and_the_settings_reader_agree_on_the_dir(tmp_path):
@@ -292,6 +296,8 @@ def test_without_agent_config_the_old_folder_still_answers(monkeypatch, tmp_path
 
 def test_both_branches_read_the_same_home(tmp_path):
     env = {"HOME": str(tmp_path / "x")}
+    assert ag.agents_root(env) == str(tmp_path / "x/.sessionkit/tools/state/agent/config")
+    (tmp_path / "x" / ".session").mkdir(parents=True)                # a live host
     assert ag.agents_root(env) == str(tmp_path / "x" / ".session" / "agents")
     (tmp_path / "x" / ".session" / "agent" / "config").mkdir(parents=True)
     assert ag.agents_root(env) == str(tmp_path / "x" / ".session" / "agent" / "config")

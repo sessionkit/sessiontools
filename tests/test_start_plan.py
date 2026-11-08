@@ -475,7 +475,7 @@ def test_home_true_in_the_agent_layer_exports_session_home_and_makes_it(tmp_path
     home = tmp_path / "home"
     plan = plan_for(tmp_path, "settings:\n  session:\n    home: true\n",
                     extra_env={"HOME": str(home)})
-    place = str(home / ".session" / "agent" / "home" / "scout")
+    place = str(home / ".sessionkit" / "tools" / "state" / "agent" / "home" / "scout")   # fresh: new
     assert plan.home is not None and (plan.home.place, plan.home.layer) == (place, "agent")
     assert f"export SESSION_HOME={place}" in plan.script
     assert 'mkdir -p "$SESSION_HOME"' in plan.script

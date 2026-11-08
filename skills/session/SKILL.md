@@ -19,7 +19,7 @@ Several agents in one seat? See the sessionkit skill's card, "Several agents in 
   agent, cwd, status, state, idle, version, pane and model. Bare `get` lists them.
 - `context [SEAT]`: how full a window is; never guess yours, run this.
   [What filled it](references/context.md).
-- `start [FLAGS] [AGENT] [WORDS...]`: launch from `~/.session/agents/<name>.md`,
+- `start [FLAGS] [AGENT] [WORDS...]`: launch an agent by name,
   flags BEFORE the agent; `--dry-run` launches nothing, `--list-agents` lists them.
 - `settings [SID] [TOOL]`: merged down the cascade, each key with its file.
 - `sound landed|given`: the pager's busy-sound signal.

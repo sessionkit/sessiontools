@@ -58,12 +58,10 @@ from sessiontools import operator as _operator
 # (the one reader); these names stay here for existing callers.
 from sessiontools.operator import (  # noqa: F401 - re-exported for callers
     AGENT_OPERATOR_ADDR_ENV,
-    DEFAULT_MAIL_ROOT,
     OPERATOR_ADDRESS_KEY,
     OPERATOR_MAILBOX_KEY,
     OPERATOR_SETTINGS_BLOCK,
     OPERATOR_SETTINGS_TOOL,
-    SESSION_MAIL_ROOT_ENV,
     read_operator,
 )
 from sessiontools.start.environment import host_environ

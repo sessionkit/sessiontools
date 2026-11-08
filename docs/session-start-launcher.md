@@ -27,14 +27,17 @@ are the first message.
 ## Where agent files live
 
 - `$AGENTS_DIR` when set.
-- Else `~/.session/agent/config`, once that folder exists.
+- Else the `agent` leaf's `config/` (`session path agent --config`),
+  once that folder exists. On a fresh host, one with no `~/.session/`
+  of its own, it answers before it exists too.
 - Else `~/.session/agents`, which keeps a symlink per agent after the
-  move.
+  move (an older host's folder; a fresh host has none).
 - Two layouts, the directory one winning: `<root>/<name>/<name>.md` and
   the flat `<root>/<name>.md`. `--list-agents` answers by the same
   rules, so it never offers a name that will not start.
-- Every session's directory is `~/.session/sessions/<sid>/`, whatever
-  its agent; `$SESSIONS_DIR` overrides.
+- Every session's directory is `<sid>/` in the `sessions` leaf
+  (`session path sessions SID`), whatever its agent; `$SESSIONS_DIR`
+  overrides.
 
 ## Flags
 

@@ -117,9 +117,10 @@ case "$sid" in '' | */* | . | ..) exit 0 ;; esac   # busy.is_sid
 # THE ONE BASH COPY of settings.leaf_path, for the sessions and sound
 # leaves, with builtins only: the override; else OLD while it is a directory
 # that is not NEW's; else NEW when it is a directory; else the fresh default,
-# the third word: old for sessions, new for sound (settings.FRESH_NEW).
-# tests/test_leaf_paths.py pins it against python on old-only, fresh,
-# migrated and new-only HOMEs.
+# the third word: new for sound (settings.FRESH_NEW); for sessions, fresh()'s
+# answer: new only on a fresh host, one with no ~/.session of its own
+# (settings.old_root_real). tests/test_leaf_paths.py pins both
+# against python on old-only, fresh, migrated, new-only and partial-old HOMEs.
 leaf() {   # leaf OLD NEW old|new: sets $at to the rule's answer, no override; no fork
   if [ -d "$1" ] && ! [ "$1" -ef "$2" ]; then at=$1
   elif [ -d "$2" ]; then at=$2
@@ -127,11 +128,15 @@ leaf() {   # leaf OLD NEW old|new: sets $at to the rule's answer, no override; n
   else at=$1
   fi
 }
+fresh() {  # fresh ROOT STATE: sets $fw to old when ROOT is a dir that is not STATE, else new; no fork
+  if [ -d "$1" ] && ! [ "$1" -ef "$2" ]; then fw=old; else fw=new; fi
+}
 if [ -n "${SESSIONS_DIR:-}" ]; then
   root=$SESSIONS_DIR
   case "$root" in \~/*) root=$HOME/${root#\~/} ;; esac   # a literal ~/, as python expanduser()s it
 else
-  leaf "$HOME/.session/sessions" "$HOME/.sessionkit/tools/state/sessions" old
+  fresh "$HOME/.session" "$HOME/.sessionkit/tools/state"
+  leaf "$HOME/.session/sessions" "$HOME/.sessionkit/tools/state/sessions" "$fw"
   root=$at
 fi
 dir=$root/$sid

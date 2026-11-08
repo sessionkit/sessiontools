@@ -101,7 +101,11 @@ def rows(*tiers):
     There is no way to leave a row out by its NAME: the names are the list's to change, and a
     guard that pinned one would go red, or quiet, when the list renames it. A guard whose
     subject legitimately carries some text the list matches leaves those rows out by WHAT
-    THEY MATCH, with split()."""
+    THEY MATCH, with split().
+
+    One guard PICKS two rows by name, by ruling, beside every P0 row:
+    test_no_person_defaults.ruled_rows (ST-292 design (C)). It fails loudly, naming
+    the row, when the list no longer holds one."""
     path = os.environ.get(ENV, "")
     if not path:
         pytest.skip(SKIP)

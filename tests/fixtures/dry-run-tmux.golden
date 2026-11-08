@@ -3,19 +3,19 @@ agent:    scout  (<TMP>/agents/scout.md)
 vendor:   claude
 mode:     tmux window 'win' in session 'gold'
 session:  <SESSION-ID>
-  dir:    <TMP>/home/.session/sessions/<SESSION-ID>   (not created: a dry run mints nothing)
+  dir:    <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>   (not created: a dry run mints nothing)
 workdir:  <TMP>/work  (cwd)
-record:   <TMP>/home/.session/sessions/<SESSION-ID>/launch/  (env with secrets masked, command, startup-files: written once by the script, before the vendor starts)
+record:   <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/  (env with secrets masked, command, startup-files: written once by the script, before the vendor starts)
 command:
   claude                                        <- computed: vendor table (claude)
   --session-id                                  <- computed: session identity (minted by the launcher)
   <SESSION-ID>          <- computed: session identity (minted by the launcher)
   --append-system-prompt-file                   <- computed: injected context (system prompt)
-  <TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md  <- computed: injected context (system prompt)
+  <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/system-prompt.md  <- computed: injected context (system prompt)
   --plugin-dir                                  <- computed: the agent's own definition, so --agent resolves from any directory
-  <TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin  <- computed: the agent's own definition, so --agent resolves from any directory
+  <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/agent-plugin  <- computed: the agent's own definition, so --agent resolves from any directory
   --settings                                    <- computed: claude-code settings: tui from the launcher default (no settings file sets it)
-  <TMP>/home/.session/sessions/<SESSION-ID>/launch/settings.json  <- computed: claude-code settings: tui from the launcher default (no settings file sets it)
+  <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/settings.json  <- computed: claude-code settings: tui from the launcher default (no settings file sets it)
   --agent                                       <- computed: identity door (the agent named on the command line)
   scout                                         <- computed: identity door (the agent named on the command line)
   --effort                                      <- front matter: claude: effort
@@ -32,7 +32,7 @@ launch script:
   #!/usr/bin/env bash
   # session start: launch script (generated; do not edit)
   unset CLAUDE_CODE_SESSION_ID CLAUDE_SESSION_ID CLAUDE_SESSION_AGENT_SOCK CLAUDE_SESSION_AGENT_PID CLAUDE_SESSION_PUB GIT_CONFIG_COUNT SESSIONTOOLS_LAUNCH_INFO CLAUDE_CODE_AGENT ${!GIT_CONFIG_KEY_@} ${!GIT_CONFIG_VALUE_@} CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
-  __ss_shred() { rm -f <TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env; }
+  __ss_shred() { rm -f <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/secrets.env; }
   trap __ss_shred EXIT HUP INT TERM
   # session identity
   export CLAUDE_SESSION_ID=<SESSION-ID>
@@ -48,21 +48,21 @@ launch script:
   export DEMO_MODE=on
   # environment: secrets: and inherit: -- values arrive in a 0600
   # file (never argv, never this script), sourced once and removed.
-  if [ -r <TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env ]; then set -a; . <TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env; set +a; rm -f <TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env; else
-    printf '%s\n' 'session start: secret file missing: '<TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env >&2
+  if [ -r <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/secrets.env ]; then set -a; . <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/secrets.env; set +a; rm -f <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/secrets.env; else
+    printf '%s\n' 'session start: secret file missing: '<TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/secrets.env >&2
   fi
   # --- end declared environment -------------------------------------
   # schema install: each tool installs its settings schema before the birth reads them; logged in log/settings.jsonl
-  if command -v pager >/dev/null 2>&1; then <PYTHON> -I -c 'import sys; from sessiontools.settings import schema_install_main; sys.exit(schema_install_main())' --dir <TMP>/home/.session/sessions/<SESSION-ID> -- pager settings install </dev/null || :; fi
+  if command -v pager >/dev/null 2>&1; then <PYTHON> -I -c 'import sys; from sessiontools.settings import schema_install_main; sys.exit(schema_install_main())' --dir <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID> -- pager settings install </dev/null || :; fi
   # settings at birth: each schema's x-env variables -> settings/<tool>.d/50-env.json, logged in log/settings.jsonl
-  <PYTHON> -I -c 'import sys; from sessiontools.settings import birth_main; sys.exit(birth_main())' --dir <TMP>/home/.session/sessions/<SESSION-ID> || :
+  <PYTHON> -I -c 'import sys; from sessiontools.settings import birth_main; sys.exit(birth_main())' --dir <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID> || :
   # launch record: env (secrets masked), command, startup files
-  # -> <TMP>/home/.session/sessions/<SESSION-ID>/launch/ (written once, 0600, git-ignored)
-  <PYTHON> -I -c 'import sys; from sessiontools.start.record import main; sys.exit(main())' --dir <TMP>/home/.session/sessions/<SESSION-ID> --start-command '<PYTHON> -m sessiontools.cli start --dry-run --tmux-target gold:win scout' --cwd <TMP>/work --file agent-file=<TMP>/agents/scout.md --file system-prompt=<TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md --file plugin=<TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin --file settings=<TMP>/home/.session/sessions/<SESSION-ID>/launch/settings.json --file secrets=<TMP>/home/.session/sessions/<SESSION-ID>/launch/secrets.env --secret DEMO_TOKEN -- claude --session-id <SESSION-ID> --append-system-prompt-file <TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md --plugin-dir <TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin --settings <TMP>/home/.session/sessions/<SESSION-ID>/launch/settings.json --agent scout --effort high --add-dir /shared/tools -- '<!-- source: echo golden briefing -->
+  # -> <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/ (written once, 0600, git-ignored)
+  <PYTHON> -I -c 'import sys; from sessiontools.start.record import main; sys.exit(main())' --dir <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID> --start-command '<PYTHON> -m sessiontools.cli start --dry-run --tmux-target gold:win scout' --cwd <TMP>/work --file agent-file=<TMP>/agents/scout.md --file system-prompt=<TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/system-prompt.md --file plugin=<TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/agent-plugin --file settings=<TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/settings.json --file secrets=<TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/secrets.env --secret DEMO_TOKEN -- claude --session-id <SESSION-ID> --append-system-prompt-file <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/system-prompt.md --plugin-dir <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/agent-plugin --settings <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/settings.json --agent scout --effort high --add-dir /shared/tools -- '<!-- source: echo golden briefing -->
   golden briefing
   ' || :
   # identity block: who this session is, at launch -> <session dir>/identity.md (0600, never argv)
-  <PYTHON> -I -c 'import sys; from sessiontools.start.boot_identity import main; sys.exit(main())' --dir <TMP>/home/.session/sessions/<SESSION-ID> --self-pid "$$" --self-pid "$PPID" || :
-  exec claude --session-id <SESSION-ID> --append-system-prompt-file <TMP>/home/.session/sessions/<SESSION-ID>/launch/system-prompt.md --plugin-dir <TMP>/home/.session/sessions/<SESSION-ID>/launch/agent-plugin --settings <TMP>/home/.session/sessions/<SESSION-ID>/launch/settings.json --agent scout --effort high --add-dir /shared/tools -- '<!-- source: echo golden briefing -->
+  <PYTHON> -I -c 'import sys; from sessiontools.start.boot_identity import main; sys.exit(main())' --dir <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID> --self-pid "$$" --self-pid "$PPID" || :
+  exec claude --session-id <SESSION-ID> --append-system-prompt-file <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/system-prompt.md --plugin-dir <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/agent-plugin --settings <TMP>/home/.sessionkit/tools/state/sessions/<SESSION-ID>/launch/settings.json --agent scout --effort high --add-dir /shared/tools -- '<!-- source: echo golden briefing -->
   golden briefing
   '

@@ -12,7 +12,7 @@ and where each one lives. One section per part of the `session` command.
   hand ([upgrading][upgrading]).
 - **Its own folders:** its state, moving from `~/.session/` (sessions,
   seats, agents, the state dir) to `~/.sessionkit/tools/state/`, where a
-  fresh host starts the state dir and the sound engine
+  fresh host (no `~/.session/`) starts every one of them
   ([where tools keeps its state][state-folders]), and
   `~/.sessionkit/tools/accounts/` (`session account`).
 - **Environment variables:** each one belongs to one part, below. None
@@ -32,7 +32,7 @@ own files. Nothing here needs setting.
 | `SESSION_SIDECAR_DIR` | `~/.claude/sessions` | Where Claude Code's per-session records are read from. |
 | `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Where the transcripts are read from. |
 | `CONTEXT_MAX` | unset | A ceiling on the context window, in tokens. It only lowers a known model's window, never makes one. Set but not a positive number: the window is unknown. |
-| `SESSIONS_DIR` | `~/.session/sessions` | The root of every session's folder. |
+| `SESSIONS_DIR` | the `sessions` leaf ([below][state-folders]) | The root of every session's folder. |
 | `SESSION_STATE_DIR` | the `state` leaf ([below][state-folders]) | The state dir: the list snapshot, the pane signal's lock, the default model's backups and log, and each agent's claim and lock (`holders/`: the default seat's, and each hand-launched agent's), which `session list` reads for its SEAT column. Not `reap.log` since 0.3.2: it is in `~/.sessionkit/tools/log/`, which follows `HOME`, not this. |
 | `SESSION_LIST_MAX_AGE` | `2` | Seconds a list snapshot may be served. Beats the `list.max_age` setting. `0` turns the cache off. |
 | `SESSION_LIST_FRESH` | unset | A true word (`1`, `true`, `yes`, `on`) computes now, as `--fresh` does. |
@@ -45,11 +45,13 @@ own files. Nothing here needs setting.
 `session start` reads agent files, writes each session's folder and
 resolves two settings tools for it ([starting a session][start]).
 
-- **Agent files:** `$AGENTS_DIR` when set. Else `~/.session/agent/config/`
-  when it exists, else `~/.session/agents/`. An agent is
-  `<name>/<name>.md` or `<name>.md`.
-- **The session's folder:** `~/.session/sessions/<session-id>/`, or under
-  `$SESSIONS_DIR`. Its `settings/` is the session layer, and its
+- **Agent files:** `$AGENTS_DIR` when set. Else the `agent` leaf's
+  `config/` when it exists, or on a fresh host before it exists. Else
+  `~/.session/agents/`, an older host's folder. `session path agent
+  --config` prints the answer. An agent is `<name>/<name>.md` or
+  `<name>.md`.
+- **The session's folder:** `<session-id>/` in the `sessions` leaf
+  (`session path sessions`), or under `$SESSIONS_DIR`. Its `settings/` is the session layer, and its
   `launch/` holds the launch's private files.
 - **An agent file's front matter** is the launch configuration:
   `start:`, `environment:` (`variables`, `files`, `secrets`, `inherit`)
@@ -68,7 +70,7 @@ resolves two settings tools for it ([starting a session][start]).
 | Name | Default | What it does |
 | --- | --- | --- |
 | `AGENTS_DIR` | unset | Where agent files are read from. |
-| `SESSIONS_DIR` | `~/.session/sessions` | The root of every session's folder. |
+| `SESSIONS_DIR` | the `sessions` leaf | The root of every session's folder. |
 | `SESSION_KEY_INIT` | `~/.claude/agents/lib/session-keys/session-key-init` | The program `--keyed` runs to mint a session key. |
 | `AGENT_ALLOW_FABLE` | unset | A true word (`1`, `true`, `yes`, `on`) lets a launch run on Fable. Unset, it is refused. |
 
@@ -87,7 +89,11 @@ who it is, and who is privileged ([operator and privileged seats][operator]).
 | Name | Default | What it does |
 | --- | --- | --- |
 | `AGENT_OPERATOR_ADDR` | unset | Changes where an ask goes. It grants no privilege. |
-| `SESSION_MAIL_ROOT` | `~/.mail/agents` | Where `operator.mailbox` must exist as a folder before an address is made from it. |
+
+An address is made from `operator.mailbox` only when sessionmail knows
+that box on this host: `message path <mailbox>` answers it. With no
+`message` on the PATH, no address is made. Where mail lives is
+sessionmail's setting, not this tool's.
 
 ## `session account`
 
@@ -158,10 +164,14 @@ sound engine is an optional player, a per-user launchd agent, macOS only
 - **The mouth:** the busy sound never plays while the mouth speaks; the
   stop sound is queued behind it (`mouth play`, when `mouth` is on
   `PATH`). Its folder
-  is found by sessionvoice's rule: `$MOUTH_DIR`, else `<home>/mouth`. The
-  home is `$SESSIONVOICE_HOME`, else `~/.sessionvoice` if it holds a heard
-  log, else `~/.voicemode` if it holds one, else `~/.sessionvoice`. A heard
-  log is a `heard.lock` or a `heard_*.jsonl` in `<home>/logs/conversations`.
+  is `$MOUTH_DIR`, else `$SESSIONVOICE_HOME/mouth`, else the `mouth/`
+  folder in the root sessionvoice gives when asked (`ears home state-dir
+  --json`, asked once and kept in tools' state folder). With no voice to
+  ask, it is sessionvoice's order, followed by tools: `~/.sessionvoice`
+  if it holds a heard log, else `~/.sessionkit/voice/state` if it holds
+  one, else `~/.voicemode` if it holds one, else
+  `~/.sessionkit/voice/state`. A heard log is a real `heard.lock` or
+  `heard_*.jsonl` in `<root>/logs/conversations`.
 
 | Name | Default | What it does |
 | --- | --- | --- |
@@ -255,6 +265,9 @@ resolver in `sessiontools.settings` picks one for each leaf, and
   old path ([moving tools' state][migrate]).
 - **Upgrade every copy of sessiontools on a host together:** an older copy
   writes the old `state` folder.
+- **An agent's folders:** `session path agent NAME` prints its home, and
+  `--config` its agents folder, or with NAME its own folder
+  ([an agent's home and folder][agent-paths]).
 
 | Leaf | Old | New | Variable |
 | --- | --- | --- | --- |
@@ -280,6 +293,7 @@ template, host, agent, seat and session. The most specific layer wins.
 [settings]: settings.md
 [state-folders]: #where-tools-keeps-its-state
 [state-paths]: tools-state-paths.md
+[agent-paths]: tools-state-paths.md#an-agents-home-and-folder-session-path-agent
 [migrate]: tools-state-migrate.md
 [packages]: settings.md#one-folder-per-package
 [upgrading]: settings.md#upgrading-from-010

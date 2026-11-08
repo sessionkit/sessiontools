@@ -50,7 +50,9 @@ two packages load only inside the commands that use them.
 | tiktoken and its `cl100k_base` vocabulary | `session ledger`, which counts tokens with them. | `session ledger` exits 2 and says what is missing: it never downloads. | Run the `tokens` command once on the Mac: it fills uv's and tiktoken's caches. Or set `TIKTOKEN_CACHE_DIR` to a directory that holds the vocabulary. | No version is pinned: the counter takes the tiktoken uv's cache holds. Run `tokens` again to refresh it. The vocabulary does not change. |
 | `ccusage-limits-tap` | The status line's plan-usage gauge ([the usage tap][tap]). | The line skips it. | skillbox's `ccusage` skill. | Its own update. |
 | `mouth`, from [sessionvoice][pkg-voice] | The stop sound, which it queues behind any line still speaking. | `afplay` plays the sound. | `uv tool install sessionvoice`, or the kit. | `uv tool upgrade sessionvoice`. |
+| `ears`, from [sessionvoice][pkg-voice] | The busy sound's speech guard, which asks it where the mouth keeps its state (`ears home state-dir --json`). | tools follows sessionvoice's order for the folder itself, and says so in `busy.log`. | The same. | The same. |
 | `pager`, from [sessionmail][pkg-mail] | `session start`, which runs `pager settings install` first, so a new session reads mail's settings schema. | The step is skipped; the launch goes on. | `uv tool install sessionmail`, or the kit. | `uv tool upgrade sessionmail`. |
+| [cryptography][cryptography] 42 or later, the `passkey` extra | The front door's passkey (`session web serve`): WebAuthn signatures are ECDSA or RSA, which the standard library cannot check. Only `sessiontools.web.passkey` imports it. | The front door is the pairing code alone: no passkey button, and no passkey is kept. | `uv tool install 'sessiontools[passkey]'`; the kit already has it, through sessionphone. | `uv tool upgrade sessiontools`. |
 | `python3` 3.11 or later | The plugin's hooks, but only when they cannot find the interpreter `uv tool install` gave `session`. | Each hook exits 0 and does nothing, as it does on Apple's 3.9. | The tool's own Python comes first; else `python3` on PATH. | With `session`: `uv tool upgrade sessiontools`. |
 
 macOS itself brings the rest: `security` for `session account use` on a
@@ -111,6 +113,7 @@ claude plugin update sessiontools@sessiontools
 [tap]: status-line-script.md#the-usage-tap-what-where-how-long
 [plugin]: claude-code-plugin.md#which-release-has-what
 [brew]: https://brew.sh
+[cryptography]: https://cryptography.io/
 [claude-code]: https://claude.ai/code
 [uv]: https://docs.astral.sh/uv/
 [tmux]: https://github.com/tmux/tmux

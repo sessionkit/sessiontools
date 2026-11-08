@@ -894,21 +894,30 @@ def _headers(path: Path) -> tuple[str, str]:
 
 
 def check_mail(sid: str, env: Mapping[str, str] | None = None,
-               subscribe: list[str] | None = None) -> Check:
+               subscribe: list[str] | None = None, run: Any = None) -> Check:
     """No unread mail in SID's session box, by the rule `message list
     --unread` keeps: the regular files in `new/` and `cur/`, drafts (the
     `D` flag) not counted, superseded mail hidden, and unread meaning no
     `read` mark in SID's own marks file (`seen` does not count). A message
     with no Message-ID can never be marked read: it is unread, named by its
     file. SUBSCRIBE, the boxes the seat also hears, cannot be read here:
-    any at all is UNKNOWN. Only ids are named, never a subject or a body."""
+    any at all is UNKNOWN. Only ids are named, never a subject or a body.
+
+    The box is where sessionmail says it is (`message path SID`, under
+    ENV; RUN replaces subprocess.run): no box is a PASS, nothing was ever
+    delivered; no answer at all (no `message`, a timeout, an old one) is
+    UNKNOWN, naming why. The mail root is never spelled here."""
     from sessiontools import operator, reap
     env = os.environ if env is None else env
-    root = Path(env.get(operator.SESSION_MAIL_ROOT_ENV) or operator.DEFAULT_MAIL_ROOT).expanduser()
-    box = root / sid
+    asked = operator.message_path(sid, env, run=run)
+    box = Path(asked.path) if asked.path else None
     unread: list[str] = []
     unknowns: list[str] = []
-    if reap.stat_mode(box) is None:     # raises where the root cannot be searched
+    if asked.no_box:
+        verdict = Check("mail", PASS, "no session box: nothing was ever delivered")
+    elif box is None:
+        verdict = Check("mail", UNKNOWN, f"session box unknown: {asked.why}")
+    elif reap.stat_mode(box) is None:   # raises where the root cannot be searched
         verdict = Check("mail", PASS, "no session box: nothing was ever delivered")
     elif not ((box / "new").is_dir() and (box / "cur").is_dir()):
         verdict = Check("mail", UNKNOWN, "session box unreadable (not a maildir)")
@@ -998,8 +1007,8 @@ def check_promises(promises: Mapping[str, Any] | None) -> Check:
 class World:
     """What the checks read, injectable. SESSION is the seat's
     sidecar row; FACTS its transcript, read once; OWN_PID this process's pid
-    when the seat is its own, else None; ENV holds SESSIONS_DIR and
-    SESSION_MAIL_ROOT; SUBSCRIBE the boxes the seat hears (None: read
+    when the seat is its own, else None; ENV holds SESSIONS_DIR and the
+    PATH that finds `message`; SUBSCRIBE the boxes the seat hears (None: read
     SESSIONMAIL_SUBSCRIBE from ENV); GIT reap's git seam (None: the real
     one)."""
 

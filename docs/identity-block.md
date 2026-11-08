@@ -26,8 +26,9 @@ Seat-mates and call holder change after launch: re-check with `session list`.
 
 - It lives at `identity.md` in the session's dir, under the sessions
   leaf (`$SESSIONS_DIR`; else `~/.session/sessions` while it is real;
-  else `~/.sessionkit/tools/state/sessions` when it exists; else
-  `~/.session/sessions`; `session path sessions` prints it). It is written atomically, mode 0600. Read it through
+  else `~/.sessionkit/tools/state/sessions` when it exists or the host
+  has no `~/.session/`; else `~/.session/sessions`; `session path
+  sessions` prints it). It is written atomically, mode 0600. Read it through
   `session identity`, not by its path: the root can move.
 - A line that is not known says so and why, for example
   `none (not in tmux)`. It never guesses.

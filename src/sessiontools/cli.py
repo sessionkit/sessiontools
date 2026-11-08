@@ -27,6 +27,8 @@ package code, well structured, in the right place - not copied.
     session park --check [SEAT] [--json]   read it back: parked, clean, and why not
     session path [LEAF [NAME]] [--json]   where tools keeps each leaf of its state
     session completion bash|zsh   a shell completion script, on stdout
+    session web pair | logout [ID... | --all] | rescan | serve [--host H] [--port N]
+                             the kit web front door (PROPOSED)
     session mail ...         (retired: says where each verb went)
 
 Two runtime dependencies, each imported lazily by the verb that needs it:
@@ -66,6 +68,7 @@ VERBS = (
     ("park", "say this seat has settled, and what the checks found (--check reads it back)"),
     ("path", "where tools keeps each leaf of its state (state, sessions, ...), for peers"),
     ("completion", "a completion script for bash or zsh, on stdout"),
+    ("web", "the kit's web front door (serve | pair | logout | rescan); PROPOSED"),
 )
 
 
@@ -828,13 +831,20 @@ def _path(argv: list[str]) -> int:
     return paths.main(argv)
 
 
+def _web(argv: list[str]) -> int:
+    """`session web pair|logout|rescan`: the kit web front door (PROPOSED,
+    kit-web-shell). Imported here and nowhere else; stdlib only."""
+    from sessiontools.web import cli as web_cli
+    return web_cli.main(argv)
+
+
 HANDLERS = {"list": _list, "get": _get, "context": _context, "start": _start, "agent": _agent,
             "identity": _identity,
             "settings": _settings, "sound": _sound, "operator": _operator,
             "statusline": _statusline, "pane-state": _pane_state,
             "default-model": _default_model, "ledger": _ledger,
             "account": _account, "reap": _reap, "park": _park,
-            "path": _path, "completion": _completion}
+            "path": _path, "completion": _completion, "web": _web}
 
 #: Each verb's parser, as a `sessiontools.verbs` reference: a builder, or a
 #: `Group` for a verb whose first word is dispatched by hand. Each handler
@@ -858,7 +868,8 @@ PARSERS = {"list": "sessiontools.cli:_list_parser",
            "reap": "sessiontools.reap:build_parser",
            "park": "sessiontools.park:build_parser",
            "path": "sessiontools.paths:GROUP",
-           "completion": "sessiontools.cli:_completion_parser"}
+           "completion": "sessiontools.cli:_completion_parser",
+           "web": "sessiontools.web.cli:build_parser"}
 
 
 def main(argv: list[str] | None = None) -> int:

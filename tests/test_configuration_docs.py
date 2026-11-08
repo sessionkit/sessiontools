@@ -145,6 +145,7 @@ def test_readme_logs_names_each_log_the_code_writes(tmp_path):
     home = str(tmp_path)
     logs = [sound_service.log_path(env), pane_state_agent.log_path(env),
             settings.log_dir(settings.PACKAGES["session"], env) / "reap.log",
+            busy.log_path(env),
             default_model_watch.log_path(env),
             default_model.state_dir(env) / "log.jsonl"]
     for log in logs:

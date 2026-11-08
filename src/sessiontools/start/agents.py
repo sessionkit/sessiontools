@@ -2,9 +2,13 @@
 
 The agents folder is `$AGENTS_DIR`, else the agent leaf's `config/`
 (settings.agent_root) once it exists, else the pre-4.2 flat folder
-(settings.legacy_agents_dir), the default by design. (The old launcher defaulted to `~/.claude/agents`,
-where an agent's folder could be a directory with no `<name>.md` - so every
-caller without AGENTS_DIR, the launchd jobs among them, could not start it.)
+(settings.legacy_agents_dir), the default by design on a live host (one
+with an old root of its own, settings.old_root_real). A fresh host has
+no old folder to fall back to: there the agent leaf's `config/` answers
+before it exists, so a first write lands in the new tree.
+(The old launcher defaulted to `~/.claude/agents`, where an agent's folder
+could be a directory with no `<name>.md` - so every caller without
+AGENTS_DIR, the launchd jobs among them, could not start it.)
 
 Two layouts, the directory one winning: `<root>/<n>/<n>.md` and the flat
 `<root>/<n>.md`. When neither exists, the default seat's word (the vendor's
@@ -72,18 +76,40 @@ class Agent(NamedTuple):
 BARE_AGENT = Agent(name="", file="", directory="", home="")
 
 
-def agents_root(environ: Mapping[str, str] | None = None) -> str:
-    """`$AGENTS_DIR`, else the agent leaf's `config/` once it exists, else
-    the pre-4.2 flat folder, which keeps a symlink per agent after the move."""
+#: The rungs of agents_root's chain, as agents_rung names them, in order.
+RUNGS = (AGENTS_DIR_ENV, AGENT_CONFIG_DIR[-1], _settings.OLD_AGENTS_DIR)
+
+
+def agents_rung(environ: Mapping[str, str] | None = None) -> tuple[str, str]:
+    """(root, rung): agents_root's chain, naming the rung that answered:
+    `AGENTS_DIR`, `config` (the agent leaf's: once it exists, or on a fresh
+    host, before it does), or `agents` (the pre-4.2 flat folder). The one copy of the rule: `session path agent --config`
+    reports the rung from here, never re-derives it."""
     environ = os.environ if environ is None else environ
     if environ.get(AGENTS_DIR_ENV):
-        return os.path.expanduser(environ[AGENTS_DIR_ENV])
+        return os.path.expanduser(environ[AGENTS_DIR_ENV]), RUNGS[0]
     config = os.path.join(str(_settings.agent_root(environ)), AGENT_CONFIG_DIR[-1])
     if os.path.isdir(config):
-        return config
+        return config, RUNGS[1]
     # The same HOME as the branch above:
     # a caller passing a foreign HOME gets that HOME's old folder.
-    return str(_settings.legacy_agents_dir(environ))
+    legacy = str(_settings.legacy_agents_dir(environ))
+    # A FRESH host (no old root of its own) has no old folder to
+    # fall back to: its agents folder is the agent leaf's `config/`, where a
+    # first write (the kit's `claude.md`) goes, never the old flat folder,
+    # whose write would make an old root and flip the leaves to fresh-old.
+    # A live host's chain is unchanged, and so is a host whose old root
+    # links into the new tree while its old folder is there.
+    if not _settings.old_root_real(environ) and not os.path.isdir(legacy):
+        return config, RUNGS[1]
+    return legacy, RUNGS[2]
+
+
+def agents_root(environ: Mapping[str, str] | None = None) -> str:
+    """`$AGENTS_DIR`, else the agent leaf's `config/` once it exists (or on
+    a fresh host, before it does), else the pre-4.2 flat folder, which
+    keeps a symlink per agent after the move."""
+    return agents_rung(environ)[0]
 
 
 def resolve_agent(name: str, root: str | None = None,

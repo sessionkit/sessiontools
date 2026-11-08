@@ -14,6 +14,7 @@ from pathlib import Path
 import _scanlist
 import pytest
 from git_support import hermetic_env
+from message_support import message_answers_from
 from settings_support import host, shown
 from start_support import plan_for
 
@@ -23,11 +24,13 @@ from sessiontools.start.errors import EXIT_USAGE, LaunchError
 
 
 @pytest.fixture(autouse=True)
-def _short_host_is_box7(monkeypatch):
-    """The short host is box7 whatever box runs the suite, and no caller's
-    mail-host variable leaks in."""
+def _short_host_is_box7(monkeypatch, tmp_path):
+    """The short host is box7 whatever box runs the suite, no caller's
+    mail-host variable leaks in, and the first `message` on PATH answers
+    from an empty folder, never the live machine's boxes."""
     for name in op_mod.MAIL_HOST_ENVS:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PATH", message_answers_from(tmp_path / "no-boxes")["PATH"])
     monkeypatch.setattr(op_mod, "_resolve_hostname", lambda: "box7")
 
 
@@ -134,10 +137,11 @@ def test_fable_gate_scans_every_model_occurrence_not_last_wins():
 # none. The old derivation keyed on a maildir named after a person; these fixtures
 # name a neutral box instead.
 
-def _local_mail_root(tmp_path, box="ops"):
-    root = tmp_path / "mail-root"
+def _local_mail(tmp_path, box="ops"):
+    """An environ whose `message path` answers BOX, and no other."""
+    root = tmp_path / "boxes"
     (root / box).mkdir(parents=True)
-    return str(root)
+    return message_answers_from(root)
 
 
 def _host_settings(data, raw=None):
@@ -165,7 +169,7 @@ def test_the_refusal_asks_through_message_send_not_the_retired_session_mail(
     sender is the environment (no --from)."""
     monkeypatch.setattr(p, "_resolve_operator_fqdn", lambda: "box7.example-tailnet.invalid")
     _host_settings({"operator": {"mailbox": "ops"}})
-    text = _refusal(environ={p.SESSION_MAIL_ROOT_ENV: _local_mail_root(tmp_path)})
+    text = _refusal(environ=_local_mail(tmp_path))
     assert "message send ops@box7.example-tailnet.invalid" in text
     assert "-s 'Fable request: <what for>' -f <file>" in text
     assert "session mail" not in text
@@ -186,7 +190,7 @@ def test_an_undeliverable_address_names_the_override_never_a_look_alike(
     monkeypatch.setattr(op_mod, "_resolve_hostname", lambda: "")
     monkeypatch.setattr(p, "_resolve_operator_fqdn", lambda: fqdn)
     _host_settings({"operator": {"mailbox": "ops"}})
-    text = _refusal(environ={p.SESSION_MAIL_ROOT_ENV: _local_mail_root(tmp_path)})
+    text = _refusal(environ=_local_mail(tmp_path))
     assert "message send" not in text
     assert "mail your own initiator" in text and "AGENT_OPERATOR_ADDR" in text
     assert _ask(text).splitlines()[0].strip() != ""
@@ -201,7 +205,7 @@ def test_the_ask_names_the_short_host_when_the_fqdn_is_not_this_host(
     `ops@box7`, the address the local mail drop delivers."""
     monkeypatch.setattr(p, "_resolve_operator_fqdn", lambda: fqdn)
     _host_settings({"operator": {"mailbox": "ops"}})
-    local = {p.SESSION_MAIL_ROOT_ENV: _local_mail_root(tmp_path)}
+    local = _local_mail(tmp_path)
     assert p.operator_ask_address(local) == "ops@box7"
     assert "message send ops@box7 " in _refusal(environ=local)
 
@@ -217,13 +221,13 @@ def test_a_mailbox_setting_whose_maildir_is_not_local_derives_no_address(
     monkeypatch.setattr(p, "_resolve_operator_fqdn", lambda: "otherbox.example.invalid")
     _host_settings({"operator": {"mailbox": "ops"}})
     (tmp_path / "no-ops").mkdir()
-    assert p.operator_ask_address({p.SESSION_MAIL_ROOT_ENV: str(tmp_path / "no-ops")}) is None
+    assert p.operator_ask_address(message_answers_from(tmp_path / "no-ops")) is None
 
 
 def test_operator_ask_address_derives_and_overrides(monkeypatch, tmp_path):
     monkeypatch.setattr(p, "_resolve_operator_fqdn", lambda: "box7.example.invalid")
     _host_settings({"operator": {"mailbox": "ops"}})
-    local = {p.SESSION_MAIL_ROOT_ENV: _local_mail_root(tmp_path)}
+    local = _local_mail(tmp_path)
     assert p.operator_ask_address(local) == "ops@box7.example.invalid"
     assert p.operator_ask_address(dict(local, AGENT_OPERATOR_ADDR="  a@b.c  ")) == "a@b.c"
     assert p.operator_ask_address(dict(local, AGENT_OPERATOR_ADDR=" ")) \
@@ -232,7 +236,7 @@ def test_operator_ask_address_derives_and_overrides(monkeypatch, tmp_path):
 
 # ---------- ST-116: a stranger's box, the setting, the fail-safe ------------------
 
-STRANGER = {"HOME": "/nonexistent", p.SESSION_MAIL_ROOT_ENV: "/nonexistent/.mail/agents"}
+STRANGER = {"HOME": "/nonexistent", "PATH": "/nonexistent/bin"}   # no `message` either
 
 
 #: The three ways a Fable model reaches the gate.
@@ -267,9 +271,9 @@ def test_a_maildir_called_alice_is_no_longer_an_address(monkeypatch, tmp_path):
     """The old trigger: on one host a local `alice` maildir derived `alice@<FQDN>`.
     With no setting, a maildir's name is nobody's address."""
     monkeypatch.setattr(p, "_resolve_operator_fqdn", lambda: "box7.example.invalid")
-    root = _local_mail_root(tmp_path, box="alice")
-    assert p.operator_ask_address({p.SESSION_MAIL_ROOT_ENV: root}) is None
-    text = _refusal(environ={p.SESSION_MAIL_ROOT_ENV: root})
+    local = _local_mail(tmp_path, box="alice")
+    assert p.operator_ask_address(local) is None
+    text = _refusal(environ=local)
     assert "alice" not in text.lower()
 
 
@@ -284,14 +288,13 @@ def test_the_address_setting_is_used_as_written(monkeypatch):
 def test_the_address_setting_beats_the_mailbox_setting(monkeypatch, tmp_path):
     monkeypatch.setattr(p, "_resolve_operator_fqdn", lambda: "box7.example.invalid")
     _host_settings({"operator": {"address": "boss@ops.example", "mailbox": "ops"}})
-    local = {p.SESSION_MAIL_ROOT_ENV: _local_mail_root(tmp_path)}
+    local = _local_mail(tmp_path)
     assert p.operator_ask_address(local) == "boss@ops.example"
 
 
 def test_the_environment_override_beats_every_setting(tmp_path):
     _host_settings({"operator": {"address": "boss@ops.example", "mailbox": "ops"}})
-    environ = {p.AGENT_OPERATOR_ADDR_ENV: "env@wins.example",
-               p.SESSION_MAIL_ROOT_ENV: _local_mail_root(tmp_path)}
+    environ = {p.AGENT_OPERATOR_ADDR_ENV: "env@wins.example", **_local_mail(tmp_path)}
     assert p.operator_ask_address(environ) == "env@wins.example"
     assert "message send env@wins.example" in _refusal(environ=environ)
 
@@ -343,10 +346,9 @@ def test_an_unreadable_settings_file_never_changes_whether_the_gate_refuses():
 @pytest.mark.parametrize("mailbox", ["..", ".", "../ops", "a/ops", "ops@box", ""])
 def test_a_mailbox_setting_must_be_one_plain_local_name(monkeypatch, tmp_path, mailbox):
     monkeypatch.setattr(p, "_resolve_operator_fqdn", lambda: "box7.example.invalid")
-    root = tmp_path / "mail" / "agents"
-    (root / "ops").mkdir(parents=True)
+    local = _local_mail(tmp_path)
     _host_settings({"operator": {"mailbox": mailbox}})
-    assert p.operator_ask_address({p.SESSION_MAIL_ROOT_ENV: str(root)}) is None
+    assert p.operator_ask_address(local) is None
 
 
 @pytest.mark.parametrize("door", DOORS)

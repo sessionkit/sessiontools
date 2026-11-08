@@ -560,10 +560,15 @@ def stop(slot: str | Path) -> bool:
 # asked to bless it or to name the surface they would rather we read).
 # Every read of the mouth's state goes through MOUTH_PLAYING, MOUTH_PID and
 # `mouth_speaking()` below, so a different surface is a one-line change there.
-# WHERE the mouth lives is sessionvoice's rule, copied (not imported) into
-# `mouth_dir()`: `$MOUTH_DIR`, else `<sessionvoice home>/mouth`.
-# We only stat and read; we never write, lock or create anything in the mouth
-# dir or under any home it is looked for in.
+# WHERE the mouth lives is sessionvoice's to say, and tools ASKS it:
+# `$MOUTH_DIR` and the home variables first, as before; then voice's own
+# answer, `ears home state-dir --json` (its stdlib twin `python -m ears.home
+# state-dir --json`), asked once and cached in tools' state (`voice_root()`),
+# so the mouth is `<root>/mouth`. Only when no voice can be asked does
+# `mouth_dir()` fall back to voice's D1 order, copied (`fallback_root()`), and
+# say so in a debug line (BUSY_LOG). We only stat and read under voice's
+# homes; we never write, lock or create anything in the mouth dir or under any
+# home it is looked for in. The cache and the debug line are tools' own files.
 
 #: The mouth's "speaking now" file: written (tmp + rename) when its player
 #: takes a line, before synthesis; unlinked when the line ends. UNBLESSED.
@@ -580,8 +585,27 @@ STEP = 0.1
 MOUTH_HOME_ENV = ("SESSIONVOICE_HOME", "VOICEMODE_BASE_DIR")
 #: The mouth dir's own variable, then its old name (presence, not truthiness).
 MOUTH_DIR_ENV = ("MOUTH_DIR", "VOICEMODE_MOUTH_DIR")
-#: sessionvoice's default home, then the old one, under $HOME.
+#: sessionvoice's two OLD roots under $HOME (its `OLD_ROOTS`), in its D1
+#: order: `~/.sessionvoice` is read before the new root, `~/.voicemode` after
+#: it. Read only by the fallback, when voice cannot be asked.
 MOUTH_HOMES = (".sessionvoice", ".voicemode")
+#: voice's NEW root, under the kit's home: `~/.sessionkit/voice/state`.
+VOICE_STATE_DIR = "state"
+#: voice's command and the words that ask it for its state root (voice's
+#: documented CLI): `{"version", "root": {"path", "source"}, "items": {...}}`,
+#: each entry in the words of `session path --json`.
+EARS = "ears"
+EARS_ASK = ("home", "state-dir", "--json")
+#: Its stdlib twin, the same answer from the package's module, asked with
+#: this interpreter when `ears` is not on PATH but the package imports here.
+EARS_MODULE = "ears.home"
+EARS_TWIN_ASK = ("state-dir", "--json")
+#: One ask's budget, in seconds. Past it, voice could not be asked.
+ASK_TIMEOUT = 3.0
+#: voice's answer, cached across processes in tools' own state leaf.
+VOICE_CACHE = "voice-state-dir.json"
+#: The debug line's file, in tools' log dir: a hook says nothing on stderr.
+BUSY_LOG = "busy.log"
 
 #: The standard library's own pattern: an unclosed `${` takes the rest of the
 #: value with it, so nothing after it expands.
@@ -603,31 +627,270 @@ def _expandvars(raw: str, e: Mapping[str, str]) -> str:
     return _VAR.sub(one, raw) if "$" in raw else raw
 
 
-def _populated(root: Path) -> bool:
-    """sessionvoice's POPULATED: `<root>/logs/conversations` holds a
-    `heard.lock` or a `heard_*.jsonl`. A dir that exists but holds no heard
-    log never decides. A stat, never a write; an OSError is False."""
-    d = root / "logs" / "conversations"
+def _real_file(path: Path) -> bool:
+    """PATH is a regular file of its own, not a link. An lstat; OSError is
+    False."""
     try:
-        return (d / "heard.lock").exists() or any(d.glob("heard_*.jsonl"))
+        return stat.S_ISREG(os.lstat(path).st_mode)
     except OSError:
         return False
 
 
+def _populated(root: Path) -> bool:
+    """sessionvoice's POPULATED rule: `<root>/logs/conversations`
+    holds a `heard.lock` or a `heard_*.jsonl` that is a REAL file, so a link
+    into another root is not this root's own log. A dir that exists but
+    holds no heard log never decides. Stats, never a write; an OSError is
+    False."""
+    d = root / "logs" / "conversations"
+    try:
+        return _real_file(d / "heard.lock") or any(_real_file(f) for f in d.glob("heard_*.jsonl"))
+    except OSError:
+        return False
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    """A and B are one directory (links followed), as voice's "not the new
+    root itself" and tools' settings._same_dir. Either missing: False."""
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+def voice_new_root(env: Mapping[str, str] | None = None) -> Path:
+    """voice's NEW state root, `~/.sessionkit/voice/state`: the kit's home,
+    voice's package (settings.PACKAGES), its `state/`."""
+    return settings.kit_root(env) / settings.PACKAGES["mouth"] / VOICE_STATE_DIR
+
+
+def fallback_root(env: Mapping[str, str] | None = None) -> Path:
+    """voice's state root by its D1 order, COPIED, for when voice cannot be
+    asked (its home variables are read before this, by mouth_dir):
+
+    3. `~/.sessionvoice`, POPULATED and not the new root itself;
+    4. `~/.sessionkit/voice/state`, POPULATED;
+    5. `~/.voicemode`, POPULATED and not the new root itself;
+    6. else `~/.sessionkit/voice/state`, where a fresh host's voice writes.
+
+    So a live host whose `~/.sessionvoice` (or, on a host not yet moved,
+    `~/.voicemode`) holds real heard files keeps it. Stats only."""
+    home = settings.home(env)
+    new = voice_new_root(env)
+    sv, vm = (home / h for h in MOUTH_HOMES)
+    if _populated(sv) and not _same_dir(sv, new):
+        return sv
+    if _populated(new):
+        return new
+    if _populated(vm) and not _same_dir(vm, new):
+        return vm
+    return new
+
+
+def read_state_dir_answer(raw: str | bytes) -> dict[str, Any] | None:
+    """voice's `state-dir --json` answer, as RAW text, read by tools' ONE
+    entry reader (settings.read_leaf_entry: the shape and `source` words of
+    `session path --json`). `{"version": str, "root": {"path", "source"}}`
+    when RAW is `{"version": <non-empty str>, "root": <entry>, "items":
+    {...}}`, else None: an unknown shape is "voice could not be asked",
+    never a path. Never raises."""
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return _answer_of(obj)
+
+
+def _answer_of(obj: object) -> dict[str, Any] | None:
+    """read_state_dir_answer's check, on the parsed OBJ."""
+    if not isinstance(obj, dict) or not isinstance(obj.get("items"), dict):
+        return None
+    version = obj.get("version")
+    root = settings.read_leaf_entry(obj.get("root"))
+    if not isinstance(version, str) or not version or root is None:
+        return None
+    return {"version": version, "root": {"path": str(root[0]), "source": root[1]}}
+
+
+def voice_cache_path(env: Mapping[str, str] | None = None) -> Path:
+    """Where voice's answer is cached: VOICE_CACHE in tools' state leaf
+    (settings.state_root), never under a voice home or the mouth dir."""
+    return settings.state_root(env) / VOICE_CACHE
+
+
+def _sig(path: str | Path | None, follow: bool = True) -> list[int] | None:
+    """A file's identity for the staleness probe: kind, device, inode, size
+    and mtime (ns). None when it is not there."""
+    if path is None:
+        return None
+    try:
+        st = os.stat(path) if follow else os.lstat(path)
+    except OSError:
+        return None
+    return [stat.S_IFMT(st.st_mode), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns]
+
+
+def _ears_twin() -> str | None:
+    """`ears/home.py` as this interpreter would import it, found WITHOUT
+    importing it; None when there is none."""
+    import importlib.util
+    package, _, module = EARS_MODULE.partition(".")
+    try:
+        spec = importlib.util.find_spec(package)
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.submodule_search_locations:
+        return None
+    for loc in spec.submodule_search_locations:
+        home_py = os.path.join(loc, f"{module}.py")
+        if os.path.isfile(home_py):
+            return home_py
+    return None
+
+
+def _probe(env: Mapping[str, str] | None, e: Mapping[str, str]) -> dict[str, Any]:
+    """What voice's answer depends on, read with stats and no process: the
+    HOME; the `ears` on PATH and the twin's `home.py`, each with its file's
+    identity (an install or upgrade replaces it); and each root D1 weighs,
+    by its own lstat (a migrate makes `~/.sessionvoice` a link) and its
+    conversations dir (a heard log appearing). A cached answer is used
+    only while this is equal, so a new voice or a moved root asks again."""
+    exe = shutil.which(EARS, path=e.get("PATH", ""))
+    twin = _ears_twin()
+    home = settings.home(env)
+    roots = (home / MOUTH_HOMES[0], voice_new_root(env), home / MOUTH_HOMES[1])
+    return {"home": str(home),
+            "ears": [exe, _sig(exe)] if exe else None,
+            "twin": [twin, _sig(twin)] if twin else None,
+            "roots": [[str(r), _sig(r, follow=False), _sig(r / "logs" / "conversations")]
+                      for r in roots]}
+
+
+def _ask(probe: Mapping[str, Any], e: Mapping[str, str]) -> tuple[dict[str, Any] | None, str]:
+    """Ask voice: `ears home state-dir --json`, else the twin. (answer, "")
+    from the first that exits 0 with the documented shape, else (None, why).
+    A non-zero exit, a timeout or an unknown shape is "could not be asked"."""
+    tries = []
+    if probe["ears"]:
+        tries.append([probe["ears"][0], *EARS_ASK])
+    if probe["twin"]:
+        tries.append([sys.executable, "-m", EARS_MODULE, *EARS_TWIN_ASK])
+    if not tries:
+        return None, f"no `{EARS}` on PATH and no {EARS_MODULE} to import"
+    why = []
+    for argv in tries:
+        said = " ".join([os.path.basename(argv[0]), *argv[1:]])
+        try:
+            done = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, env=dict(e),
+                                  timeout=ASK_TIMEOUT, check=False)
+        except subprocess.TimeoutExpired:
+            why.append(f"`{said}` took over {ASK_TIMEOUT:g} s")
+            continue
+        except OSError as err:
+            why.append(f"`{said}` could not run ({type(err).__name__})")
+            continue
+        if done.returncode != 0:
+            why.append(f"`{said}` exited {done.returncode}")
+            continue
+        answer = read_state_dir_answer(done.stdout)
+        if answer is None:
+            why.append(f"`{said}` answered a shape tools does not know")
+            continue
+        return answer, ""
+    return None, "; ".join(why)
+
+
+def _read_cache(path: Path) -> dict[str, Any] | None:
+    """The cache at PATH, when it is whole: `{"v": 1, "probe": {...},
+    "answer": <an answer> | null, "why": str}`. Missing, unreadable,
+    corrupt or of another shape: None, a miss."""
+    try:
+        held = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if not isinstance(held, dict) or held.get("v") != 1 or not isinstance(held.get("probe"), dict):
+        return None
+    answer = held.get("answer")
+    if answer is not None and (not isinstance(answer, dict)
+                               or _answer_of({**answer, "items": {}}) != answer):
+        return None
+    return held
+
+
+def _write_cache(path: Path, body: Mapping[str, Any]) -> None:
+    """Write the cache: 0600, atomic (temp, then rename). Best effort."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(body) + "\n")
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 - a cache that cannot be written is a miss next time
+        _unlink(tmp)
+
+
+def log_path(env: Mapping[str, str] | None = None) -> Path:
+    """BUSY_LOG in tools' log dir: `~/.sessionkit/tools/log/busy.log`."""
+    return settings.log_dir(settings.PACKAGES["session"], env) / BUSY_LOG
+
+
+def _debug(env: Mapping[str, str] | None, line: str) -> None:
+    """One debug line in log_path(): time, a tab, `mouth_dir`, a tab, LINE.
+    A hook says nothing on stderr, so this is where it goes. Best effort."""
+    with contextlib.suppress(Exception):
+        log = log_path(env)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        when = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(f"{when}\tmouth_dir\t{line}\n")
+
+
+def voice_root(env: Mapping[str, str] | None = None) -> Path | None:
+    """voice's state root, AS VOICE ANSWERS IT, or None when no voice can be
+    asked. Asked ONCE and cached across processes (VOICE_CACHE), keyed on
+    the answer's `version` and the probe (`_probe`): the warm path is stats
+    and one small read, no process. A probe that differs asks again. "Could
+    not be asked" is cached too, so a host with no voice (or an old voice
+    without the verb) spawns nothing on every call; its miss writes one
+    debug line. A corrupt cache is a miss. Never raises."""
+    e = os.environ if env is None else env
+    try:
+        probe = _probe(env, e)
+        cache = voice_cache_path(env)
+        held = _read_cache(cache)
+        if held is not None and held["probe"] == probe:
+            answer = held.get("answer")
+        else:
+            answer, why = _ask(probe, e)
+            _write_cache(cache, {"v": 1, "probe": probe, "answer": answer, "why": why})
+            if answer is None:
+                _debug(env, f"voice could not be asked ({why}); the mouth is found by "
+                            f"voice's D1 order, copied: {fallback_root(env) / 'mouth'}")
+        return None if answer is None else Path(answer["root"]["path"])
+    except Exception:  # noqa: BLE001 - busy detection never raises
+        return None
+
+
 def mouth_dir(env: Mapping[str, str] | None = None) -> Path:
-    """The mouth dir, by sessionvoice's own rule (its `mouth/paths.py` and
-    `ears/home.py`), copied here so that nothing imports sessionvoice:
+    """The mouth dir, as sessionvoice says it:
 
     1. `$MOUTH_DIR` if it is set, else the old `$VOICEMODE_MOUTH_DIR` if that
        is set (presence: a set `MOUTH_DIR` hides the old name even when
        empty). A non-empty value is the dir; an empty one falls through.
-    2. Else `<home>/mouth`, where home is the first of: `$SESSIONVOICE_HOME`,
-       `$VOICEMODE_BASE_DIR` (each only when non-empty, with `$VAR` and `~`
-       expanded); `~/.sessionvoice` if it holds a heard log; `~/.voicemode`
-       if it holds a heard log; else `~/.sessionvoice`.
+    2. `$SESSIONVOICE_HOME`, then `$VOICEMODE_BASE_DIR` (each only when
+       non-empty, with `$VAR` and `~` expanded), `/mouth`.
+    3. ASK voice: `<root>/mouth`, where root is `ears home state-dir --json`'s
+       answer (voice_root: asked once, cached on its version).
+    4. Only when no voice can be asked: `<fallback_root>/mouth`, voice's D1
+       order copied (populated `~/.sessionvoice`, populated
+       `~/.sessionkit/voice/state`, populated `~/.voicemode`, else
+       `~/.sessionkit/voice/state`), and a debug line says so.
 
-    `~` and `$VAR` expand against ENV and its HOME. Only stats: nothing is
-    written, locked or created under any home."""
+    `~` and `$VAR` expand against ENV and its HOME. Under voice's homes it
+    only stats: nothing is written, locked or created there. The cache and
+    the debug line are tools' own (voice_cache_path, BUSY_LOG)."""
     e = os.environ if env is None else env
     home = settings.home(env)
 
@@ -654,10 +917,8 @@ def mouth_dir(env: Mapping[str, str] | None = None) -> Path:
         raw = e.get(n)
         if raw:
             return Path(expanduser(_expandvars(raw, e))) / "mouth"
-    for root in (home / h for h in MOUTH_HOMES):
-        if _populated(root):
-            return root / "mouth"
-    return home / MOUTH_HOMES[0] / "mouth"
+    asked = voice_root(env)
+    return (asked if asked is not None else fallback_root(env)) / "mouth"
 
 
 def _pid_live(path: Path) -> bool:

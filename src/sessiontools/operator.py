@@ -16,7 +16,8 @@ from a name in code:
 Rules:
 
 1. `address`: env AGENT_OPERATOR_ADDR; else `operator.address`; else
-   `<operator.mailbox>@<host>` only when that maildir is local; else None
+   `<operator.mailbox>@<host>` only when that mailbox is local (sessionmail
+   answers `message path <mailbox>`; no `message`, no address); else None
    (the order moved here from start/policy.py). `<host>` is `host_part`:
    the name the local mail drop takes as THIS host, never a reverse-DNS
    (PTR) name.
@@ -40,6 +41,7 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
 from collections.abc import Callable, Mapping
 from typing import NamedTuple
 
@@ -53,9 +55,10 @@ OPERATOR_ADDRESS_KEY = "address"        # a full address, used as written
 OPERATOR_MAILBOX_KEY = "mailbox"        # a local box name, derived below
 OPERATOR_PRIVILEGED_KEY = "privileged"  # a list of seat names or addresses
 # '<mailbox>@<this host>' is a real address only on the box that
-# hosts that mailbox; the local maildir's existence is the measured fact.
-SESSION_MAIL_ROOT_ENV = "SESSION_MAIL_ROOT"
-DEFAULT_MAIL_ROOT = "~/.mail/agents"
+# hosts that mailbox. Where mail lives is sessionmail's to say, never ours:
+# the box is local when `message path MAILBOX` answers it (`message_path`),
+# bounded by this many seconds.
+MESSAGE_PATH_TIMEOUT_S = 5.0
 # The short host, in the mail drop's order: these variables (first set
 # wins), else the `host` key of the `mail` tool's settings, else the first
 # label of the hostname. The drop takes an address as on THIS host only
@@ -174,39 +177,89 @@ def _privileged_setting(block: Mapping) -> set[str]:
             if isinstance(member, str) and member.strip()}
 
 
-def _mailbox_is_local(mailbox: str, environ: Mapping[str, str]) -> bool:
+class BoxPath(NamedTuple):
+    """`message path NAME`'s answer. PATH: the box's maildir (exit 0).
+    NO_BOX: sessionmail says there is none (exit 2, not a usage error).
+    Neither: it could not be asked, and WHY says what stopped it."""
+
+    path: str | None = None
+    no_box: bool = False
+    why: str = ""
+
+
+def message_path(name: str, environ: Mapping[str, str] | None = None,
+                 run: Callable | None = None) -> BoxPath:
+    """Ask sessionmail where box NAME is: `message path NAME`, read-only,
+    run under ENVIRON (its PATH finds `message`, its SESSIONMAIL_ROOT
+    reaches it) and bounded by MESSAGE_PATH_TIMEOUT_S. It never makes a box
+    and never spells the mail root. Not on PATH, a timeout, a usage error
+    (a `message` too old for the verb) or another exit: no answer, WHY
+    names which. RUN replaces subprocess.run (a seam for tests)."""
+    environ = os.environ if environ is None else environ
+    run = subprocess.run if run is None else run
+    try:
+        result = run(["message", "path", name], capture_output=True, text=True,
+                     timeout=MESSAGE_PATH_TIMEOUT_S, env=dict(environ),
+                     stdin=subprocess.DEVNULL, check=False)
+    except FileNotFoundError:
+        return BoxPath(why="`message` is not on PATH")
+    except subprocess.TimeoutExpired:
+        return BoxPath(why=f"`message path` took over {MESSAGE_PATH_TIMEOUT_S:g}s")
+    except OSError as error:
+        return BoxPath(why=f"`message` could not run: {error.strerror or error}")
+    said = (result.stdout or "").strip().splitlines()
+    if result.returncode == 0 and said:
+        return BoxPath(path=said[0].strip())
+    if result.returncode == 0:
+        return BoxPath(why="`message path` printed no path")
+    usage = [line for line in (result.stderr or "").splitlines()
+             if line.startswith(("Usage:", "Error:"))]
+    if result.returncode == 2 and not usage:
+        return BoxPath(no_box=True)
+    if result.returncode == 2:
+        error = [line for line in usage if line.startswith("Error:")]
+        detail = error[0].removeprefix("Error:").strip() if error else "a usage error"
+        return BoxPath(why=f"`message path` refused the call: {detail}")
+    return BoxPath(why=f"`message path` exited {result.returncode}")
+
+
+def _mailbox_is_local(mailbox: str, environ: Mapping[str, str],
+                      run: Callable | None = None) -> bool:
     """MAILBOX is one plain name (no separator, not '.'/'..', no '@') AND
-    that maildir exists under the mail root."""
+    sessionmail answers `message path MAILBOX` with a box on this host.
+    No `message`, or one that cannot answer: not local (rule 6)."""
     if (not mailbox or mailbox in (".", "..") or "@" in mailbox
             or os.sep in mailbox or (os.altsep and os.altsep in mailbox)):
         return False
-    root = environ.get(SESSION_MAIL_ROOT_ENV) or DEFAULT_MAIL_ROOT
-    return os.path.isdir(os.path.join(os.path.expanduser(root), mailbox))
+    return message_path(mailbox, environ, run=run).path is not None
 
 
 def _derived_address(mailbox: str, environ: Mapping[str, str],
-                     resolve_fqdn: Callable[[], str]) -> str | None:
+                     resolve_fqdn: Callable[[], str],
+                     run: Callable | None = None) -> str | None:
     """`<mailbox>@<host>` only when the mailbox is local and `host_part`
     names this host - never a look-alike address that delivers nowhere."""
-    if not _mailbox_is_local(mailbox, environ):
+    if not _mailbox_is_local(mailbox, environ, run=run):
         return None
     host = host_part(environ, resolve_fqdn=resolve_fqdn)
     return f"{mailbox}@{host}" if host else None
 
 
 def read_operator(environ: Mapping[str, str] | None = None, *,
-                  resolve_fqdn: Callable[[], str] | None = None) -> Operator:
+                  resolve_fqdn: Callable[[], str] | None = None,
+                  run: Callable | None = None) -> Operator:
     """The operator and the privileged set, read from settings (module
     docstring, rules 1-6). RESOLVE_FQDN replaces the FQDN lookup (a seam
     for callers and tests); the default asks the network. The FQDN is used
-    only when it names this host (`host_part`)."""
+    only when it names this host (`host_part`). RUN replaces the
+    subprocess.run that asks `message path` whether the mailbox is local."""
     environ = os.environ if environ is None else environ
     resolve_fqdn = _resolve_fqdn if resolve_fqdn is None else resolve_fqdn
     block = _settings_block(environ)
     mailbox = _setting_text(block, OPERATOR_MAILBOX_KEY)
     # The operator as the SETTINGS name it: the only source of privilege.
     configured = (_setting_text(block, OPERATOR_ADDRESS_KEY)
-                  or (mailbox and _derived_address(mailbox, environ, resolve_fqdn))
+                  or (mailbox and _derived_address(mailbox, environ, resolve_fqdn, run))
                   or None)
     privileged = _privileged_setting(block)
     privileged.update(name for name in (configured, mailbox) if name)

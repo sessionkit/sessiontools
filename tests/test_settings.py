@@ -4,6 +4,7 @@ built under a private HOME."""
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import subprocess
@@ -297,11 +298,16 @@ def test_session_dir_honours_sessions_dir_like_the_launcher(tmp_path):
     assert sessions_root(agent, environ=env) == str(settings.sessions_root(env))
 
 
-def test_session_dir_defaults_under_home_dot_session(tmp_path):
+def test_session_dir_defaults_under_the_sessions_leaf(tmp_path):
+    """A fresh HOME: the NEW sessions leaf (ST-288). A HOME whose
+    ~/.session/sessions is real: still old (no live-host move)."""
     env = {"HOME": str(tmp_path / "home")}
-    assert settings.session_dir("sid-1", env) == tmp_path / "home" / ".session" / "sessions" / "sid-1"
-    assert settings.session_dir("sid-1", {**env, "SESSIONS_DIR": ""}) == \
-        tmp_path / "home" / ".session" / "sessions" / "sid-1"      # empty = unset
+    new = tmp_path / "home" / ".sessionkit" / "tools" / "state" / "sessions" / "sid-1"
+    assert settings.session_dir("sid-1", env) == new
+    assert settings.session_dir("sid-1", {**env, "SESSIONS_DIR": ""}) == new   # empty = unset
+    (tmp_path / "home" / ".session" / "sessions").mkdir(parents=True)
+    assert settings.session_dir("sid-1", env) == \
+        tmp_path / "home" / ".session" / "sessions" / "sid-1"
 
 
 # --- the agent layer's file (4.2; Open 12 RULED) -------------------------------
@@ -1583,3 +1589,231 @@ def test_inside_cuts(path, cuts):
 ])
 def test_whole(run, whole):
     assert settings._whole(run) == whole
+
+
+# --- discovery: the web Settings page's other tools (read-only) --------------------------
+#
+# A tool PACKAGES does not name, found by its schema file in some package's
+# settings folder. Neutral fake tools throughout: `alpha`, `beta`.
+
+def pkg(tree: Path, package: str) -> Path:
+    """A package's settings folder under the private HOME TREE, made."""
+    folder = settings.package_dir(package)
+    assert folder.is_relative_to(tree)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def schema(folder: Path, name: str, body=None) -> Path:
+    return w(folder / name, body if body is not None else {"type": "object"})
+
+
+def found_names(env=None) -> list[str]:
+    return [d.tool for d in settings.discovered_tools(env)[0]]
+
+
+def test_discovery_finds_a_tool_the_map_does_not_name_with_its_folder_and_schema(tree):
+    extra = pkg(tree, "extra")
+    s = schema(extra, ".alpha.schema.json")
+    found, notes = settings.discovered_tools()
+    assert found == [settings.Discovered("alpha", extra, s)] and notes == []
+    assert "alpha" not in settings.PACKAGES
+
+
+def test_d2_the_visible_name_alone_is_found(tree):
+    s = schema(pkg(tree, "extra"), "alpha.schema.json")
+    found, notes = settings.discovered_tools()
+    assert [(d.tool, d.schema) for d in found] == [("alpha", s)] and notes == []
+
+
+def test_d2_with_both_names_the_dot_name_is_read_and_the_other_is_named(tree):
+    extra = pkg(tree, "extra")
+    visible = schema(extra, "alpha.schema.json")
+    dot = schema(extra, ".alpha.schema.json")
+    found, notes = settings.discovered_tools()
+    assert [d.schema for d in found] == [dot]
+    assert notes == [f"alpha: schema {visible} is shadowed by {dot} and not read"]
+
+
+def test_d2_one_file_under_both_names_is_one_schema_and_no_note(tree):
+    extra = pkg(tree, "extra")
+    dot = schema(extra, ".alpha.schema.json")
+    (extra / "alpha.schema.json").symlink_to(dot.name)
+    found, notes = settings.discovered_tools()
+    assert [d.tool for d in found] == ["alpha"] and notes == []
+
+
+def test_d3_one_name_in_two_folders_is_not_shown_and_both_folders_are_named(tree):
+    a, b = pkg(tree, "extra"), pkg(tree, "other")
+    schema(a, ".alpha.schema.json")
+    schema(b, ".alpha.schema.json")
+    schema(b, ".beta.schema.json")
+    found, notes = settings.discovered_tools()
+    assert [d.tool for d in found] == ["beta"]
+    assert len(notes) == 1 and notes[0].startswith("alpha: ")
+    assert str(a) in notes[0] and str(b) in notes[0]
+
+
+def test_d4_a_mapped_tools_schema_in_another_package_is_named_and_not_discovered(tree):
+    owner = settings.PACKAGES["ears"]
+    stray = schema(pkg(tree, "tools"), ".ears.schema.json")
+    found, notes = settings.discovered_tools()
+    assert found == []
+    assert notes == [f"{stray}: ears belongs to the {owner} package, so this schema is not read"]
+    assert settings.find_schema("ears")[0] is None  # the cascade does not read it either
+
+
+def test_d4_a_mapped_tools_schema_in_its_own_folder_is_quiet_and_not_discovered(tree):
+    schema(pkg(tree, settings.PACKAGES["ears"]), ".ears.schema.json")
+    assert settings.discovered_tools() == ([], [])
+
+
+def test_d4_a_schema_beside_a_settings_file_variables_file_is_quiet(tree, monkeypatch):
+    elsewhere = pkg(tree, "tools")
+    variable = settings.SETTINGS_FILE_ENV["ears"][0]
+    monkeypatch.setenv(variable, str(w(elsewhere / "ears.json", {})))
+    beside = schema(elsewhere, "ears.schema.json")
+    assert settings.find_schema("ears")[0] == beside
+    assert settings.discovered_tools() == ([], [])
+
+
+@pytest.mark.parametrize("name", ["Alpha.schema.json", "al_pha.schema.json", "..schema.json",
+                                  ".schema.json", "9alpha.schema.json", "alpha.json",
+                                  "alpha.schema.json.bak", "alpha.template.schema.json",
+                                  "a" * 33 + ".schema.json"])
+def test_d5_a_name_off_the_pattern_is_ignored(tree, name):
+    schema(pkg(tree, "extra"), name)
+    assert settings.discovered_tools() == ([], [])
+
+
+def test_d5_the_longest_name_is_kept(tree):
+    schema(pkg(tree, "extra"), "a" * 32 + ".schema.json")
+    assert found_names() == ["a" * 32]
+
+
+def test_d5_a_folder_with_a_schema_name_and_a_deeper_file_are_ignored(tree):
+    extra = pkg(tree, "extra")
+    (extra / ".alpha.schema.json").mkdir(parents=True)
+    schema(extra / "sub", ".beta.schema.json")
+    schema(extra / "gamma.d", ".gamma.schema.json")
+    assert settings.discovered_tools() == ([], [])
+
+
+def test_d5_links_are_followed_and_a_dangling_link_or_a_loop_is_absent(tree):
+    extra = pkg(tree, "extra")
+    target = schema(tree / "elsewhere", "kept.json")
+    (extra / ".alpha.schema.json").symlink_to(target)
+    (extra / ".beta.schema.json").symlink_to(extra / "gone.json")
+    (extra / ".gamma.schema.json").symlink_to(extra / ".gamma.schema.json")
+    assert settings.discovered_tools() == (
+        [settings.Discovered("alpha", extra, extra / ".alpha.schema.json")], [])
+
+
+def test_d5_a_package_folder_linked_to_another_is_read_once(tree):
+    extra = pkg(tree, "extra")
+    schema(extra, ".alpha.schema.json")
+    (settings.kit_root() / "twin").symlink_to(extra.parent)
+    assert found_names() == ["alpha"]
+    assert settings.discovered_tools()[1] == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 folder")
+def test_d7_a_folder_that_cannot_be_listed_is_named_and_the_rest_is_found(tree):
+    locked_out, fine = pkg(tree, "extra"), pkg(tree, "other")
+    schema(locked_out, ".alpha.schema.json")
+    schema(fine, ".beta.schema.json")
+    locked_out.chmod(0)
+    try:
+        found, notes = settings.discovered_tools()
+    finally:
+        locked_out.chmod(0o755)
+    assert [d.tool for d in found] == ["beta"]
+    assert len(notes) == 1 and notes[0].startswith(f"{locked_out}: cannot be listed")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 folder")
+def test_d7_a_kit_root_that_cannot_be_listed_is_named(tree):
+    schema(pkg(tree, "extra"), ".alpha.schema.json")
+    root = settings.kit_root()
+    root.chmod(0)
+    try:
+        found, notes = settings.discovered_tools()
+    finally:
+        root.chmod(0o755)
+    assert found == [] and len(notes) == 1 and notes[0].startswith(f"{root}: cannot be listed")
+
+
+def test_d7_a_folder_removed_while_it_is_scanned_is_skipped_quietly(tree, monkeypatch):
+    gone, fine = pkg(tree, "extra"), pkg(tree, "other")
+    schema(gone, ".alpha.schema.json")
+    schema(fine, ".beta.schema.json")
+    listing = settings._entries
+
+    def removed_meanwhile(folder):
+        if folder == gone:
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(folder))
+        return listing(folder)
+
+    monkeypatch.setattr(settings, "_entries", removed_meanwhile)
+    assert settings.discovered_tools() == (
+        [settings.Discovered("beta", fine, fine / ".beta.schema.json")], [])
+
+
+def test_d8_discovery_never_reaches_a_launch_or_the_reader(tree, capsys):
+    before_tools = settings.schema_tools()
+    before_listed = settings.tools(SID)
+    assert main(["settings", SID, "alpha"]) in (0, 1, 2)
+    before_report = capsys.readouterr()
+    extra = pkg(tree, "extra")
+    schema(extra, ".alpha.schema.json",
+           {"type": "object", "properties": {"mode": {"type": "string", "x-env": "ALPHA_MODE"}}})
+    w(extra / "alpha.json", {"mode": "loud"})
+    assert found_names() == ["alpha"]  # the page sees it ...
+    assert settings.schema_tools() == before_tools  # ... the birth's list does not
+    assert settings.env_keys("alpha") == []
+    assert settings.find_schema("alpha") == (None, [])
+    assert settings.tools(SID) == before_listed
+    assert settings.resolve("alpha", SID).sources == []
+    main(["settings", SID, "alpha"])
+    assert capsys.readouterr() == before_report
+
+
+def test_d9_no_kit_root_or_an_empty_one_finds_nothing_and_says_nothing(tree):
+    assert not settings.kit_root().exists()
+    assert settings.discovered_tools() == ([], [])
+    settings.kit_root().mkdir()
+    (settings.kit_root() / "a-file").write_text("x")
+    assert settings.discovered_tools() == ([], [])
+
+
+def test_discovery_is_read_only(tree):
+    extra = pkg(tree, "extra")
+    schema(extra, ".alpha.schema.json")
+    schema(pkg(tree, "tools"), ".ears.schema.json")
+    def snapshot():
+        return sorted((str(p), p.stat().st_mtime_ns) for p in tree.rglob("*"))
+    before = snapshot()
+    settings.discovered_tools()
+    settings.folder_sources("alpha", extra)
+    assert snapshot() == before
+
+
+def test_folder_sources_reads_template_host_and_drop_ins_from_the_folder_only(tree):
+    extra = pkg(tree, "extra")
+    t = w(extra / "alpha.template.json", {"a": 1, "b": 1, "c": 1, "_locked": ["c"]})
+    h = w(extra / "alpha.json", {"b": 2, "c": 2})
+    d = w(extra / "alpha.d" / "10-x.json", {"b": 3})
+    w(pkg(tree, "other") / "alpha.json", {"a": 9})  # another folder: never read
+    srcs = settings.folder_sources("alpha", extra)
+    assert [(s.layer, s.path) for s in srcs] == [("template", t), ("host", h), ("host", d)]
+    values, origins, locked, _leaves = settings.merge(srcs)
+    assert values == {"a": 1, "b": 3, "c": 1}
+    assert origins["b"] == str(d) and locked == {"c": str(t)}
+
+
+def test_folder_sources_with_no_files_is_empty_and_a_bad_file_raises(tree):
+    extra = pkg(tree, "extra")
+    assert settings.folder_sources("alpha", extra) == []
+    w(extra / "alpha.json", "[1, 2]")
+    with pytest.raises(settings.SettingsError, match="not a JSON object"):
+        settings.folder_sources("alpha", extra)

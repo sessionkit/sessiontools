@@ -53,7 +53,9 @@ HELD = {"ledger": "ST-26 OQ3: teaching agents the verb waits on the maintainer",
                     "on turn one, and mail's wake prints it; the skill is at its 400-token "
                     "cap (a line measured 420)",
         "path": "a path query for scripts and the kit's other packages (ST-266), not an "
-                "agent's verb; the skill is at its 400-token cap"}
+                "agent's verb; the skill is at its 400-token cap",
+        "web": "PROPOSED (kit-web-shell, ST-249): a spike, and a human's login, not an "
+               "agent's verb"}
 
 
 def front_matter(text: str) -> dict[str, str]:
