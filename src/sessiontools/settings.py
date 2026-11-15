@@ -241,6 +241,22 @@ def web_dir(env: Mapping[str, str] | None = None) -> Path:
     return kit_root(env) / PACKAGES["session"] / WEB_DIR
 
 
+#: The folder of tools' service files (the services schema), beside `settings/`
+#: and never inside it: a service file is the owner's word about a job, not
+#: a setting, so `session settings` never reads one. `sessionkit service`
+#: reads every package's `services/`.
+SERVICES_DIR = "services"
+
+
+def services_dir(env: Mapping[str, str] | None = None) -> Path:
+    """`~/.sessionkit/tools/services/`: the folder `sessiontools.service_file`
+    writes each `<name>.json` into. The ONE place the shape is spelled: the
+    package is PACKAGES["session"], never a literal. HOME moves it (through
+    kit_root); there is no override of its own, because the kit reads
+    `~/.sessionkit/` fixed."""
+    return kit_root(env) / PACKAGES["session"] / SERVICES_DIR
+
+
 #: Points the front door's room sockets somewhere other than `web/run/`: a
 #: unix socket path holds at most 103 bytes on macOS (107 on Linux), and a
 #: long HOME can put `web/run/<room>.sock` past it.
@@ -1259,9 +1275,11 @@ BIRTH_ENTRY = "import sys; from sessiontools.settings import birth_main; sys.exi
 # that installs its schema from a hook does so after the vendor starts,
 # which is too late for the first session on a fresh HOME. So the launch
 # script runs the tool's own install command first, in the environment the
-# birth then reads. One tool needs it today: mail, whose `pager` has the
-# verb. A release without the verb fails with a usage error; that, and any
-# other failure, is logged and never stops a launch.
+# birth then reads. One other tool needs it today: mail, whose `pager` has
+# the verb. A release without the verb fails with a usage error; that, and
+# any other failure, is logged and never stops a launch. The same step
+# installs sessiontools' OWN schemas (OWN_SCHEMAS) first, in process, with
+# or without a `pager` on PATH.
 
 #: The command, argv form; the launch script runs it only when its first
 #: word is on PATH.
@@ -1282,6 +1300,13 @@ SCHEMA_INSTALL_FAILED = "pager settings install: could not write "
 #: must not grow the log on every launch.
 SCHEMA_INSTALL_KEEP_LINES = 20
 SCHEMA_INSTALL_KEEP_CHARS = 500
+#: sessiontools' own schemas: tool -> the module whose `schema()` renders
+#: it from the module's own names (so a rename never edits a JSON file).
+#: The install writes each as the dot name in host_dir(tool), the
+#: installed copy find_schema reads first.
+OWN_SCHEMAS = {"session": "sessiontools.settle_settings"}
+#: The log event of one own schema's install.
+OWN_SCHEMA_EVENT = "own-schema-install"
 
 
 class EnvKey(NamedTuple):
@@ -1446,7 +1471,9 @@ def birth_main(argv: list[str] | None = None,
                environ: Mapping[str, str] | None = None) -> int:
     """The launch script's entry: `--dir SESSION_DIR`. Always exit 0: a
     settings file not written is a stderr line, never a session that did
-    not start (as the launch record)."""
+    not start (as the launch record). After the x-env copy it writes the
+    settle warning's OFF stamp when no layer sets the warning
+    (settle_settings.stamp_at_birth)."""
     import sys
 
     args = list(sys.argv[1:] if argv is None else argv)
@@ -1461,6 +1488,15 @@ def birth_main(argv: list[str] | None = None,
                       f"{entry['tool']}.{entry['key']}: {entry['error']}", file=sys.stderr)
     except Exception as error:  # noqa: BLE001 - settings never cost a session
         print(f"{BIRTH_PROG}: not written ({type(error).__name__}: {error})", file=sys.stderr)
+    # The settle warning's OFF stamp, after the copy above (which may turn it
+    # on): a seat this launch starts runs no python in the settle hook while
+    # no layer sets the warning. Silent whatever goes wrong: with
+    # no stamp the hook stamps at its first batch.
+    try:
+        from sessiontools import settle_settings
+        settle_settings.stamp_at_birth(Path(args[1]), source)
+    except Exception:  # noqa: BLE001, S110 - settings never cost a session
+        pass
     return 0
 
 
@@ -1533,23 +1569,87 @@ def run_schema_install(session: Path, command: list[str], environ: Mapping[str, 
     return entry, failed
 
 
+def install_own_schemas(session: Path, env: Mapping[str, str] | None = None,
+                        now: str | None = None) -> list[dict]:
+    """Write each of OWN_SCHEMAS into host_dir(tool) as `.<tool>.schema.json`,
+    rendered now; a file already holding those bytes is left alone
+    (`current`), so a launch does not touch it. The write is a temporary
+    file renamed into place, 0644. One OWN_SCHEMA_EVENT entry per tool in
+    SESSION's `log/settings.jsonl`: `installed`, `current`, or `failed`
+    with the error. Never raises for a file it cannot write."""
+    import importlib
+    import tempfile
+    from datetime import UTC, datetime
+
+    stamp = now or datetime.now(UTC).isoformat(timespec="seconds")
+    entries: list[dict] = []
+    for tool, module in OWN_SCHEMAS.items():
+        entry: dict = {"ts": stamp, "event": OWN_SCHEMA_EVENT, "tool": tool}
+        try:
+            folder = host_dir(tool, env)[0]
+            target = folder / f".{tool}.schema.json"
+            entry["file"] = str(target)
+            text = json.dumps(importlib.import_module(module).schema(), indent=2,
+                              ensure_ascii=False) + "\n"
+            try:
+                current = target.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                current = None
+            if current == text:
+                entry["state"] = "current"
+            else:
+                folder.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(prefix=f".{tool}.schema.", suffix=".tmp", dir=folder)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                        fh.write(text)
+                    os.chmod(tmp, 0o644)
+                    os.replace(tmp, target)
+                except BaseException:
+                    Path(tmp).unlink(missing_ok=True)
+                    raise
+                entry["state"] = "installed"
+        except (OSError, SettingsError) as error:
+            entry["state"] = "failed"
+            entry["error"] = f"{type(error).__name__}: {error}"
+        _log(session / "log" / SETTINGS_LOG, entry)
+        entries.append(entry)
+    return entries
+
+
 def schema_install_main(argv: list[str] | None = None,
                         environ: Mapping[str, str] | None = None,
                         timeout: float = SCHEMA_INSTALL_TIMEOUT) -> int:
-    """The launch script's entry: `--dir SESSION_DIR -- COMMAND...`. Runs
-    the command (run_schema_install) before the birth line. Always exit 0
-    and silent, except ONE stderr line when the command says it could not
-    write a file, naming the log that holds the rest: settings never stop
-    a launch, and a release without the verb is not news on every launch."""
+    """The launch script's entry: `--dir SESSION_DIR [-- COMMAND...]`.
+    Installs sessiontools' own schemas (install_own_schemas), then runs the
+    command, when one is given (run_schema_install), before the birth line.
+    Always exit 0 and silent, except ONE stderr line for each own schema
+    not written, and ONE when the command says it could not write a file,
+    each naming the log that holds the rest: settings never stop a launch,
+    and a release without the verb is not news on every launch."""
     import sys
 
     args = list(sys.argv[1:] if argv is None else argv)
-    if len(args) < 4 or args[0] != "--dir" or not args[1] or args[2] != "--":
-        print(f"{SCHEMA_INSTALL_PROG}: usage: --dir SESSION_DIR -- COMMAND...; nothing run",
+    bare = len(args) == 2
+    if (len(args) < 2 or args[0] != "--dir" or not args[1]
+            or not bare and (len(args) < 4 or args[2] != "--")):
+        print(f"{SCHEMA_INSTALL_PROG}: usage: --dir SESSION_DIR [-- COMMAND...]; nothing run",
               file=sys.stderr)
         return 0
     session, command = Path(args[1]), args[3:]
     source = os.environ if environ is None else environ
+    log = session / "log" / SETTINGS_LOG
+    try:
+        for own in install_own_schemas(session, source):
+            if own["state"] == "failed":
+                print(f"{SCHEMA_INSTALL_PROG}: {own['tool']} schema not written to "
+                      f"{own.get('file', '?')} ({own['error']}); recorded in {log}",
+                      file=sys.stderr)
+    except Exception as error:  # noqa: BLE001 - settings never cost a session
+        print(f"{SCHEMA_INSTALL_PROG}: own schemas not installed "
+              f"({type(error).__name__}: {error})", file=sys.stderr)
+    if bare:
+        return 0
     try:
         entry, failed = run_schema_install(session, command, source, timeout=timeout)
     except Exception as error:  # noqa: BLE001 - settings never cost a session
@@ -1559,7 +1659,7 @@ def schema_install_main(argv: list[str] | None = None,
     if failed:
         paths = ", ".join(x[len(SCHEMA_INSTALL_FAILED):] for x in failed)
         print(f"{SCHEMA_INSTALL_PROG}: {entry['command']} exit {entry['exit']}, could not "
-              f"write {paths}; recorded in {session / 'log' / SETTINGS_LOG}", file=sys.stderr)
+              f"write {paths}; recorded in {log}", file=sys.stderr)
     return 0
 
 

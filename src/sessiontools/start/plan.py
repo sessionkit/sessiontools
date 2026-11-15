@@ -9,9 +9,7 @@ Three stages, and why there are three:
                            keyed session's id is born with its key, and the
                            context generators must see it (launch-info says
                            it; the wake runs under it). Under --dry-run it
-                           projects and does nothing. A keyed launch placed
-                           in tmux mints IN THE PANE instead, so
-                           here it only plans that mint: a PaneMint.
+                           projects and does nothing.
     assemble(launch, id)   PURE but for the agent file's own generators,
                            which run by the old contract - their stdout IS
                            argv. Builds the argv with per-token provenance,
@@ -20,9 +18,9 @@ Three stages, and why there are three:
 
 `prepare(args)` is the three in a row. `run.execute(plan)` is the rest of
 the acts: the 0600 prompt and first-message files, the 0700 plugin dir,
-the window name, the exec. `placement.place_in_tmux(plan, ...)` is the
-other ending: the same files, then the plan's script as a 0700 trampoline
-in a new tmux window.
+the window name, the exec. A tmux placement plans nothing here:
+`start.place` opens a window that runs `session start` again, in place,
+and THAT launch is planned and executed like any other.
 """
 
 from __future__ import annotations
@@ -32,6 +30,7 @@ import itertools
 import os
 import shlex
 import sys
+import unicodedata
 from collections.abc import Mapping
 from typing import NamedTuple
 
@@ -74,14 +73,8 @@ from sessiontools.start.environment import (
     without_session_identity,
 )
 from sessiontools.start.errors import EXIT_USAGE, PROG, LaunchError
-from sessiontools.start.identity import (
-    PaneMint,
-    SessionIdentity,
-    expand_shortsid,
-    mint_identity,
-    pane_mint_for,
-    render_pane_mint,
-)
+from sessiontools.start.identity import SessionIdentity, expand_shortsid, mint_identity
+from sessiontools.start.pane import MESSAGE_FILE_FLAG, read_message_file
 from sessiontools.start.policy import (
     CommitterIdentity,
     check_fable_gate,
@@ -89,6 +82,8 @@ from sessiontools.start.policy import (
 )
 from sessiontools.start.record import (
     LaunchRecord,
+    entered_dir,
+    entered_line,
     record_path,
     render_record_call,
     vendor_startup_files,
@@ -101,10 +96,15 @@ from sessiontools.start.resume import (
     resume_message,
 )
 from sessiontools.start.secrets import SECRET_FILE_PREFIX, SecretResult, read_inherited
+from sessiontools.start.user_memory import (
+    UserMemory,
+    render_user_memory,
+    user_memory_block,
+    vendor_environ,
+    yield_line,
+)
 from sessiontools.start.vendor import (
     VENDORS,
-    ShellExpr,
-    ShellVar,
     door_is_opened_by,
     guard_computed_doors,
     render_argv_token,
@@ -145,9 +145,8 @@ class LaunchPlan(NamedTuple):
     `provenance` (the same tokens, annotated), so what --dry-run prints and
     what a launch execs cannot drift apart. `files` is what `execute`
     writes before its exec - empty for a dry run, which writes nothing.
-    `identity` is None when `pane_mint` is set (a keyed launch placed in
-    tmux, whose identity is born in the pane) and on an unkeyed resume (the
-    resumed session keeps its own id; minting one would lie). `resume` is
+    `identity` is None on an unkeyed resume (the resumed session keeps its
+    own id; minting one would lie). `resume` is
     True for a claude resume: direct path, no generators, the restart
     message as the first message."""
 
@@ -163,7 +162,6 @@ class LaunchPlan(NamedTuple):
     secrets: list
     files: tuple
     dry_run: bool
-    pane_mint: PaneMint | None = None
     resume: bool = False
     # Where the prelude sources the 0600 secret file from: None without
     # declared secrets, the representative `secrets.env` under a dry run,
@@ -184,6 +182,9 @@ class LaunchPlan(NamedTuple):
     # them and reads nothing, so `inherited` is empty there.
     inherit: tuple = ()
     inherited: tuple = ()
+    # One-line notes the dry run prints and a live launch has said on
+    # stderr: today only the user memory's yield (design 3.5, ST-302).
+    notes: tuple = ()
 
 
 # The old launcher's refusal, word for word: nothing can place a resumed
@@ -249,6 +250,16 @@ def resolve(args: argparse.Namespace, environ: Mapping[str, str] | None = None,
         raise LaunchError(f"{agent_subject(agent)}: {error}", code=EXIT_USAGE) from error
     start = agent_file.start
     message_words, cli_args = split_rest(args.rest)
+    message_file = getattr(args, "first_message_file", None)
+    if message_file is not None:
+        # The pane's re-entry path: the message is the file's
+        # whole text, as if typed. Both at once has no single answer.
+        if message_words:
+            raise LaunchError(
+                f"{MESSAGE_FILE_FLAG} and bare first-message words together: the "
+                "message comes from one of them -- drop the words or the file",
+                code=EXIT_USAGE)
+        message_words = [read_message_file(message_file)]
     # THE FABLE GATE: the earliest point the vendor, the argv and the
     # environment all exist, and before anything below mints or writes.
     fable_gate(agent_file, cli_args, environ)
@@ -321,11 +332,14 @@ def rehearse_doors(launch: Launch) -> None:
     start = launch.start
     resuming = launch.resume is not None
     # The default seat's file body opens the system-prompt door on any fresh
-    # launch, `--idle` too; a resume keeps the prompt it was born with.
-    injects = not resuming and (
-        bool(default_seat.carried_body(launch.agent, launch.agent_file))
-        or (bool(start.context.system_prompt)
-            and not switch_enabled(launch.args.idle, start.idle)))
+    # launch, `--idle` too; a resume keeps the prompt it was born with. The
+    # user memory opens it exactly when the real assembly will carry it.
+    try:
+        memory, _note = carried_user_memory(launch)
+    except ValueError as error:
+        raise LaunchError(f"{agent_subject(launch.agent)}: {error}",
+                          code=EXIT_USAGE) from error
+    injects = not resuming and (launcher_prompt_injects(launch) or memory is not None)
     # An unkeyed resume computes no session id: the resumed one is claude's.
     stand_in = (None if resuming and not launch.keyed
                 else SessionIdentity("<rehearsal>", "", launch.keyed, {}, minted=False))
@@ -348,6 +362,65 @@ def rehearse_doors(launch: Launch) -> None:
     except ValueError as error:
         raise LaunchError(f"{agent_subject(launch.agent)}: {error}",
                           code=EXIT_USAGE) from error
+
+
+def launcher_prompt_injects(launch: Launch) -> bool:
+    """Does anything BUT the user memory compute the system-prompt door on
+    this fresh launch? The default seat's file body (any fresh launch,
+    `--idle` too), or a `start: context: system-prompt:` list that will
+    run (not under `--idle`). One answer, for the rehearsal and the
+    assembly alike, so the user memory's yield (design 3.5) is decided the
+    same way in both."""
+    start = launch.start
+    return (bool(default_seat.carried_body(launch.agent, launch.agent_file))
+            or (bool(start.context.system_prompt)
+                and not switch_enabled(launch.args.idle, start.idle)))
+
+
+def carried_user_memory(launch: Launch) -> tuple[UserMemory | None, str | None]:
+    """(the user memory this launch carries, the line it says instead): at
+    most one of the two is set (ST-302, design 3.3-3.5).
+
+    Never on a resume: it keeps the prompt it was born with. Otherwise
+    `user_memory.user_memory_block` decides from the argv the vendor will
+    see (the agent file's rendered section, then the CLI passthrough) and
+    the environment it will get (`vendor_environ`). A block it returns
+    YIELDS, as the line, when nothing else on the launch computes the
+    system-prompt door and the agent file or the CLI opens the FILE door
+    (`user_memory.yield_line`): that launch runs as it did before."""
+    if launch.resume is not None:
+        return None, None
+    vendor = launch.start.vendor
+    declared = render_vendor_args(vendor, launch.agent_file.vendor_section)
+    cli = vendor_cli_args(launch)
+    env = vendor_environ(launch.environ, launch.agent_file.environment.variables)
+    memory = user_memory_block(vendor, declared + cli, env)
+    if memory is None:
+        return None, None
+    if not launcher_prompt_injects(launch):
+        line = yield_line(vendor, memory, declared, cli)
+        if line is not None:
+            return None, line
+    return memory, None
+
+
+def system_prompt_parts(memory: UserMemory | None, body: str,
+                        injected: str) -> tuple[str, str]:
+    """(the system-prompt file's text, its provenance): the user memory
+    block FIRST, then the default seat's file body, then the `start:
+    context: system-prompt:` output, a blank line between each part
+    present. The provenance names the parts in the same order."""
+    names = []
+    if memory is not None:
+        names.append(f"user memory ({memory.path})")
+    if body:
+        names.append("the default seat's file body")
+    if injected or not names:
+        names.append("injected context")
+    rest = default_seat.prompt_text(body, injected)
+    text = "\n".join(part for part in (
+        render_user_memory(memory) if memory is not None else "", rest) if part)
+    return text, "computed: " + ", then ".join(names) + " (system prompt)"
 
 
 def rehearse_fold(launch: Launch) -> None:
@@ -374,19 +447,15 @@ def rehearse_fold(launch: Launch) -> None:
 
 # ---------- stage 2: mint -----------------------------------------------------
 
-def mint(launch: Launch) -> SessionIdentity | PaneMint | None:
+def mint(launch: Launch) -> SessionIdentity | None:
     """The launch's identity: minted (live) or projected (--dry-run). A
-    keyed launch placed in tmux gets a PaneMint instead - the plan for a
-    mint its pane runs at boot, so the key and its reaper live as long as
-    the pane, not as long as this launcher. A resume mints only
+    tmux placement mints nothing here: its pane runs `session
+    start` again in place, so a keyed pane mints its own key, reaped by the
+    vendor's pid, which is the pane's process. A resume mints only
     when keyed (the fork); otherwise None, after saying so if the session
     it resumes was keyed."""
     if launch.resume is not None:
         return mint_for_resume(launch)
-    if launch.keyed and launch.in_tmux:
-        return pane_mint_for(launch.agent, environ=launch.environ,
-                             key_label=launch.args.key_label, dry_run=launch.dry_run,
-                             seat=launch.args.seat)
     return mint_identity(launch.agent, keyed=launch.keyed, environ=launch.environ,
                          dry_run=launch.dry_run, key_label=launch.args.key_label,
                          seat=launch.args.seat)
@@ -422,7 +491,6 @@ def build_annotated_argv(vendor: str, vendor_section: dict, agent: Agent | None 
                          system_prompt_text: str = "", directory: str | None = None,
                          dry_run: bool = False, message_source: str = "initial message",
                          first_message_file_over: int | None = None,
-                         pane_minted: bool = False,
                          claude_settings: dict | None = None,
                          claude_settings_source: str = "computed: claude-code settings",
                          system_prompt_source: str = "computed: injected context (system prompt)",
@@ -438,20 +506,15 @@ def build_annotated_argv(vendor: str, vendor_section: dict, agent: Agent | None 
     `claude_settings` holds data: none, and the argv is as before. A door
     the launcher computed and the agent file or CLI opens again is refused
     (guard_computed_doors) - and since nothing is written here, a refusal
-    leaves nothing behind. `pane_minted` (no identity launcher-side): the
-    session id's slot is `"$CLAUDE_SESSION_ID"`, expanded in the pane.
+    leaves nothing behind. With no identity (an unkeyed resume) the
+    session id door is not computed.
     """
     table = VENDORS[vendor]
     computed: list = []
-    if table["session_id_flag"] is not None:
-        if identity is not None:
-            source = "computed: session identity (minted by the launcher)"
-            computed += [(table["session_id_flag"], source),
-                         (identity.session_id, source)]
-        elif pane_minted:
-            source = "computed: session identity (minted in the pane at boot)"
-            computed += [(table["session_id_flag"], source),
-                         (ShellVar("CLAUDE_SESSION_ID"), source)]
+    if table["session_id_flag"] is not None and identity is not None:
+        source = "computed: session identity (minted by the launcher)"
+        computed += [(table["session_id_flag"], source),
+                     (identity.session_id, source)]
     prompt_argv, prompt_file = system_prompt_argv(
         vendor, system_prompt_text, directory=directory, dry_run=dry_run)
     computed += [(token, system_prompt_source) for token in prompt_argv]
@@ -469,7 +532,8 @@ def build_annotated_argv(vendor: str, vendor_section: dict, agent: Agent | None 
         plugin_argv, plugin_dir = agent_plugin_argv(vendor, agent, directory=directory,
                                                     dry_run=dry_run)
         carried = ("computed: the agent's own definition, so --agent resolves "
-                   "from any directory")
+                   "from any directory, by its plain name while the project "
+                   "setting source is on")
         computed += [(token, carried) for token in plugin_argv]
     door_argv, settings_file = settings_argv(vendor, claude_settings, directory=directory,
                                              dry_run=dry_run)
@@ -491,14 +555,10 @@ def build_annotated_argv(vendor: str, vendor_section: dict, agent: Agent | None 
     annotated = [(table["cmd"], f"computed: vendor table ({vendor})")]
     annotated += computed + front
     for token in cli_args:
-        filled = expand_shortsid(token, identity, pane_minted)
+        filled = expand_shortsid(token, identity)
         source = "CLI passthrough"
         if filled is not token:
-            # A keyed tmux launch has no id yet: the pane mints it, and the
-            # slot is a ShellExpr that expands there (the old launcher's words).
-            source += (" ({shortsid} filled in the pane from the minted id)"
-                       if isinstance(filled, ShellExpr)
-                       else " ({shortsid} filled from the session identity)")
+            source += " ({shortsid} filled from the session identity)"
         annotated.append((filled, source))
     message_file = None
     if initial_message:
@@ -528,19 +588,17 @@ def render_launch_script(argv: list, work_dir: str,
                          committer: CommitterIdentity | None = None,
                          env_prelude: str = "", secret_file: str | None = None,
                          vendor_env: Mapping[str, str] | None = None,
-                         shebang: bool = False, pane_mint: PaneMint | None = None,
                          record: LaunchRecord | None = None,
                          launch_info: str | None = None,
-                         identity_call: str = "") -> str:
+                         identity_call: str = "", title: str = "") -> str:
     """The bash a launch runs - ONE text for both endings: `bash -c` on the
-    direct path, and with `shebang` the 0700 trampoline a tmux pane runs.
+    direct path, and the one a tmux pane's own `session start`
+    runs too.
     In this order - the order is the contract:
 
         unset the caller's identity        (ids, key handles, signing
                                              block: never hand them down)
         shred trap                          (when a secret file exists)
-        pane mint                           (keyed in tmux: mint FIRST, so
-                                             every later line sees the id)
         export this session's identity
         launch-info marker                  (the id launch-info carries,
                                              when it rendered one)
@@ -554,8 +612,9 @@ def render_launch_script(argv: list, work_dir: str,
         the launch record                   (the env the vendor gets,
                                              so after everything that sets it)
         the identity block                  (`identity_call`: who this session
-                                             is, written in the pane, last
-                                             before the vendor)
+                                             is, written in the pane)
+        the terminal title                  (`title`: one short OSC 0, last
+                                             before the vendor; render_title_line)
         exec argv                           (shlex-quoted; exec, so the
                                              vendor owns this pid - which is
                                              what makes --reap-pid true)
@@ -565,22 +624,12 @@ def render_launch_script(argv: list, work_dir: str,
     session-info hook leaves that id out of its block. The first line has
     already unset an inherited one. It goes before the prelude, so an
     agent's own `environment:` declaration still wins.
-
-    Under a pane mint the argv is NOT exec'd: the pane-lifetime trap needs a
-    shell to fire in, so bash stays the pane's process (its `$$` is what the
-    reaper watches) and the vendor runs as its child.
     """
-    if identity is not None and pane_mint is not None:
-        raise ValueError("an identity minted launcher-side and a pane mint are "
-                         "mutually exclusive -- one session, one mint")
-    lines = ["#!/usr/bin/env bash"] if shebang else []
-    lines.append("# session start: launch script (generated; do not edit)")
+    lines = ["# session start: launch script (generated; do not edit)"]
     lines.append(render_identity_unset())
     if secret_file:
         lines.append(f"__ss_shred() {{ rm -f {shlex.quote(secret_file)}; }}")
         lines.append("trap __ss_shred EXIT HUP INT TERM")
-    if pane_mint is not None:
-        lines.append(render_pane_mint(pane_mint))
     if identity is not None and identity.env:
         lines.append("# session identity")
         for name, value in identity.env.items():
@@ -609,12 +658,59 @@ def render_launch_script(argv: list, work_dir: str,
         lines.append(render_record_call(record, rendered))
     if identity_call:
         lines.append(identity_call.rstrip("\n"))
-    if pane_mint is not None:
-        lines.append(rendered)
-        lines.append('exit "$?"')
-    else:
-        lines.append("exec " + rendered)
+    title_line = render_title_line(title)
+    if title_line:
+        lines.append(title_line)
+    lines.append("exec " + rendered)
     return "\n".join(lines) + "\n"
+
+
+#: The vendor's own switch for title games. Set non-empty, the launch
+#: writes no title either: the user asked for none.
+TITLE_OPT_OUT = "CLAUDE_CODE_DISABLE_TERMINAL_TITLE"
+
+
+def default_window_name(agent: Agent, vendor: str) -> str:
+    """The agent's name alone (by design: no prefix or suffix), or the
+    vendor's for a plain session. A tmux window's name (`run.name_own_window`,
+    `start.place`) and the terminal title (`launch_title`) both read it."""
+    return agent.name or vendor
+
+
+def clean_title(name: str) -> str:
+    """NAME with every control character taken out (C0, DEL and C1: ESC,
+    BEL, CSI and the rest), so it cannot end the title sequence or start
+    another one, and the edges trimmed. May be empty."""
+    return "".join(ch for ch in name if unicodedata.category(ch) != "Cc").strip()
+
+
+def render_title_line(title: str) -> str:
+    """The script line that sets the terminal's title to TITLE: one OSC 0
+    (icon name and window title), written only when stdout is a terminal and
+    TITLE_OPT_OUT is unset or empty in the script's own environment (so an
+    agent's `environment:` declaration counts too). The name rides as
+    printf's `%s` argument, shell-quoted, after `clean_title`: it is never
+    read as a format or an escape. "" when nothing is left to show.
+
+    No title stack (push, then pop): the script execs, so nothing of ours
+    is left to pop it. Taking the title back after the session relies on
+    the vendor's own exit, which clears it (Claude Code writes an empty
+    title as it exits); a vendor that dies before that leaves this one
+    until the shell or the next program sets its own."""
+    shown = clean_title(title or "")
+    if not shown:
+        return ""
+    return "\n".join([
+        "# terminal title: a short name, not the launch line (the vendor's exit clears it)",
+        (f'if [ -t 1 ] && [ -z "${{{TITLE_OPT_OUT}:-}}" ]; then '
+         f"printf '\\033]0;%s\\007' {shlex.quote(shown)}; fi"),
+    ])
+
+
+def launch_title(launch: Launch) -> str:
+    """The terminal title a launch sets: the seat it takes
+    (`launch_seat`), else the agent's name, else the vendor's."""
+    return launch_seat(launch) or default_window_name(launch.agent, launch.start.vendor)
 
 
 def launch_info_marker(injected: InjectedContext,
@@ -622,8 +718,7 @@ def launch_info_marker(injected: InjectedContext,
     """The session id to export as LAUNCH_INFO_ENV, or None for no export.
 
     Only when the `launch-info` built-in RAN and rendered WITH an id: an
-    identity minted launcher-side (a pane mint has no id yet, so launch-info
-    printed none), and a launch-info result that is ok. A built-in that
+    identity minted launcher-side, and a launch-info result that is ok. A built-in that
     raised rendered a failure note with no id, and a marker then would hide
     the id the seat never saw. No launch-info entry, `--idle` (no generator
     runs) and a resume (`assemble_resume` runs none) give no result, so no
@@ -649,7 +744,7 @@ def generator_environ(launch: Launch, identity: SessionIdentity | None) -> dict[
 
     CLAUDE_CODE_SESSION_ID is never SET here: it is the vendor's name, and
     no vendor is running yet. CLAUDE_SESSION_ID is the new id when the
-    launcher minted one, and absent under a pane mint (no id exists yet).
+    launcher minted one, and absent on an unkeyed resume (no new id).
     The scrub comes BEFORE `variables:`, so an agent that declares one of
     these names on purpose still wins."""
     env = without_session_identity(host_environ(launch.environ))
@@ -658,7 +753,7 @@ def generator_environ(launch: Launch, identity: SessionIdentity | None) -> dict[
     else:
         env.pop("CLAUDE_CODE_AGENT", None)
     env.update(launch.agent_file.environment.variables)
-    if identity is not None:         # a pane-minted id does not exist yet
+    if identity is not None:         # an unkeyed resume has no new id
         env.update(identity.env)
     return env
 
@@ -709,24 +804,28 @@ def startup_files(launch: Launch, work_dir: str, argv: list, files: list,
 
 
 def plan_record(launch: Launch, work_dir: str, identity: SessionIdentity | None,
-                pane_mint: PaneMint | None, argv: list, files: list,
+                argv: list, files: list,
                 door_dir: str | None, secret_file: str | None,
                 secrets: list, inherit: tuple = ()) -> LaunchRecord | None:
     """The launch record this launch's script writes: into the
-    launcher-minted session dir, or the one the pane mints. Its start
+    launcher-minted session dir. Its start
     command is this interpreter (`sys.executable`, the one the record
     call runs, never a macOS framework build's re-exec'd `Python.app`
     binary, which has none of the venv's packages), then the rest of
     `sys.orig_argv`, flags included, so it re-runs as written whether
     `session` or `python -m` started it.
+    Beside it, the line as ENTERED and the directory it was entered from
+    (`launch_command`, `launch_dir`): the argv `parse_args` saw,
+    spelled `session start ...`, never the evaluated one; in a placed pane,
+    the line and directory its launcher handed down (`pane.take_handoff`).
+    A resume never
+    reaches here (`assemble_resume` plans no record), so `--resume` is
+    never recorded.
     The declared secrets and `inherit:` names are masked by name: the
     record lists them, never their values."""
     if identity is not None:
         directory = shlex.quote(identity.session_dir)
         shown = identity.session_dir
-    elif pane_mint is not None:
-        directory = shlex.quote(pane_mint.sessions_root) + '/"$CLAUDE_SESSION_ID"'
-        shown = f"{pane_mint.sessions_root}/<id minted in the pane>"
     else:
         return None     # no session directory of its own to write it in
     return LaunchRecord(
@@ -734,7 +833,10 @@ def plan_record(launch: Launch, work_dir: str, identity: SessionIdentity | None,
         start_command=shlex.join([sys.executable, *sys.orig_argv[1:]]),
         work_dir=work_dir,
         files=startup_files(launch, work_dir, argv, files, door_dir, secret_file),
-        secret_names=(*(secret.name for secret in secrets), *inherit))
+        secret_names=(*(secret.name for secret in secrets), *inherit),
+        launch_command=entered_line(launch.args.entered_argv),
+        launch_dir=(getattr(launch.args, "entered_dir", None)
+                    or entered_dir(launch.environ)))
 
 
 def resolve_home(launch: Launch, identity: SessionIdentity | None) -> _settings.Home | None:
@@ -886,8 +988,8 @@ def settings_door_kwargs(rendered: claude_settings.Rendered | None,
 def render_home_prelude(home: _settings.Home | None) -> str:
     """The bash that hands the launched process its home as SESSION_HOME
     (never HOME) and makes the directory. A
-    per-session place is finished here, after the pane mint, with the id
-    the pane minted. Empty when there is no home."""
+    per-session place is finished here, by the shell, with the session id
+    the script exports. Empty when there is no home."""
     if home is None:
         return ""
     var = _settings.SESSION_HOME_ENV
@@ -905,20 +1007,24 @@ def render_home_prelude(home: _settings.Home | None) -> str:
 
 
 def render_schema_install(record: LaunchRecord, python: str) -> str:
-    """The script line that runs a tool's schema install before the birth
-    line, so the birth finds the schema on a HOME no hook has run under
-    yet. Only when the command is on PATH; its output goes to the session's
-    `log/settings.jsonl`, never the terminal; stdin is /dev/null; `|| :`.
-    `--dir` is the birth line's, character for character (a pane mint's
-    `$CLAUDE_SESSION_ID` expands in both)."""
+    """The script line that runs the schema install before the birth line,
+    so the birth finds each schema on a HOME no hook has run under yet. It
+    always installs sessiontools' own schemas (settings.OWN_SCHEMAS: the
+    `session` schema, whose `x-env` keys carry SESSION_SETTLE_AT and
+    SESSION_SETTLE_SAY into the session layer), and runs mail's command too
+    only when it is on PATH: one python start either way. Its output goes to
+    the session's `log/settings.jsonl`, never the terminal; stdin is
+    /dev/null; `|| :`. `--dir` is the birth line's, character for
+    character."""
     program = shlex.quote(_settings.SCHEMA_INSTALL[0])
-    call = " ".join([shlex.quote(python), "-I", "-c", shlex.quote(_settings.SCHEMA_INSTALL_ENTRY),
-                     "--dir", record.session_dir, "--",
-                     *(shlex.quote(x) for x in _settings.SCHEMA_INSTALL)])
+    own = " ".join([shlex.quote(python), "-I", "-c", shlex.quote(_settings.SCHEMA_INSTALL_ENTRY),
+                    "--dir", record.session_dir])
+    call = " ".join([own, "--", *(shlex.quote(x) for x in _settings.SCHEMA_INSTALL)])
     return "\n".join([
-        ("# schema install: each tool installs its settings schema before the birth "
-         "reads them; logged in log/settings.jsonl"),
-        f"if command -v {program} >/dev/null 2>&1; then {call} </dev/null || :; fi",
+        ("# schema install: sessiontools' own schemas, then each tool installs its "
+         "settings schema, before the birth reads them; logged in log/settings.jsonl"),
+        (f"if command -v {program} >/dev/null 2>&1; then {call} </dev/null || :; "
+         f"else {own} </dev/null || :; fi"),
     ]) + "\n"
 
 
@@ -927,7 +1033,7 @@ def render_birth_call(record: LaunchRecord | None, python: str | None = None) ->
     into the session's `settings/<tool>.d/50-env.json`, once. It runs after
     the prelude, so it
     reads the environment the vendor will get, and in the session dir the
-    record names (a pane mint's `$CLAUDE_SESSION_ID` is set by then). `|| :`:
+    record names. `|| :`:
     settings never stop a launch. The schema install comes first
     (render_schema_install). Empty with no session dir to write in."""
     if record is None:
@@ -941,34 +1047,36 @@ def render_birth_call(record: LaunchRecord | None, python: str | None = None) ->
     ]) + "\n"
 
 
-def launch_seat(launch: Launch) -> str | None:
+def launch_seat(launch: Launch, claimed: str | None = None) -> str | None:
     """The seat this launch takes, for the identity block: `--seat`, else
-    the default seat word when that is the agent launched (a holder or a
-    second session beside one), else None (the pane may still find the
-    address a spawner handed down)."""
+    CLAIMED, the seat whose claim this launch wrote (the default seat's, or
+    a named agent's at the front door: the claim `session list` reads),
+    else the default seat word when that is the agent launched (a holder or
+    a second session beside one), else None (the pane may still find the
+    address a spawner handed down). A `-n` launch takes no claim, so a
+    named agent's stays None."""
     seat = getattr(launch.args, "seat", None)
     if seat:
         return seat
+    if claimed:
+        return claimed
     word = default_seat.word()
     return word if word and launch.agent.name == word else None
 
 
 def identity_call_for(launch: Launch, record: LaunchRecord | None, argv: list,
-                      identity: SessionIdentity | None,
-                      pane_mint: PaneMint | None) -> str:
+                      identity: SessionIdentity | None, claimed: str | None = None) -> str:
     """The script line that writes the identity block, into the session dir
-    the launch record names; "" with no session dir to write in. On the tmux
-    path a default-seat launch passes its own pid, so the pane waits for this
-    launcher to move the seat's claim to it before it says who holds it."""
+    the launch record names; "" with no session dir to write in. CLAIMED is
+    the seat whose claim this launch wrote, if any (`launch_seat`). Every
+    plan is an in-place one: a placed pane runs `session start` again, and
+    that launch claims for itself, so no launcher pid is waited on."""
     if record is None:
         return ""
-    seat = launch_seat(launch)
-    took_word = bool(seat) and seat == default_seat.word() and not launch.args.seat
+    seat = launch_seat(launch, claimed)
     return boot_identity.render_identity_call(
         record.session_dir, argv, seat=seat,
-        keyed=pane_mint is not None or bool(identity is not None and identity.keyed),
-        in_pane=launch.in_tmux,
-        launcher_pid=os.getpid() if launch.in_tmux and took_word else None)
+        keyed=bool(identity is not None and identity.keyed))
 
 
 def inherited_for(launch: Launch) -> tuple[SecretResult, ...]:
@@ -982,14 +1090,14 @@ def inherited_for(launch: Launch) -> tuple[SecretResult, ...]:
     return tuple(read_inherited(names, launch.environ))
 
 
-def assemble(launch: Launch, minted: SessionIdentity | PaneMint | None) -> LaunchPlan:
+def assemble(launch: Launch, minted: SessionIdentity | None,
+             claimed: str | None = None) -> LaunchPlan:
     """The LaunchPlan for `launch` under what `mint` returned: an identity,
-    the PaneMint of a keyed launch placed in tmux, or None for an unkeyed
-    resume."""
+    or None for an unkeyed resume. CLAIMED is the seat whose claim this
+    launch wrote, if any: the identity block's Seat (`launch_seat`)."""
     if launch.resume is not None:
         return assemble_resume(launch, minted)
-    pane_mint = minted if isinstance(minted, PaneMint) else None
-    identity = None if pane_mint is not None else minted
+    identity = minted
     session_dir = identity.session_dir if identity is not None else None
     # The launcher's own files go under the session's `launch/`, beside the
     # record; `run.write_files` makes it.
@@ -999,8 +1107,8 @@ def assemble(launch: Launch, minted: SessionIdentity | PaneMint | None) -> Launc
     injected = build_injected_context(
         start, idle=switch_enabled(launch.args.idle, start.idle),
         converse=converse, message=" ".join(launch.message_words),
-        # A pane-minted id does not exist yet: launch-info omits the line
-        # rather than print an empty one.
+        # No id (an unkeyed resume): launch-info omits the line rather than
+        # print an empty one.
         builtins=context_builtins(agent=launch.agent.name or None,
                                   session_id=identity.session_id if identity else None,
                                   converse=converse),
@@ -1011,37 +1119,37 @@ def assemble(launch: Launch, minted: SessionIdentity | PaneMint | None) -> Launc
     declared = launch.agent_file.environment
     secrets: list[DeclaredSecret] = declared_secrets(declared.secrets)
     inherited = inherited_for(launch)
-    # A pane-minted launch has no session dir yet: the file goes to temp.
     secret_path = (planned_path(door_dir, SECRET_FILE_PREFIX, "", DRY_RUN_SECRET_NAME,
                                 launch.dry_run) if secrets or declared.inherit else None)
     rendered = resolve_claude_settings(launch, identity)
     door_settings = settings_door_kwargs(rendered, launch.environ)
-    # The default seat's file body leads the one system-prompt file (Q2).
+    # The user memory (ST-302), then the default seat's file body (Q2),
+    # lead the one system-prompt file.
     body = default_seat.carried_body(launch.agent, launch.agent_file)
-    prompt_source = "computed: injected context (system prompt)"
-    if body:
-        prompt_source = ("computed: the default seat's file body"
-                         + (", then injected context" if injected.system_prompt else "")
-                         + " (system prompt)")
     try:
+        memory, memory_note = carried_user_memory(launch)
+        prompt_text, prompt_source = system_prompt_parts(memory, body,
+                                                         injected.system_prompt)
         annotated, files = build_annotated_argv(
             start.vendor, launch.agent_file.vendor_section, agent=launch.agent,
             identity=identity, cli_args=folded_cli_args(launch.cli_args, rendered),
             initial_message=injected.initial,
-            system_prompt_text=default_seat.prompt_text(body, injected.system_prompt),
+            system_prompt_text=prompt_text,
             system_prompt_source=prompt_source,
             directory=door_dir, dry_run=launch.dry_run,
             message_source="initial message (words after the agent name + "
                            "injected context)",
             first_message_file_over=launch.first_message_limit,
-            pane_minted=pane_mint is not None, **door_settings)
+            **door_settings)
     except ValueError as error:
         # A door opened twice, or context a vendor cannot take: authoring
         # errors, each the launcher's own loud line and a usage exit.
         raise LaunchError(f"{agent_subject(launch.agent)}: {error}",
                           code=EXIT_USAGE)
+    if memory_note is not None:
+        print(f"{PROG}: {memory_note}", file=sys.stderr)
     argv = [token for token, _source in annotated]
-    record = plan_record(launch, launch.work_dir, identity, pane_mint, argv, files,
+    record = plan_record(launch, launch.work_dir, identity, argv, files,
                          door_dir, secret_path, secrets, declared.inherit)
     home = resolve_home(launch, identity)
     script = render_launch_script(
@@ -1050,17 +1158,19 @@ def assemble(launch: Launch, minted: SessionIdentity | PaneMint | None) -> Launc
         env_prelude=render_env_prelude(declared, secret_file=secret_path)
         + render_home_prelude(home) + render_birth_call(record),
         secret_file=secret_path, vendor_env=VENDORS[start.vendor].get("env"),
-        shebang=launch.in_tmux, pane_mint=pane_mint, record=record,
+        record=record,
         launch_info=launch_info_marker(injected, identity),
-        identity_call=identity_call_for(launch, record, argv, identity, pane_mint))
+        identity_call=identity_call_for(launch, record, argv, identity, claimed),
+        title=launch_title(launch))
     return LaunchPlan(
         vendor=start.vendor, argv=argv, script=script, work_dir=launch.work_dir,
         work_dir_source=launch.work_dir_source, agent=launch.agent,
         identity=identity, injected=injected, provenance=annotated,
         secrets=secrets, secret_file=secret_path, files=tuple(files),
         dry_run=launch.dry_run,
-        pane_mint=pane_mint, record=record, home=home,
-        inherit=declared.inherit, inherited=inherited)
+        record=record, home=home,
+        inherit=declared.inherit, inherited=inherited,
+        notes=(memory_note,) if memory_note is not None else ())
 
 
 def resume_cwd(launch: Launch) -> tuple[str, str | None]:
@@ -1135,7 +1245,8 @@ def assemble_resume(launch: Launch, identity: SessionIdentity | None) -> LaunchP
         committer=resolve_committer_identity(work_dir, environ=launch.environ),
         env_prelude=render_env_prelude(declared, secret_file=secret_path)
         + render_home_prelude(home),
-        secret_file=secret_path, vendor_env=VENDORS[start.vendor].get("env"))
+        secret_file=secret_path, vendor_env=VENDORS[start.vendor].get("env"),
+        title=launch_title(launch))
     return LaunchPlan(
         vendor=start.vendor, argv=argv, script=script, work_dir=work_dir,
         work_dir_source=launch.work_dir_source, agent=launch.agent, identity=identity,
@@ -1163,16 +1274,20 @@ __all__ = [
     "build_annotated_argv",
     "build_vendor_argv",
     "choose_work_dir",
+    "clean_title",
     "declared_settings",
+    "default_window_name",
     "fable_gate",
     "folded_cli_args",
     "generator_environ",
     "inherited_for",
+    "launch_title",
     "mint",
     "mint_for_resume",
     "plan_record",
     "prepare",
     "render_launch_script",
+    "render_title_line",
     "resolve",
     "resolve_claude_settings",
     "resume_work_dir",

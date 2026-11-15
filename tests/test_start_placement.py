@@ -1,5 +1,5 @@
-"""Tmux placement: `--in-tmux` / `--tmux-target`, the trampoline, the keyed
-mint inside the pane, and the handover at `new-window`. Ported from the old
+"""Tmux placement: `--in-tmux` / `--tmux-target`, the keyed mint inside the
+pane's own `session start`, and the handover at `new-window`. Ported from the old
 suite's "Tmux placement + keyed-in-pane" section (CA-209 do-006, old tests
 3232-4050), its tmux dry-run and golden (4586, 4748), the keyed-tmux dry run
 (4972), the shred-before-mint pin (5073) and the Fable refusal on the tmux
@@ -18,7 +18,6 @@ can be verified honestly.
 
 from __future__ import annotations
 
-import json
 import os
 import pwd
 import re
@@ -27,9 +26,9 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from start_support import (
@@ -57,22 +56,14 @@ from test_start_run import (
 )
 
 from sessiontools import claude_code, start
-from sessiontools.start import placement
+from sessiontools.start import pane, placement
 from sessiontools.start.environment import (
     SESSION_IDENTITY_VARS,
-    parse_environment,
-    render_env_prelude,
     render_identity_unset,
 )
 from sessiontools.start.errors import EXIT_OK, EXIT_USAGE, LaunchError
-from sessiontools.start.identity import (
-    PaneMint,
-    SessionIdentity,
-    expand_shortsid,
-    render_pane_mint,
-)
+from sessiontools.start.identity import SessionIdentity, expand_shortsid
 from sessiontools.start.plan import render_launch_script
-from sessiontools.start.vendor import ShellExpr, ShellVar, render_argv_token
 
 REAL_KEY_INIT = os.path.expanduser("~/.claude/agents/lib/session-keys/session-key-init")
 KEYED = "start:\n  keyed: true\n"
@@ -138,168 +129,29 @@ def test_check_placeable_passes_whatever_default_session_returns():
     assert "nowhere to place the window" in str(refused.value)
 
 
-# ---------- units: the trampoline text -------------------------------------------------------
+# ---------- units: the launch script text -------------------------------------------------------
 
 def test_launch_script_sheds_the_launchers_identity_first():
-    """Both endings, first thing after the header: the launched session must
-    never inherit the LAUNCHER's session identity (the friendly-fire bug -
-    see the canary test below)."""
+    """First thing after the header: the launched session must never inherit
+    the LAUNCHER's session identity (the friendly-fire bug - see the canary
+    test below)."""
     identity = SessionIdentity("sid-1", "/d", False, {"CLAUDE_SESSION_ID": "sid-1"})
-    direct = render_launch_script(["v"], "/w", identity=identity)
-    pane = render_launch_script(["v"], "/w", shebang=True,
-                                pane_mint=PaneMint("/k/session-key-init", "a", "/r"))
-    for text in (direct, pane):
-        lines = text.splitlines()
-        shed = lines.index(render_identity_unset())
-        # ST-113: the vendor's name too - a start from inside a seat handed
-        # the parent's CLAUDE_CODE_SESSION_ID straight through to the agent
-        assert {"CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_AGENT_PID"} <= set(lines[shed].split())
-        first_use = next(i for i, line in enumerate(lines)
-                         if "session-key-init" in line
-                         or line.startswith("export CLAUDE_SESSION_ID"))
-        assert shed < first_use
+    lines = render_launch_script(["v"], "/w", identity=identity).splitlines()
+    shed = lines.index(render_identity_unset())
+    # ST-113: the vendor's name too - a start from inside a seat handed
+    # the parent's CLAUDE_CODE_SESSION_ID straight through to the agent
+    assert {"CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_AGENT_PID"} <= set(lines[shed].split())
+    first_use = next(i for i, line in enumerate(lines)
+                     if line.startswith("export CLAUDE_SESSION_ID"))
+    assert shed < first_use
 
 
-def test_shellvar_slot_expands_instead_of_quoting():
-    text = render_launch_script(["vendor", "--session-id", ShellVar("CLAUDE_SESSION_ID")], "/w")
-    assert 'exec vendor --session-id "$CLAUDE_SESSION_ID"' in text
-
-
-def test_trampoline_is_the_launch_script_plus_a_shebang():
-    """Extend, don't fork: shebang aside, the trampoline IS the direct text."""
-    kwargs = {"argv": ["v"], "work_dir": "/w", "env_prelude": "# marker"}
-    direct = render_launch_script(**kwargs)
-    assert render_launch_script(shebang=True, **kwargs) == "#!/usr/bin/env bash\n" + direct
-
-
-def test_pane_mint_block_mints_before_everything_and_anchors_the_id():
-    mint = PaneMint(key_init="/kl/session-key-init", agent_name="scout",
-                    sessions_root="/roots/sessions")
-    text = render_launch_script(["vendor", "--session-id", ShellVar("CLAUDE_SESSION_ID")],
-                                "/w", pane_mint=mint, env_prelude="# prelude marker")
-    lines = text.splitlines()
-    mint_at = next(i for i, line in enumerate(lines) if "session-key-init" in line)
-    cd_at = next(i for i, line in enumerate(lines) if line.startswith("cd "))
-    assert mint_at < cd_at < lines.index("# prelude marker")
-    assert '--reap-pid "$$"' in text                   # the pane's OWN pid (CA-152)
-    assert "--agent-name scout --session-dir /roots/sessions" in text
-    assert '/roots/sessions/"$CLAUDE_SESSION_ID"/session-id' in text   # the anchor
-    assert "--no-register" not in text                 # the live text, always
-    # the pane-lifetime trap: reap on the way out, and NO exec - the trap
-    # needs a shell to fire in, so the vendor runs as a child
-    assert "trap __ss_reap EXIT HUP INT TERM" in text
-    assert "/kl/session-death" in text
-    assert "\nexec " not in text
-    assert text.rstrip().endswith('exit "$?"')
-
-
-def test_the_pane_mint_quotes_what_it_is_handed():
-    mint = PaneMint(key_init="/key dir/session-key-init", agent_name="it's",
-                    sessions_root="/a b/sessions")
-    block = render_pane_mint(mint)
-    assert "'/key dir/session-key-init'" in block
-    assert "'/key dir/session-death'" in block
-    assert "'/a b/sessions'/\"$CLAUDE_SESSION_ID\"/session-id" in block
-    assert "'it'\"'\"'s'" in block
-
-
-def test_the_keyed_pane_trampoline_is_byte_unchanged_by_st112():
-    """ST-112 detaches the DIRECT path's mint only. The pane path mints
-    inside the pane, under its own reap trap, and ST-112 must not move its
-    text. The golden was captured at 82d1bff, before ST-112, and
-    re-captured on ST-112's tip (21063f0) for ST-113, which moves exactly
-    one thing: the opening `unset` also names CLAUDE_CODE_SESSION_ID, so
-    the pane never inherits the caller's id. ST-143 moves that same line
-    once more: it unsets CREDENTIAL_VARS too, and ST-270 adds
-    CLAUDE_CODE_AGENT to it (the agent word). It is stored
-    WITHOUT its shebang line: a tracked file that opens with a bash shebang
-    is shellchecked by `make lint`, and generated text is not a source
-    script. The shebang is asserted here, so the whole text is still exact."""
-    mint = PaneMint("/kbin/session-key-init", "voicemode+super", "/tmp/s")
-    text = render_launch_script(["v", "--flag"], "/w", shebang=True, pane_mint=mint)
-    shebang = "#!/usr/bin/env bash\n"
-    golden = os.path.join(FIXTURES, "pane-trampoline-keyed.golden")
-    with open(golden, encoding="utf-8") as handle:
-        assert text == shebang + handle.read()
-
-
-def test_identity_and_pane_mint_are_mutually_exclusive():
-    identity = SessionIdentity("s", "/d", True, {"CLAUDE_SESSION_ID": "s"})
-    with pytest.raises(ValueError):
-        render_launch_script(["v"], "/w", identity=identity,
-                             pane_mint=PaneMint("/k", "a", "/r"))
-
-
-def test_shred_trap_is_armed_before_the_pane_mint():
-    """The docstring's load-bearing word is armed FIRST; this source-level
-    pin holds even where the tmux e2e cannot run."""
-    script = render_launch_script(["v"], "/w", shebang=True,
-                                  pane_mint=PaneMint("/kbin/session-key-init", "a", "/tmp/s"),
-                                  secret_file="/tmp/secrets.env")
-    assert script.index("trap __ss_shred") < script.index("keyed session: minted INSIDE the pane")
-
-
-def test_the_pane_reaper_inherits_the_shred_trap_it_replaces(tmp_path):
-    """`trap` is LAST-ONE-WINS per signal, and the pane mint arms its own
-    EXIT/HUP/INT/TERM trap - which silently replaces the shred trap armed
-    above it. So the reaper carries the shred too. Deterministic seam: a
-    `cd` that cannot succeed sits AFTER the mint (the reaper trap has taken
-    over) and BEFORE the prelude (the secret file is still on disk). No
-    tmux: the trampoline is this text, and bash runs it directly."""
-    secret = tmp_path / "secrets-file"
-    secret.write_text("export TOKEN=LIVE-CREDENTIAL\n")
-    secret.chmod(0o600)
-    stub, _record = write_key_init_stub(tmp_path)
-    sessions = tmp_path / "sessions"
-    sessions.mkdir()
-    script = render_launch_script(
-        ["claude"], str(tmp_path / "no-such-work-dir"),
-        pane_mint=PaneMint(key_init=stub, agent_name="scout", sessions_root=str(sessions)),
-        env_prelude=render_env_prelude(parse_environment({"secrets": {"TOKEN": "pass:a/b"}}),
-                                       secret_file=str(secret)),
-        secret_file=str(secret))
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                            timeout=TIMEOUT_S, env={"PATH": "/usr/bin:/bin"}, check=False)
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert (sessions / STUB_SID / "session-id").read_text() == STUB_SID   # the mint ran
-    assert not secret.exists(), "the reaper trap replaced the shred trap and dropped its duty"
-
-
-def test_a_failed_pane_mint_is_loud_and_never_reaches_the_vendor(tmp_path):
-    stub, _record = write_key_init_stub(tmp_path, exit_code=1)
-    marker = tmp_path / "vendor-ran"
-    script = render_launch_script(["touch", str(marker)], str(tmp_path),
-                                  pane_mint=PaneMint(stub, "scout", str(tmp_path / "s")))
-    script = script.replace("sleep 15", "sleep 0")     # the hold is for eyes, not tests
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                            timeout=TIMEOUT_S, env={"PATH": "/usr/bin:/bin"}, check=False)
-    assert result.returncode == 1
-    assert "session-key-init failed inside the pane" in result.stderr
-    assert not marker.exists()
-
-
-# ---------- units: {shortsid} when only the pane knows the id --------------------------------
-
-def test_shortsid_in_the_pane_is_a_shell_expression():
-    filled = expand_shortsid("seat+{shortsid}", None, pane_minted=True)
-    assert filled == ShellExpr("seat+${CLAUDE_SESSION_ID:0:8}")
-    assert render_argv_token(filled) == '"seat+${CLAUDE_SESSION_ID:0:8}"'
-    # without a pane mint and without an identity, nothing to fill
+def test_shortsid_with_no_identity_is_left_alone():
+    """Nothing to fill it from (an unkeyed resume): the token passes through."""
     assert expand_shortsid("seat+{shortsid}", None) == "seat+{shortsid}"
 
 
-def test_the_shortsid_expression_expands_to_the_minted_id_and_keeps_the_literal_safe():
-    """Measured in bash, not read off the text: the literal parts survive
-    `$`, `"`, backquote and backslash, and the slot becomes 8 hex."""
-    token = 'a$HOME"`x`\\{shortsid}-{shortsid}'
-    rendered = render_argv_token(expand_shortsid(token, None, pane_minted=True))
-    result = subprocess.run(["bash", "-c", f"printf '%s' {rendered}"], capture_output=True,
-                            text=True, timeout=TIMEOUT_S, check=False,
-                            env={"PATH": "/usr/bin:/bin", "CLAUDE_SESSION_ID": "0123456789abcdef"})
-    assert result.stdout == 'a$HOME"`x`\\01234567-01234567'
-
-
-# ---------- units: the keyed-tmux plan ---------------------------------------------------------
+# ---------- units: a tmux launch plans IN PLACE (ST-285) ---------------------------------------
 
 def keyed_tmux_plan(tmp_path, *flags, front_matter=KEYED, stub=None):
     if stub is None:
@@ -308,223 +160,185 @@ def keyed_tmux_plan(tmp_path, *flags, front_matter=KEYED, stub=None):
                     extra_env={"SESSION_KEY_INIT": stub})
 
 
-def test_a_keyed_tmux_plan_defers_the_mint_to_the_pane(tmp_path):
-    """The old launcher HARD-ERRORED on keyed x tmux once. The plan for it:
-    no launcher-side identity, a PaneMint instead, the session-id slot a
-    shell expansion, the sessions root made (the pane's landing ground) -
-    and the primitive NOT invoked launcher-side (the stub records every
-    invocation; there must be none)."""
-    stub, record = write_key_init_stub(tmp_path)
-    plan = keyed_tmux_plan(tmp_path, stub=stub)
-    assert plan.identity is None
-    assert plan.pane_mint == PaneMint(key_init=stub, agent_name="scout",
-                                      sessions_root=str(tmp_path / "agents" / "sessions"),
-                                      birth=json.dumps({  # Open 15: the launched file
-                                          "agent": "scout",
-                                          "agent_file": os.path.realpath(tmp_path / "agents" / "scout.md"),
-                                      }, indent=2) + "\n")
-    assert not os.path.exists(record), "the primitive ran launcher-side"
-    assert os.path.isdir(plan.pane_mint.sessions_root)
-    at = plan.argv.index("--session-id")
-    assert plan.argv[at + 1] == ShellVar("CLAUDE_SESSION_ID")
-    assert plan.script.startswith("#!/usr/bin/env bash\n")
-    assert '"$CLAUDE_SESSION_ID"' in plan.script
-
-
-def test_a_key_label_is_what_the_pane_mint_labels_the_key_with(tmp_path):
-    plan = keyed_tmux_plan(tmp_path, "--key-label", "scout-ci")
-    assert plan.pane_mint.agent_name == "scout-ci"
-    assert "--agent-name scout-ci" in plan.script
-
-
-def test_a_keyed_tmux_dry_run_creates_nothing_and_prints_the_live_script(tmp_path):
-    """Same text both ways, so the report cannot drift from the pane - but
-    for the one thing a dry run may not know: a live file's random name
-    (`session-start-agent-plugin-XXXXXXXX`), which it spells by its
-    representative name (`agent-plugin`)."""
-    stub, record = write_key_init_stub(tmp_path)
-    for sub in ("dry", "live"):
-        (tmp_path / sub).mkdir()
-    dry = plan_for(tmp_path / "dry", KEYED, flags=("--dry-run", "--in-tmux"),
-                   extra_env={"SESSION_KEY_INIT": stub})
-    assert not (tmp_path / "dry" / "agents" / "sessions").exists()
-    live = plan_for(tmp_path / "live", KEYED, flags=("--in-tmux",),
-                    extra_env={"SESSION_KEY_INIT": stub})
-    assert not os.path.exists(record)
-    live_text = re.sub(r"session-start-([a-z-]+)-[0-9a-f]{8}", r"\1",
-                       live.script.replace(str(tmp_path / "live"), "<T>"))
-    assert dry.script.replace(str(tmp_path / "dry"), "<T>") == live_text
-    assert "--no-register" not in dry.script
+def test_a_keyed_tmux_plan_is_an_in_place_plan(tmp_path):
+    """No trampoline: a placed pane runs `session start` again, in place, so
+    the plan of a tmux launch IS the direct plan. Its keyed mint is the
+    direct one, reaped by the pid that execs the vendor."""
+    plan = keyed_tmux_plan(tmp_path)
+    assert plan.identity is not None
+    assert not plan.script.startswith("#!")
+    assert "\nexec claude" in plan.script
 
 
 def test_an_unkeyed_tmux_plan_mints_launcher_side(tmp_path):
     plan = plan_for(tmp_path, "", flags=("--in-tmux",))
-    assert plan.pane_mint is None
     assert plan.identity is not None and os.path.isdir(plan.identity.session_dir)
-    assert plan.script.startswith("#!/usr/bin/env bash\n")
+    assert not plan.script.startswith("#!")
     assert "\nexec claude" in plan.script
 
 
 def test_a_direct_plan_has_no_shebang():
-    """The shebang marks the trampoline; the direct path runs `bash -c`."""
+    """The shebang marked the old trampoline; the direct path runs `bash -c`."""
     assert not render_launch_script(["v"], "/w").startswith("#!")
-
-
-def test_keyed_tmux_shortsid_in_the_passthrough_is_filled_in_the_pane(tmp_path):
-    stub, _record = write_key_init_stub(tmp_path)
-    plan = plan_for(tmp_path, KEYED, flags=("--in-tmux",),
-                    argv_tail=("--name", "seat+{shortsid}"),
-                    extra_env={"SESSION_KEY_INIT": stub})
-    assert ShellExpr("seat+${CLAUDE_SESSION_ID:0:8}") in plan.argv
-    assert '"seat+${CLAUDE_SESSION_ID:0:8}"' in plan.script
-    # ...and the provenance says so: no identity exists launcher-side, the
-    # pane mints it (the old launcher's own words, its line 2897)
-    (source,) = [src for token, src in plan.provenance
-                 if token == ShellExpr("seat+${CLAUDE_SESSION_ID:0:8}")]
-    assert source == "CLI passthrough ({shortsid} filled in the pane from the minted id)"
 
 
 def test_keyed_tmux_missing_primitive_is_loud_at_prepare_time(tmp_path):
     with pytest.raises(LaunchError) as refused:
         keyed_tmux_plan(tmp_path, stub=str(tmp_path / "absent"))
     assert "SESSION_KEY_INIT" in str(refused.value)
-    assert not (tmp_path / "agents" / "sessions").exists()
 
 
-def test_door_guard_still_fires_on_the_pane_minted_session_id(tmp_path):
-    """The ShellVar slot must not smuggle the session-id door past the
-    guard: a declared `claude: session-id:` still collides with the door
-    the launcher computed, spelled as an expansion or not."""
+def test_door_guard_still_fires_on_a_keyed_tmux_session_id(tmp_path):
+    """A declared `claude: session-id:` still collides with the door the
+    launcher computed."""
     with pytest.raises(LaunchError) as refused:
         keyed_tmux_plan(tmp_path, front_matter=KEYED + "claude:\n  session-id: mine\n")
     assert refused.value.code == EXIT_USAGE
     assert "--session-id" in str(refused.value)
 
 
-# ---------- place_in_tmux against a fake tmux: the handover ------------------------------------
-
-def live_plan(tmp_path):
-    """A live unkeyed plan with files to write: the 0600 prompt, the plugin dir."""
-    plan = plan_for(tmp_path, WITH_CONTEXT, flags=("--in-tmux",))
-    assert plan.files and plan.identity is not None
-    return plan
-
-
-def paths(plan):
-    return [item.path for item in plan.files]
-
-
-def trampoline_of(plan):
-    return os.path.join(plan.identity.session_dir, placement.TRAMPOLINE)
-
+# ---------- place_pane against a fake tmux: the handover ---------------------------------------
 
 def no_tmux(*_args, **_kwargs):
     pytest.fail("this placement must never reach tmux")
 
 
-def test_write_trampoline_is_the_plan_script_0700(tmp_path):
-    plan = live_plan(tmp_path)
-    path = placement.write_trampoline(plan)
-    assert path == trampoline_of(plan)
-    assert Path(path).read_text() == plan.script
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o700
+def a_message_file(tmp_path) -> str:
+    """A message file as `pane.write_message_file` leaves it."""
+    return pane.write_message_file("review the auth", "t0k",
+                                   {"SESSION_STATE_DIR": str(tmp_path / "state")})
 
 
-def test_place_in_tmux_keeps_its_own_placement_guard(tmp_path, monkeypatch):
-    """`main` asks first, but place_in_tmux is public and must still refuse
-    a placement it cannot make - taking the files it wrote with it."""
-    plan = live_plan(tmp_path)
+class FakeTmux:
+    """`placement._tmux.run` for the ONE placement call, and `run_tmux` for
+    the rest: records both, answers `new-window` with PRINTED."""
+
+    def __init__(self, monkeypatch, printed="@9 %3 4242\n", returncode=0, stderr="",
+                 fail=()):
+        self.calls: list[list[str]] = []
+        self.envs: dict = {}
+        self.printed, self.returncode, self.stderr, self.fail = printed, returncode, stderr, fail
+        monkeypatch.setattr(placement._tmux, "run", self.sequence)
+        monkeypatch.setattr(placement, "run_tmux", self.single)
+
+    def sequence(self, arguments, env=None):
+        self.calls.append(list(arguments))
+        self.envs[arguments[0]] = env
+        return subprocess.CompletedProcess(arguments, self.returncode, self.printed, self.stderr)
+
+    def single(self, arguments, environ=None):
+        self.calls.append(list(arguments))
+        self.envs[arguments[0]] = environ
+        if arguments[0] in self.fail:
+            raise LaunchError(f"tmux {arguments[0]} failed: nope")
+        return ""
+
+
+def place(tmp_path, session="eng", switch=False, environ=None, message_file=None,
+          handoff=None, cwd=None):
+    return placement.place_pane(
+        "session start scout", cwd or str(tmp_path), session, "scout", "t0k", switch,
+        {"SESSION_START_ENTERED": "session start --in-tmux scout"} if handoff is None
+        else handoff, message_file=message_file, environ={} if environ is None else environ)
+
+
+def test_place_pane_keeps_its_own_placement_guard(tmp_path, monkeypatch):
+    """`main` asks first, but place_pane is public and must still refuse a
+    placement it cannot make, taking the message file with it."""
+    message = a_message_file(tmp_path)
     monkeypatch.setattr(placement, "run_tmux", no_tmux)
+    monkeypatch.setattr(placement._tmux, "run", no_tmux)
     with pytest.raises(LaunchError) as refused:
-        placement.place_in_tmux(plan, "", "scout", False, environ={})
+        place(tmp_path, session="", message_file=message)
     assert refused.value.code == EXIT_USAGE
-    assert not any(os.path.exists(p) for p in paths(plan))
-    assert not os.path.exists(trampoline_of(plan))
+    assert not os.path.exists(os.path.dirname(message))
 
 
-def test_a_trampoline_that_cannot_be_written_takes_the_files(tmp_path, monkeypatch):
-    """write_trampoline opens a file (and may mkdtemp): a full disk raises
-    there, with the plan's files already written and no pane to own them."""
-    plan = live_plan(tmp_path)
-
-    def full_disk(_plan):
-        raise OSError(28, "No space left on device")
-
-    monkeypatch.setattr(placement, "write_trampoline", full_disk)
-    monkeypatch.setattr(placement, "run_tmux", no_tmux)
-    with pytest.raises(OSError):
-        placement.place_in_tmux(plan, "eng", "scout", False, environ={"TMUX": "/x,1,2"})
-    assert not any(os.path.exists(p) for p in paths(plan))
-
-
-def test_a_failure_before_placement_takes_the_files_and_the_trampoline(tmp_path, monkeypatch):
-    plan = live_plan(tmp_path)
-
-    def refusing(arguments, environ=None):
-        raise LaunchError(f"tmux {arguments[0]} failed: nope")
-
-    monkeypatch.setattr(placement, "run_tmux", refusing)
+def test_a_failure_before_placement_takes_the_message_file(tmp_path, monkeypatch):
+    """No `@id` printed: the window never opened, and its file goes."""
+    message = a_message_file(tmp_path)
+    FakeTmux(monkeypatch, printed="", returncode=1, stderr="no server")
     monkeypatch.setattr(placement, "session_exists", lambda name, environ=None: True)
-    with pytest.raises(LaunchError):
-        placement.place_in_tmux(plan, "eng", "scout", False, environ={})
-    assert not any(os.path.exists(p) for p in paths(plan))
-    assert not os.path.exists(trampoline_of(plan))
+    with pytest.raises(LaunchError) as refused:
+        place(tmp_path, message_file=message)
+    assert "tmux new-window failed: no server" in str(refused.value)
+    assert not os.path.exists(os.path.dirname(message))
 
 
 def test_a_failure_after_placement_never_robs_the_live_pane(tmp_path, monkeypatch, capsys):
     """`new-window` is the handover: after it the pane is ALIVE and about to
-    read its files. A switch-client failure (no attached client, reachable
-    with a forced --switch from outside tmux) is reported, and nothing is
+    read its file. A switch-client failure is reported, and nothing is
     unwound - a window that exists is not a failure."""
-    plan = live_plan(tmp_path)
-    calls = []
-
-    def after_fails(arguments, environ=None):
-        calls.append(arguments[0])
-        if arguments[0] == "new-window":
-            return "@7\n"
-        raise LaunchError(f"tmux {arguments[0]} failed: no current client")
-
-    monkeypatch.setattr(placement, "run_tmux", after_fails)
+    message = a_message_file(tmp_path)
+    tmux = FakeTmux(monkeypatch, fail=("set-window-option", "switch-client"))
     monkeypatch.setattr(placement, "session_exists", lambda name, environ=None: True)
-    placed = placement.place_in_tmux(plan, "eng", "scout", True, environ={})
-    assert placed == placement.TmuxPlacement("eng", "scout", "@7", False)
-    assert calls == ["new-window", "set-window-option", "switch-client"]
-    assert all(os.path.exists(p) for p in paths(plan))
-    assert os.path.exists(trampoline_of(plan))
+    placed = place(tmp_path, switch=True, message_file=message)
+    assert placed == placement.TmuxPlacement("eng", "scout", "@9", False, "%3", 4242)
+    assert [call[0] for call in tmux.calls] == ["new-window", "set-window-option",
+                                                "switch-client"]
+    assert os.path.exists(message)
     err = capsys.readouterr().err
     assert "placed, but could not automatic-rename off" in err
     assert "placed, but could not switch the client to it" in err
 
 
-def test_every_target_is_anchored_and_the_window_is_addressed_by_its_id(tmp_path, monkeypatch):
-    """TM-1658: tmux matches `-t` by PREFIX, so every name is `=`-anchored;
-    after new-window the window is its `@id`, which cannot collide."""
-    plan = live_plan(tmp_path)
-    calls = []
-
-    def recording(arguments, environ=None):
-        calls.append(list(arguments))
-        return "@9\n" if arguments[0] == "new-window" else ""
-
-    monkeypatch.setattr(placement, "run_tmux", recording)
+def test_one_sequence_places_names_and_keeps_a_failed_pane(tmp_path, monkeypatch):
+    """ONE tmux call: new-window (anchored, in CWD, the hand-off in its
+    env, the line as one argument), then remain-on-exit failed and the real
+    name, both by the unique temporary name. After it, the window is its
+    `@id` (TM-1658: every `-t` anchored, by `=` or `@`)."""
+    tmux = FakeTmux(monkeypatch)
     monkeypatch.setattr(placement, "session_exists", lambda name, environ=None: False)
-    placed = placement.place_in_tmux(plan, "alpha", "scout", False, environ={})
+    work = str(tmp_path / "work dir")
+    placed = place(tmp_path, session="alpha", cwd=work,
+                   handoff={"SESSION_START_ENTERED": "session start --in-tmux scout",
+                            "SESSION_START_ENTERED_DIR": work})
     assert placed.created_session and placed.window_id == "@9"
-    assert calls[0] == ["new-session", "-d", "-s", "alpha"]
-    new_window = calls[1]
-    assert new_window[:5] == ["new-window", "-d", "-P", "-F", placement.NEW_WINDOW_FORMAT]
-    assert new_window[new_window.index("-t") + 1] == "=alpha:"
-    assert new_window[new_window.index("-n") + 1] == "scout"
-    assert new_window[-1] == trampoline_of(plan)
-    assert calls[2] == ["set-window-option", "-t", "@9", "automatic-rename", "off"]
+    assert tmux.calls[0] == ["new-session", "-d", "-s", "alpha"]
+    assert tmux.calls[1] == [
+        "new-window", "-d", "-P", "-F", placement.NEW_WINDOW_FORMAT, "-c", work,
+        "-t", "=alpha:", "-n", "ssp-t0k",
+        "-e", "SESSION_START_ENTERED=session start --in-tmux scout",
+        "-e", f"SESSION_START_ENTERED_DIR={work}",
+        "session start scout",
+        ";", "set-option", "-p", "-t", "=alpha:ssp-t0k", "remain-on-exit", "failed",
+        ";", "rename-window", "-t", "=alpha:ssp-t0k", "scout"]
+    assert tmux.calls[2] == ["set-window-option", "-t", "@9", "automatic-rename", "off"]
     # a CREATED session's window 0 is a bare shell: the agent's window is
     # made current, so an attach lands on it
-    assert calls[3] == ["select-window", "-t", "@9"]
-    assert len(calls) == 4                               # no switch asked for
-    for call in calls:
-        if "-t" in call:
-            assert call[call.index("-t") + 1][0] in "=@", call
+    assert tmux.calls[3] == ["select-window", "-t", "@9"]
+    assert len(tmux.calls) == 4                               # no switch asked for
+    for call in tmux.calls:
+        for at, word in enumerate(call):
+            if word == "-t":
+                assert call[at + 1][0] in "=@", call
+
+
+def test_in_the_current_session_the_sequence_names_no_session(tmp_path, monkeypatch):
+    tmux = FakeTmux(monkeypatch)
+    monkeypatch.setattr(placement, "session_exists", no_tmux)
+    placed = place(tmp_path, session="", environ={"TMUX": "/x,1,2"})
+    assert placed.session == "" and not placed.created_session
+    sequence = tmux.calls[0]
+    assert sequence[0] == "new-window"
+    assert sequence[sequence.index("set-option") + 3] == "ssp-t0k"
+    assert sequence.count("-t") == 2          # set-option's and rename-window's only
+
+
+def test_a_tmux_without_remain_on_exit_failed_is_degraded_not_failed(
+        tmp_path, monkeypatch, capsys):
+    """Measured on tmux 3.8: an invalid value in the sequence still leaves
+    the window (its `@id` printed) and exits 1. So the window is placed, the
+    line says the pane will not stay, and the name is set by `@id`."""
+    message = a_message_file(tmp_path)
+    tmux = FakeTmux(monkeypatch, printed="@4 %2 77\n", returncode=1,
+                    stderr="unknown value: failed")
+    monkeypatch.setattr(placement, "session_exists", lambda name, environ=None: True)
+    placed = place(tmp_path, message_file=message)
+    assert placed.window_id == "@4" and os.path.exists(message)
+    assert tmux.calls[1] == ["rename-window", "-t", "@4", "scout"]
+    assert "could not set remain-on-exit failed (unknown value: failed)" in \
+        capsys.readouterr().err
 
 
 def test_a_server_born_by_new_session_never_gets_the_callers_identity(
@@ -533,72 +347,40 @@ def test_a_server_born_by_new_session_never_gets_the_callers_identity(
     starter's environment for every pane it makes. Measured in repro-001 S4:
     a server born inside a seat held the PARENT's ids. Only `new-session` is
     scrubbed: `new-window` builds its pane from the server's environment."""
-    plan = live_plan(tmp_path)
     caller = {"PATH": "/usr/bin", "HOME": "/home/x", "TERM": "xterm",
               "GIT_CONFIG_GLOBAL": "/agent/gitconfig",
               **{name: "parent-" + name for name in SESSION_IDENTITY_VARS},
               # ST-118: and a keyed parent's signing block, the indexed family
               "GIT_CONFIG_KEY_0": "user.signingkey", "GIT_CONFIG_VALUE_0": "key::parent"}
-    envs = {}
-
-    def recording(arguments, environ=None):
-        envs[arguments[0]] = environ
-        return "@9\n" if arguments[0] == "new-window" else ""
-
-    monkeypatch.setattr(placement, "run_tmux", recording)
+    tmux = FakeTmux(monkeypatch)
     monkeypatch.setattr(placement, "session_exists", lambda name, environ=None: False)
-    placement.place_in_tmux(plan, "alpha", "scout", False, environ=caller)
-    born = envs["new-session"]
+    place(tmp_path, session="alpha", environ=caller)
+    born = tmux.envs["new-session"]
     assert not set(SESSION_IDENTITY_VARS) & set(born)
     assert claude_code.session_id(born) is None
     assert born == {"PATH": "/usr/bin", "HOME": "/home/x", "TERM": "xterm",
                     "GIT_CONFIG_GLOBAL": "/agent/gitconfig"}
-    assert envs["new-window"] is caller                  # narrow: new-session only
+    # narrow: only new-session is scrubbed; a new pane's env is the server's
+    assert tmux.envs["new-window"]["CLAUDE_CODE_SESSION_ID"] == "parent-CLAUDE_CODE_SESSION_ID"
     assert caller["CLAUDE_CODE_SESSION_ID"] == "parent-CLAUDE_CODE_SESSION_ID"
 
 
 def test_a_reused_session_selects_no_window(tmp_path, monkeypatch):
     """Someone may be looking at a session that already existed: its
     current window is theirs, so placement leaves it alone."""
-    plan = live_plan(tmp_path)
-    calls = []
-
-    def recording(arguments, environ=None):
-        calls.append(list(arguments))
-        return "@9\n" if arguments[0] == "new-window" else ""
-
-    monkeypatch.setattr(placement, "run_tmux", recording)
+    tmux = FakeTmux(monkeypatch)
     monkeypatch.setattr(placement, "session_exists", lambda name, environ=None: True)
-    placed = placement.place_in_tmux(plan, "agents", "scout", False, environ={})
+    placed = place(tmp_path, session="agents")
     assert not placed.created_session
-    assert [call[0] for call in calls] == ["new-window", "set-window-option"]
+    assert [call[0] for call in tmux.calls] == ["new-window", "set-window-option"]
 
 
 def test_a_failed_select_window_is_degraded_not_failed(tmp_path, monkeypatch, capsys):
-    plan = live_plan(tmp_path)
-
-    def recording(arguments, environ=None):
-        if arguments[0] == "select-window":
-            raise LaunchError("tmux select-window failed: nope")
-        return "@9\n" if arguments[0] == "new-window" else ""
-
-    monkeypatch.setattr(placement, "run_tmux", recording)
+    FakeTmux(monkeypatch, fail=("select-window",))
     monkeypatch.setattr(placement, "session_exists", lambda name, environ=None: False)
-    placed = placement.place_in_tmux(plan, "agents", "scout", False, environ={})
+    placed = place(tmp_path, session="agents")
     assert placed.created_session and placed.window_id == "@9"
-    assert os.path.exists(trampoline_of(plan))
     assert "placed, but could not select the new window" in capsys.readouterr().err
-
-
-def test_in_the_current_session_new_window_takes_no_target(tmp_path, monkeypatch):
-    plan = live_plan(tmp_path)
-    calls = []
-    monkeypatch.setattr(placement, "run_tmux",
-                        lambda arguments, environ=None: calls.append(list(arguments)) or "@3\n")
-    monkeypatch.setattr(placement, "session_exists", no_tmux)
-    placed = placement.place_in_tmux(plan, "", "scout", False, environ={"TMUX": "/x,1,2"})
-    assert placed.session == "" and not placed.created_session
-    assert calls[0][0] == "new-window" and "-t" not in calls[0]
 
 
 def test_session_exists_asks_has_session_anchored(monkeypatch):
@@ -637,101 +419,150 @@ def test_tmux_runs_under_the_host_environ_never_the_venv(tmp_path, monkeypatch):
     assert "VIRTUAL_ENV" not in seen[0] and seen[0]["PATH"] == "/usr/bin"
 
 
-def test_the_trampoline_path_is_one_shell_word_for_tmux(tmp_path, monkeypatch):
-    """tmux runs a lone command argument through `sh -c`: a space, `$` or
-    quote in TMPDIR (or AGENTS_DIR) must reach the pane as the same path."""
-    odd = tmp_path / "tmp dir $HOME it's"
-    odd.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(odd))
-    plan = keyed_tmux_plan(tmp_path)
-    calls = []
-
-    def recording(arguments, environ=None):
-        calls.append(list(arguments))
-        return "@4\n" if arguments[0] == "new-window" else ""
-
-    monkeypatch.setattr(placement, "run_tmux", recording)
-    monkeypatch.setattr(placement, "session_exists", lambda name, environ=None: True)
-    placement.place_in_tmux(plan, "eng", "scout", False, environ={})
-    (pane_dir,) = odd.glob("session-start-pane-*")
-    command = calls[0][-1]
-    assert shlex.split(command) == [str(pane_dir / placement.TRAMPOLINE)]
-
-
-def test_a_pane_minted_placement_uses_its_own_0700_temp_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
-    (tmp_path / "tmp").mkdir()
-    plan = keyed_tmux_plan(tmp_path)
-    monkeypatch.setattr(placement, "run_tmux",
-                        lambda arguments, environ=None: "@4\n" if arguments[0] == "new-window" else "")
-    monkeypatch.setattr(placement, "session_exists", lambda name, environ=None: True)
-    placed = placement.place_in_tmux(plan, "eng", "scout", False, environ={})
-    assert placed.window_id == "@4"
-    (pane_dir,) = (tmp_path / "tmp").glob("session-start-pane-*")
-    assert stat.S_IMODE(pane_dir.stat().st_mode) == 0o700
-    assert (pane_dir / placement.TRAMPOLINE).read_text() == plan.script
-
-
-def test_a_pane_minted_placement_that_fails_leaves_no_temp_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
-    (tmp_path / "tmp").mkdir()
-    plan = keyed_tmux_plan(tmp_path)
-
-    def refusing(arguments, environ=None):
-        raise LaunchError("tmux new-window failed: nope")
-
-    monkeypatch.setattr(placement, "run_tmux", refusing)
-    monkeypatch.setattr(placement, "session_exists", lambda name, environ=None: True)
-    with pytest.raises(LaunchError):
-        placement.place_in_tmux(plan, "eng", "scout", False, environ={})
-    assert list((tmp_path / "tmp").iterdir()) == []
-
-
-def test_the_receipt_names_who_where_the_window_id_and_the_session(tmp_path):
-    """A caller INSIDE tmux: the line is byte-for-byte what it always was."""
+def test_the_receipt_names_who_where_the_window_id_and_that_the_pane_mints():
+    """A caller INSIDE tmux. The id is the pane's to mint (ST-285): the
+    launcher that places it mints nothing."""
     inside = {"TMUX": "/x,1,2"}
-    plan = live_plan(tmp_path)
-    sid = plan.identity.session_id
-    created = placement.receipt(plan, placement.TmuxPlacement("eng", "scout", "@5", True),
+    created = placement.receipt("scout", placement.TmuxPlacement("eng", "scout", "@5", True),
                                 environ=inside)
-    assert created == (f"session start: placed scout in tmux window 'scout' (@5) of "
-                       f"session 'eng' (created) -- session {sid}")
-    here = placement.receipt(plan, placement.TmuxPlacement("", "w", "@6", False),
+    assert created == ("session start: placed scout in tmux window 'scout' (@5) of "
+                       "session 'eng' (created) -- session id minted in the pane")
+    here = placement.receipt("scout", placement.TmuxPlacement("", "w", "@6", False),
                              environ=inside)
-    assert here.endswith("of the current session -- session " + sid)
-    (tmp_path / "k").mkdir()
-    pane = placement.receipt(keyed_tmux_plan(tmp_path / "k"),
-                             placement.TmuxPlacement("eng", "scout", "@7", False),
-                             environ=inside)
-    assert pane.endswith("-- session id minted in the pane")
+    assert here.endswith("of the current session -- session id minted in the pane")
 
 
-def test_a_receipt_outside_tmux_says_how_to_attach(tmp_path):
+def test_a_receipt_outside_tmux_says_how_to_attach():
     """A caller outside tmux is never switched to the window, so the line
     names the session it made (or reused) and how to reach it."""
-    plan = live_plan(tmp_path)
-    sid = plan.identity.session_id
-    created = placement.receipt(plan, placement.TmuxPlacement("agents", "scout", "@5", True),
+    created = placement.receipt("scout",
+                                placement.TmuxPlacement("agents", "scout", "@5", True),
                                 environ={})
-    assert created == (f"session start: placed scout in tmux window 'scout' (@5) of "
-                       f"session 'agents' (created) -- session {sid}; "
-                       f"attach: tmux attach -t agents")
-    reused = placement.receipt(plan, placement.TmuxPlacement("agents", "scout", "@6", False),
+    assert created == ("session start: placed scout in tmux window 'scout' (@5) of "
+                       "session 'agents' (created) -- session id minted in the pane; "
+                       "attach: tmux attach -t agents")
+    reused = placement.receipt("scout",
+                               placement.TmuxPlacement("agents", "scout", "@6", False),
                                environ={})
     assert "of session 'agents' -- session" in reused
     assert reused.endswith("; attach: tmux attach -t agents")
-    odd = placement.receipt(plan, placement.TmuxPlacement("my work", "scout", "@7", False),
+    odd = placement.receipt("scout",
+                            placement.TmuxPlacement("my work", "scout", "@7", False),
                             environ={})
     assert odd.endswith("; attach: tmux attach -t 'my work'")
 
 
+# ---------- main, in-process: the outer launcher ------------------------------------------------
+
+def outer(tmp_path, monkeypatch, *argv, front_matter="claude:\n  effort: high\n"):
+    """`start.main(ARGV)` as the outer launcher, place_pane recorded, never
+    run. Returns (exit code, the recorded call or None, the state dir)."""
+    state = tmp_path / "state"
+    monkeypatch.setenv("AGENTS_DIR", make_agents_root(tmp_path, front_matter=front_matter))
+    monkeypatch.setenv("SESSIONS_DIR", str(tmp_path / "agents" / "sessions"))
+    monkeypatch.setenv("SESSION_STATE_DIR", str(state))
+    monkeypatch.setenv("TMUX", "/x,1,2")
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("PWD", str(work))
+    calls = []
+
+    def recorded(line, cwd, session, window, token, switch, handoff, message_file=None,
+                 environ=None):
+        calls.append(SimpleNamespace(line=line, cwd=cwd, session=session, window=window,
+                                     token=token, handoff=dict(handoff),
+                                     message_file=message_file))
+        return placement.TmuxPlacement(session, window, "@7", False, "%9", 4242)
+
+    monkeypatch.setattr(start, "place_pane", recorded)
+    code = start.main(list(argv))
+    return code, (calls[0] if calls else None), state
+
+
+def test_the_outer_launcher_mints_nothing_and_hands_off_the_entered_line(
+        tmp_path, monkeypatch, capsys):
+    code, call, _state = outer(tmp_path, monkeypatch, "--in-tmux", "--no-switch", "scout",
+                               "--model", "opus")
+    assert code == EXIT_OK, capsys.readouterr().err
+    assert call.line == "session start scout --model opus"
+    assert call.cwd == str(tmp_path / "work")
+    assert call.handoff == {
+        "SESSION_START_ENTERED": "session start --in-tmux --no-switch scout --model opus",
+        "SESSION_START_ENTERED_DIR": str(tmp_path / "work")}
+    assert call.message_file is None
+    assert re.fullmatch(r"[0-9a-f]{16}", call.token)
+    assert no_session_dirs(tmp_path), "the outer launcher minted"
+    assert capsys.readouterr().out.strip().endswith("-- session id minted in the pane")
+
+
+def test_bare_words_go_to_a_0600_file_never_the_pane_line(tmp_path, monkeypatch, capsys):
+    """Ruling 7: `ps` is world-readable and a pane_start_command lives as
+    long as its pane. The words move to `<state>/launches/<token>/`, a 0700
+    dir and a 0600 file; the line names the file and forces `-over 0`."""
+    code, call, state = outer(tmp_path, monkeypatch, "--tmux-target", "eng", "scout",
+                              "review", "the", "auth", "--model", "opus")
+    assert code == EXIT_OK, capsys.readouterr().err
+    path = Path(call.message_file)
+    assert path == state / "launches" / call.token / "first-message.md"
+    assert path.read_text() == "review the auth"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert call.line == shlex.join(["session", "start", "--first-message-file", str(path),
+                                    "--first-message-file-over", "0", "scout",
+                                    "--model", "opus"])
+    for word in ("review", "auth"):
+        assert word not in call.line
+    # the hand-off carries the line EXACTLY as entered: the record keeps it
+    assert call.handoff["SESSION_START_ENTERED"] == (
+        "session start --tmux-target eng scout review the auth --model opus")
+
+
+def test_a_held_agent_is_refused_at_the_caller_and_nothing_is_written(
+        tmp_path, monkeypatch, capsys):
+    """The read of the front door refuses a hand placement of a held agent
+    (exit 3): no window, no message file."""
+    monkeypatch.setattr(start, "front_door", lambda *a, **k: SimpleNamespace(
+        unmeasured="", held=True, refusal=lambda: "scout is held by session x"))
+    code, call, state = outer(tmp_path, monkeypatch, "--in-tmux", "scout", "hello")
+    assert code == 3 and call is None
+    assert "scout is held by session x" in capsys.readouterr().err
+    assert not (state / "launches").exists()
+
+
+def test_a_bare_keyed_placement_is_refused_before_anything(tmp_path, monkeypatch, capsys):
+    code, call, _state = outer(tmp_path, monkeypatch, "--in-tmux", "--keyed")
+    assert code == EXIT_USAGE and call is None
+    assert "--keyed needs an agent" in capsys.readouterr().err
+
+
+def test_a_home_folder_yes_opens_the_window_in_the_work_folder(tmp_path, monkeypatch):
+    """The home-folder offer is the OUTER launcher's (ruled 4c): a yes is
+    the window's `-c`; the hand-off still names where it was typed."""
+    monkeypatch.setattr(start, "_offer", lambda launch: (
+        launch._replace(work_dir=str(tmp_path / "elsewhere")), True))
+    code, call, _state = outer(tmp_path, monkeypatch, "--in-tmux", "scout")
+    assert code == EXIT_OK
+    assert call.cwd == str(tmp_path / "elsewhere")
+    assert call.handoff["SESSION_START_ENTERED_DIR"] == str(tmp_path / "work")
+
+
 # ---------- main, in-process: dry runs and the usage refusals ----------------------------------
 
-def test_dry_run_of_a_tmux_launch_shows_the_trampoline(tmp_path, monkeypatch, capsys):
-    assert dry_run_main(tmp_path, monkeypatch, "--tmux-target", "gold:win", "scout") == EXIT_OK
+def test_dry_run_of_a_tmux_launch_shows_the_pane_line(tmp_path, monkeypatch, capsys):
+    """The pane's line, then the in-place plan of that line: no trampoline."""
+    monkeypatch.setenv("PWD", str(tmp_path))
+    assert dry_run_main(tmp_path, monkeypatch, "--tmux-target", "gold:win", "scout",
+                        "hello") == EXIT_OK
     out = capsys.readouterr().out
     assert "mode:     tmux window 'win' in session 'gold'\n" in out
-    assert "  #!/usr/bin/env bash\n" in out           # the trampoline, shebang and all
+    pane_line = next(line for line in out.splitlines() if line.startswith("pane:"))
+    assert pane_line.startswith("pane:     (cd ")
+    assert "session start --first-message-file " in pane_line
+    assert "/launches/<token>/first-message.md" in pane_line
+    assert "--first-message-file-over 0 scout" in pane_line
+    assert "--dry-run" not in pane_line and "hello" not in pane_line
+    assert "#!/usr/bin/env bash" not in out
 
 
 def test_a_tmux_dry_run_defaults_the_window_to_the_agent(tmp_path, monkeypatch, capsys):
@@ -786,17 +617,18 @@ def test_contradictory_switch_flags_are_refused_outside_tmux(tmp_path, monkeypat
     assert "pick one" in err and "nowhere" not in err
 
 
-# ---------- the tmux golden (parity check 1, tmux half) ----------------------------------------
+# ---------- the tmux golden ----------------------------------------------------------------
 
 def test_golden_dry_run_tmux(tmp_path):
-    """The old suite's tmux golden, run by the PORT under the same harness
-    as the direct golden. Byte-equal to the committed fixture, the old
-    launcher's own, copied verbatim, plus the ST-18 launch-record lines."""
+    """The tmux golden, run by the PORT under the same harness as the direct
+    golden. Byte-equal to the committed fixture. It is NO LONGER the old
+    launcher's (ST-285): the trampoline is gone, so it shows the pane's
+    line and then the in-place plan of that line."""
     root = make_agents_root(tmp_path, front_matter=GOLDEN_FRONT_MATTER)
     for sub in ("bin", "home", "work", "tmpdir"):
         (tmp_path / sub).mkdir()
     env = clean_env(AGENTS_DIR=root, HOME=str(tmp_path / "home"),
-                    TMPDIR=str(tmp_path / "tmpdir"), TZ="UTC",
+                    TMPDIR=str(tmp_path / "tmpdir"), TZ="UTC", PWD=str(tmp_path / "work"),
                     PATH=f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
     env.pop("SESSIONS_DIR")          # the default root: the sessions leaf (fresh: <HOME>/.sessionkit/tools/state/sessions)
     result = subprocess.run(session_cmd("--dry-run", "--tmux-target", "gold:win", "scout"),
@@ -811,8 +643,8 @@ def test_golden_dry_run_tmux(tmp_path):
 
 def test_a_keyed_tmux_dry_run_subprocess_mints_nothing(tmp_path):
     """Keyed x tmux under --dry-run, through the verb: no pane is placed, so
-    neither the sessions root nor anything under it exists, the primitive
-    never ran, and the report says where the pane WOULD land."""
+    neither the sessions root nor anything under it exists, and the
+    primitive never ran. The pane would run `--keyed` itself."""
     stub, record = write_key_init_stub(tmp_path)
     root = make_agents_root(tmp_path, front_matter=KEYED)
     (tmp_path / "work").mkdir()
@@ -825,13 +657,19 @@ def test_a_keyed_tmux_dry_run_subprocess_mints_nothing(tmp_path):
     sessions = tmp_path / "agents" / "sessions"
     assert not sessions.exists(), "the sessions root was created"
     assert not os.path.exists(record), "the primitive ran"
-    assert "session:  (keyed: minted inside the pane at boot)" in result.stdout
-    assert f"  dir:    {sessions}/<id minted in the pane>" in result.stdout
-    assert "<- computed: session identity (minted in the pane at boot)" in result.stdout
+    assert "pane:     (cd " in result.stdout and "session start scout\n" in result.stdout
     assert "--no-register" not in result.stdout
 
 
 # ---------- e2e: placement on a private server -------------------------------------------------
+
+#: How a pane stub stays alive after `done`: until the test touches
+#: `release` (or conftest's kill-server ends the pane), never for a fixed
+#: span. A stub that slept 45 s and exited let a slow test read a pane that
+#: had already closed (`ps` saw nothing, the window was gone). The 600 s
+#: bound is an orphan bound only, so a stub cannot outlive a crashed run.
+HOLD_LINE = ('i=0; while [ ! -e "%(dir)s/release" ] && [ "$i" -lt 600 ]; '
+             'do sleep 1; i=$((i+1)); done\n')
 
 PANE_STUB = VENDOR_STUB + """\
 printf '%%s' "$$"      > "%(dir)s/pid"
@@ -840,8 +678,7 @@ printf '%%s' "$PATH"   > "%(dir)s/path"
 printf '%%s' "${CLAUDE_SESSION_AGENT_SOCK:-}" > "%(dir)s/agent-sock"
 printf '%%s' "${CA209_HYGIENE:-<unset>}"      > "%(dir)s/declared-var"
 : > "%(dir)s/done"
-sleep 45
-"""
+""" + HOLD_LINE
 
 
 def private_env(extra: dict | None = None, tmux: str | None = None) -> dict:
@@ -895,13 +732,20 @@ def window_id_of(stdout: str) -> str:
     return re.search(r"\((@\d+)\)", stdout).group(1)
 
 
-def tmux_launch_e2e(tmp_path, *verb_args, front_matter="claude:\n  effort: high\n",
-                    extra_env=None, tmux=None, agent="scout", stub_body=PANE_STUB):
-    """The verb as a subprocess, placing into the private server, the stub
-    vendor recording from inside the pane. The launcher runs AS IF from its
-    own venv (VIRTUAL_ENV set, its bin on PATH), so the scrub the pane test
-    checks is not vacuous; HOME is the test's, so the private server reads
-    no user tmux.conf. Returns (result, record, work)."""
+def write_session_shim(bin_dir: Path) -> None:
+    """`session` on the pane's PATH: the pane runs `session start ...`
+    again, and the tmux server's PATH must find it (ST-285). This checkout's
+    own cli, through the venv's interpreter by its absolute path, so the
+    pane's PATH and environment still name no venv."""
+    shim = bin_dir / "session"
+    shim.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m sessiontools.cli "$@"\n')
+    shim.chmod(0o755)
+
+
+def e2e_env(tmp_path, front_matter="claude:\n  effort: high\n", extra_env=None,
+            agent="scout", stub_body=PANE_STUB, shim=True) -> tuple[dict, Path, Path]:
+    """The environment a tmux e2e launches with, its stub vendor recording
+    into RECORD from inside the pane. Returns (env, record, work)."""
     record = tmp_path / "record"
     record.mkdir(exist_ok=True)
     bin_dir = tmp_path / "bin"
@@ -909,26 +753,65 @@ def tmux_launch_e2e(tmp_path, *verb_args, front_matter="claude:\n  effort: high\
     stub = bin_dir / "claude"
     stub.write_text(stub_body % {"dir": record})
     stub.chmod(0o755)
+    if shim:
+        write_session_shim(bin_dir)
     root = make_agents_root(tmp_path, name=agent, front_matter=front_matter)
     work = tmp_path / "work"
     work.mkdir(exist_ok=True)
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    launcher_tmp = tmp_path / "tmpdir"     # a pane-minted launch's files land in TMPDIR
+    launcher_tmp = tmp_path / "tmpdir"
     launcher_tmp.mkdir(exist_ok=True)
     env = {key: value for key, value in clean_env().items()
            if key not in ("PYTHONPATH", "PYTHONHOME") and not key.startswith("UV_")}
     env.update(AGENTS_DIR=root, SESSIONS_DIR=os.path.join(root, "sessions"),
-               HOME=str(home), TMPDIR=str(launcher_tmp),
+               HOME=str(home), TMPDIR=str(launcher_tmp), PWD=str(work),
                VIRTUAL_ENV=sys.prefix, PATH=e2e_path(bin_dir))
+    env.update(extra_env or {})
+    return env, record, work
+
+
+def tmux_launch_e2e(tmp_path, *verb_args, front_matter="claude:\n  effort: high\n",
+                    extra_env=None, tmux=None, agent="scout", stub_body=PANE_STUB,
+                    shim=True):
+    """The verb as a subprocess, placing into the private server, the stub
+    vendor recording from inside the pane. The launcher runs AS IF from its
+    own venv (VIRTUAL_ENV set, its bin on PATH), so the scrub the pane test
+    checks is not vacuous; HOME is the test's, so the private server reads
+    no user tmux.conf. A server this launch births holds this environment
+    (less identity and credentials), and the pane's own `session start`
+    runs under it. Returns (result, record, work)."""
+    env, record, work = e2e_env(tmp_path, front_matter, extra_env, agent, stub_body, shim)
     result = subprocess.run(session_cmd(*verb_args), capture_output=True, text=True,
-                            timeout=TIMEOUT_S, cwd=str(work), env=private_env({**env, **(extra_env or {})}, tmux),
+                            timeout=TIMEOUT_S, cwd=str(work), env=private_env(env, tmux),
                             check=False)
     return result, record, work
 
 
-def pane_ran(record: Path) -> bool:
-    return wait_for(lambda: (record / "done").exists())
+def pane_ran(record: Path, window_id: str) -> bool:
+    """True once the stub vendor in WINDOW_ID's pane has written `done`.
+
+    An EVENT ends the wait, not a guess at how long a pane takes to start:
+    `done` exists, or the pane is dead (`remain-on-exit failed` keeps a
+    pane that failed) or gone (a tmux without that option closes it). A
+    loaded host only makes the pane slower, and the wait lasts as long as
+    the pane is alive and has not got there.
+
+    The one clock left is TIMEOUT_S, and it is a HANG bound: a pane that is
+    alive and never gets there cannot be told from a slow one without some
+    clock, so one has to stay. It is the suite's "a launcher must never
+    hang" bound, not a start-up budget (a fixed 30 s here went red under
+    load while the pane was still starting)."""
+    done = record / "done"
+
+    def settled() -> bool:
+        if done.exists():
+            return True
+        pane = tmux_in("display-message", "-p", "-t", window_id, "#{pane_dead}")
+        return pane.returncode != 0 or pane.stdout.strip() == "1"
+
+    wait_for(settled, timeout=TIMEOUT_S)
+    return done.exists()
 
 
 def no_session_dirs(tmp_path) -> bool:
@@ -941,7 +824,7 @@ def test_tmux_placement_lands_and_the_pane_sees_no_venv(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "placed scout in tmux window 'scout'" in result.stdout
     assert "of session 'eng' (created)" in result.stdout
-    assert pane_ran(record), f"the pane never ran the vendor: {result.stdout}"
+    assert pane_ran(record, window_id_of(result.stdout)), f"the pane never ran the vendor: {result.stdout}"
     argv = recorded_argv(record)
     sid = (record / "session-id-env").read_text()
     assert sid and argv[argv.index("--session-id") + 1] == sid
@@ -950,23 +833,21 @@ def test_tmux_placement_lands_and_the_pane_sees_no_venv(tmp_path):
     # the venv scrub holds IN THE PANE, not just in the harness
     assert (record / "virtual-env").read_text() == ""
     assert os.path.join(sys.prefix, "bin") not in (record / "path").read_text().split(":")
-    # the trampoline lives in the session dir, 0700, shebang first
-    trampoline = root / "sessions" / sid / placement.TRAMPOLINE
-    assert stat.S_IMODE(trampoline.stat().st_mode) == 0o700
-    assert trampoline.read_text().startswith("#!/usr/bin/env bash\n")
+    # no trampoline anywhere: the pane ran `session start` itself (ST-285)
+    assert not (root / "sessions" / sid / "launch.sh").exists()
+    assert not list((tmp_path / "tmpdir").glob("session-start-pane-*"))
 
 
 def test_a_space_in_the_agents_dir_still_lands_the_pane(tmp_path):
-    """The trampoline lives in the session dir under AGENTS_DIR; tmux hands
-    its path to `sh -c`, so unquoted it split at the space and the pane
-    never ran."""
+    """tmux hands the pane's line to `sh -c`: a space in a path the pane
+    reaches (AGENTS_DIR, the shim's dir) must not split it."""
     spaced = tmp_path / "agents home"
     spaced.mkdir()
     result, record, _work = tmux_launch_e2e(spaced, "--tmux-target", "eng", "scout")
     assert result.returncode == 0, result.stderr
-    assert pane_ran(record), f"the pane never ran the vendor: {result.stdout}"
+    assert pane_ran(record, window_id_of(result.stdout)), f"the pane never ran the vendor: {result.stdout}"
     sid = (record / "session-id-env").read_text()
-    assert (spaced / "agents" / "sessions" / sid / placement.TRAMPOLINE).exists()
+    assert (spaced / "agents" / "sessions" / sid / "session-id").read_text() == sid
 
 
 @needs_tmux
@@ -979,7 +860,7 @@ def test_a_declared_variable_lives_in_the_pane_and_nowhere_else(tmp_path):
         tmp_path, "--tmux-target", "eng", "scout",
         front_matter="environment:\n  variables:\n    CA209_HYGIENE: pane-only\n")
     assert result.returncode == 0, result.stderr
-    assert pane_ran(record), result.stdout
+    assert pane_ran(record, window_id_of(result.stdout)), result.stdout
     assert (record / "declared-var").read_text() == "pane-only"
     for scope in (["-g"], ["-t", "=eng"]):
         dump = tmux_in("show-environment", *scope).stdout
@@ -1040,8 +921,7 @@ TITLE_STUB = """#!/usr/bin/env bash
 printf '\\033kVENDOR-RENAMED\\033\\\\'
 printf '\\033]2;VENDOR-TITLE\\007'
 : > "%(dir)s/done"
-sleep 45
-"""
+""" + HOLD_LINE
 
 
 @needs_tmux
@@ -1055,7 +935,7 @@ def test_sesh1114_the_window_is_exactly_the_agent_name_after_the_vendor_runs(tmp
                                             agent="bob", stub_body=TITLE_STUB)
     assert result.returncode == 0, result.stderr
     assert "placed bob in tmux window 'bob'" in result.stdout
-    assert pane_ran(record), result.stdout
+    assert pane_ran(record, window_id_of(result.stdout)), result.stdout
     window_id = window_id_of(result.stdout)
 
     def facts():
@@ -1073,7 +953,13 @@ def test_sesh1114_the_window_is_exactly_the_agent_name_after_the_vendor_runs(tmp
 def test_in_tmux_places_into_the_callers_current_session(tmp_path):
     """No target: the window opens in the session the caller is in - here a
     private one, reached through a TMUX value naming its socket."""
-    assert tmux_in("new-session", "-d", "-s", "home").returncode == 0
+    # The pane's `session start` runs under the SERVER's environment, so the
+    # server is born the way the caller's own would be: with `session` and
+    # the agents dir in it.
+    env, _record, _work = e2e_env(tmp_path)
+    born = subprocess.run(["tmux", "new-session", "-d", "-s", "home"], env=private_env(env),
+                          capture_output=True, text=True, timeout=TIMEOUT_S, check=False)
+    assert born.returncode == 0, born.stderr
     facts = tmux_in("display-message", "-p", "-t", "=home:",
                     "#{socket_path},#{pid},#{session_id}").stdout.strip()
     socket, pid, session_id = facts.split(",")
@@ -1083,24 +969,25 @@ def test_in_tmux_places_into_the_callers_current_session(tmp_path):
     assert "of the current session" in result.stdout
     names = tmux_in("list-windows", "-t", "=home", "-F", "#{window_name}").stdout.splitlines()
     assert "scout" in names
-    assert pane_ran(record), result.stdout
+    assert pane_ran(record, window_id_of(result.stdout)), result.stdout
 
 
 def test_keyed_in_pane_reaper_watches_the_panes_own_pid(tmp_path):
-    """The CA-152 wiring, measured in the pane: the pid handed to --reap-pid
-    is the pid whose life IS the pane's. The keyed trampoline does not exec,
-    so that pid is the pane's bash - the vendor's PARENT."""
+    """The CA-152 wiring, measured in the pane (design (vii)): the pane runs
+    `session start --keyed` in place, which mints, then execs the vendor in
+    its own pid, so the pid handed to --reap-pid IS the vendor's: the
+    process whose life is the pane's."""
     stub, key_record = write_key_init_stub(tmp_path)
     result, record, _work = tmux_launch_e2e(tmp_path, "--tmux-target", "eng", "--keyed",
                                             "scout", extra_env={"SESSION_KEY_INIT": stub})
     assert result.returncode == 0, result.stderr
     assert "-- session id minted in the pane" in result.stdout
-    assert pane_ran(record), result.stdout
+    assert pane_ran(record, window_id_of(result.stdout)), result.stdout
     key_argv = Path(key_record).read_text().split()
     assert key_argv[:4] == ["--agent-name", "scout", "--session-dir",
                             str(tmp_path / "agents" / "sessions")]
-    assert key_argv[key_argv.index("--reap-pid") + 1] == (record / "ppid").read_text()
-    # the pane expanded the ShellVar: the vendor really got the minted id
+    assert key_argv[key_argv.index("--reap-pid") + 1] == (record / "pid").read_text()
+    # the vendor really got the id the pane's own launch minted
     argv = recorded_argv(record)
     assert argv[argv.index("--session-id") + 1] == STUB_SID
     assert (record / "session-id-env").read_text() == STUB_SID
@@ -1124,7 +1011,7 @@ def test_inherited_agent_pid_is_never_the_traps_target(tmp_path):
                        "CLAUDE_SESSION_AGENT_PID": str(canary.pid),
                        "CLAUDE_SESSION_ID": "the-launchers-own-session"})
         assert result.returncode == 0, result.stderr
-        assert pane_ran(record), result.stdout
+        assert pane_ran(record, window_id_of(result.stdout)), result.stdout
         assert (record / "session-id-env").read_text() == STUB_SID
         assert tmux_in("kill-window", "-t", window_id_of(result.stdout)).returncode == 0
         time.sleep(2)   # give a wrong trap its chance to fire
@@ -1159,7 +1046,7 @@ def test_a_start_inside_a_seat_hands_nobody_the_parents_session_id(tmp_path):
         extra_env={"CLAUDE_CODE_SESSION_ID": parent, "CLAUDE_SESSION_ID": parent})
     assert result.returncode == 0, result.stderr
     assert "(created)" in result.stdout                # this launch birthed the server
-    assert pane_ran(record), result.stdout
+    assert pane_ran(record, window_id_of(result.stdout)), result.stdout
     new_id = (record / "session-id-env").read_text()
     assert new_id and new_id != parent
     assert seen.read_text() == f"<unset> {new_id}"     # the generator
@@ -1189,7 +1076,7 @@ def test_an_unkeyed_start_inside_a_keyed_seat_hands_no_pane_the_parents_signing_
                    "CLAUDE_SESSION_AGENT_SOCK": "/parent/agent.sock"})
     assert result.returncode == 0, result.stderr
     assert "(created)" in result.stdout                # this launch birthed the server
-    assert pane_ran(record), result.stdout
+    assert pane_ran(record, window_id_of(result.stdout)), result.stdout
     seen = {key: (record / f"git-{key}").read_text() for key in SIGNING_KEYS}
     server = tmux_in("show-environment", "-g").stdout
     assert tmux_in("kill-window", "-t", window_id_of(result.stdout)).returncode == 0
@@ -1220,7 +1107,7 @@ def test_in_tmux_outside_tmux_creates_the_named_default_session(tmp_path):
     assert "placed scout in tmux window 'scout'" in result.stdout
     assert "of session 'agents' (created)" in result.stdout
     assert result.stdout.rstrip().endswith("; attach: tmux attach -t agents")
-    assert pane_ran(record), result.stdout
+    assert pane_ran(record, window_id_of(result.stdout)), result.stdout
     window_id = window_id_of(result.stdout)
     sessions = tmux_in("list-sessions", "-F", "#{session_name}").stdout.split()
     assert sessions == ["agents"]
@@ -1231,7 +1118,7 @@ def test_in_tmux_outside_tmux_creates_the_named_default_session(tmp_path):
         assert name not in server, f"the server was born holding {name}"
     second = tmp_path / "second"
     second.mkdir()
-    # The first pane still holds scout (its claim moved to that pane), so the
+    # The first pane still holds scout (its own launch claimed it), so the
     # second launch is a second holder on purpose: it says so.
     again, _record, _work = tmux_launch_e2e(second, "--in-tmux", "--allow-second-holder",
                                             "scout")
@@ -1289,3 +1176,332 @@ def test_pane_lifetime_keyed_agent_and_reaper_die_with_the_pane(tmp_path):
     assert tmux_in("kill-window", "-t", window_id_of(result.stdout)).returncode == 0
     assert wait_for(lambda: not agent_answers(), timeout=60), \
         "the pane died but the key's ssh-agent survived it"
+
+
+# ---------- ST-285: the pane runs the ENTERED line, on a private server ----------------------
+
+HANDOFF_STUB = PANE_STUB.replace(
+    DONE_LINE,
+    "printf '%%s' \"${SESSION_START_ENTERED:-<unset>}\" > \"%(dir)s/entered-env\"\n"
+    "printf '%%s' \"${SESSION_RECORD_LAUNCH_COMMAND:-<unset>}\" > \"%(dir)s/record-env\"\n"
+    + DONE_LINE)
+assert HANDOFF_STUB != PANE_STUB
+
+#: Exits 0 at once: the window must close behind it.
+CLEAN_EXIT_STUB = VENDOR_STUB + ': > "%(dir)s/done"\nexit 0\n'
+
+
+def require_remain_on_exit_failed() -> None:
+    """Skip unless this tmux takes `remain-on-exit failed`. Probes the
+    VALUE, not `tmux -V`, on a throwaway server inside the test's wall:
+    tmux 3.8 accepts it (measured); a tmux without it answers `unknown
+    value`, and the placement then degrades loudly (see the fake-tmux test)."""
+    if shutil.which("tmux") is None:
+        pytest.skip("tmux not on PATH")
+    probe = subprocess.run(
+        ["tmux", "-L", "st285-probe", "-f", "/dev/null", "new-session", "-d", "sleep 5",
+         ";", "set-option", "-g", "remain-on-exit", "failed"],
+        env=private_env(), capture_output=True, text=True, timeout=TIMEOUT_S, check=False)
+    subprocess.run(["tmux", "-L", "st285-probe", "kill-server"], env=private_env(),
+                   capture_output=True, timeout=TIMEOUT_S, check=False)
+    if probe.returncode != 0:
+        pytest.skip(f"this tmux has no `remain-on-exit failed`: {probe.stderr.strip()}")
+
+
+def pane_fact(target: str, fmt: str) -> str:
+    return tmux_in("display-message", "-p", "-t", target, fmt).stdout.rstrip("\n")
+
+
+def the_record(tmp_path, sid: str) -> dict:
+    from sessiontools.start.record import parse_command
+    return parse_command((tmp_path / "agents" / "sessions" / sid / "launch" / "command")
+                         .read_text())
+
+
+def message_file_in(start_command: str) -> Path:
+    """The message file a pane line names (tmux's rendering: no space in
+    the test's paths, so the word after the flag is the path)."""
+    path = Path(re.search(r"--first-message-file (\S+)", start_command).group(1))
+    assert path.name == "first-message.md" and path.parent.parent.name == "launches"
+    return path
+
+
+def captured(window_id: str) -> str:
+    """The pane's whole text, history included, wrapped lines joined."""
+    return tmux_in("capture-pane", "-p", "-J", "-S", "-", "-t", window_id).stdout
+
+
+def dead_with(window_id: str, status: int) -> bool:
+    return wait_for(lambda: pane_fact(window_id, "#{pane_dead} #{pane_dead_status}")
+                    == f"1 {status}")
+
+
+@needs_tmux
+def test_i_the_pane_start_command_is_the_entered_line_less_placement(tmp_path):
+    """(i): `#{pane_start_command}` is tmux's rendering of the pane line
+    (`"` + line + `"`: it has a space and no `$`, `"` or `\\`), with no
+    placement flag in it, and no `session-start-pane-*` anywhere."""
+    result, record, _work = tmux_launch_e2e(tmp_path, "--tmux-target", "eng", "--no-switch",
+                                            "scout", "--effort", "low")
+    assert result.returncode == 0, result.stderr
+    assert pane_ran(record, window_id_of(result.stdout)), result.stdout
+    window_id = window_id_of(result.stdout)
+    line = "session start scout --effort low"
+    assert pane_fact(window_id, "#{pane_start_command}") == f'"{line}"'
+    assert not list((tmp_path / "tmpdir").glob("session-start-pane-*"))
+    assert not list((tmp_path / "agents").rglob("launch.sh"))
+
+
+@needs_tmux
+def test_ii_no_first_message_word_in_the_pane_line_or_the_panes_argv(tmp_path):
+    """(ii), ruling 7: entered words reach the vendor by a 0600 file; no
+    word is in `#{pane_start_command}` or the pane process's argv (read with
+    `ps` after the exec); the record keeps the line exactly as entered; the
+    hand-off never reaches the vendor's environment."""
+    result, record, work = tmux_launch_e2e(
+        tmp_path, "--tmux-target", "eng", "scout", "zebrafish", "quokka", "--effort", "low",
+        stub_body=HANDOFF_STUB)
+    assert result.returncode == 0, result.stderr
+    assert pane_ran(record, window_id_of(result.stdout)), result.stdout
+    window_id = window_id_of(result.stdout)
+    start_command = pane_fact(window_id, "#{pane_start_command}")
+    pid = (record / "pid").read_text()
+    argv = subprocess.run(["ps", "-ww", "-o", "args=", "-p", pid], capture_output=True,
+                          text=True, check=False).stdout
+    assert argv.strip(), "ps saw no pane process"
+    for word in ("zebrafish", "quokka"):
+        assert word not in start_command
+        assert word not in argv
+        assert word not in " ".join(recorded_argv(record))
+    assert "--first-message-file" in start_command and "--first-message-file-over 0" in \
+        start_command
+    message = message_file_in(start_command)
+    assert message.read_text() == "zebrafish quokka"
+    assert stat.S_IMODE(message.stat().st_mode) == 0o600
+    assert stat.S_IMODE(message.parent.stat().st_mode) == 0o700
+    sid = (record / "session-id-env").read_text()
+    # RESIDUAL, named: the pane writes this record only after a `git
+    # check-ignore` guard with a fixed 10 s budget (record.GIT_TIMEOUT_S). If
+    # that one git call takes longer, the pane writes no record by design (a
+    # record never costs a session; test_start_record covers that path in
+    # process) and `the_record` below raises FileNotFoundError. That needs a
+    # single exec of git (12 ms on an idle host) to stall for 10 s.
+    fields = the_record(tmp_path, sid)
+    assert shlex.split(fields["launch_command"]) == [
+        "session", "start", "--tmux-target", "eng", "scout", "zebrafish", "quokka",
+        "--effort", "low"]
+    assert shlex.split(fields["launch_dir"]) == [str(work)]
+    assert (record / "entered-env").read_text() == "<unset>"
+    assert (record / "record-env").read_text() == "<unset>"    # F2: unset after the record
+    # the vendor still got the message, by its pointer file
+    pointed = [path for path in (tmp_path / "agents" / "sessions" / sid).rglob("*")
+               if path.is_file() and "zebrafish quokka" in path.read_text(errors="ignore")]
+    assert pointed, "the first message never reached the session's files"
+
+
+@needs_tmux
+def test_iii_a_refused_pane_stays_dead_with_its_reason(tmp_path):
+    """(iii), ruling 3: the race the outer launcher accepts. Its read says
+    free (here: it reads another state dir), the pane's own launch finds
+    the holder and refuses; the window stays, status 3, the line readable."""
+    require_remain_on_exit_failed()
+    first, record, _work = tmux_launch_e2e(tmp_path, "--tmux-target", "eng", "scout")
+    assert first.returncode == 0, first.stderr
+    assert pane_ran(record, window_id_of(first.stdout)), first.stdout
+    elsewhere = tmp_path / "second"
+    elsewhere.mkdir()
+    second, _record, _work = tmux_launch_e2e(
+        elsewhere, "--tmux-target", "eng", "scout",
+        extra_env={"SESSION_STATE_DIR": str(elsewhere / "state"),
+                   "SESSION_SIDECAR_DIR": str(elsewhere / "sidecars")})
+    assert second.returncode == 0, second.stderr
+    window_id = window_id_of(second.stdout)
+    assert dead_with(window_id, 3), pane_fact(window_id, "#{pane_dead} #{pane_dead_status}")
+    shown = captured(window_id)
+    assert "refusing a second holder" in shown and "session start:" in shown, shown
+
+
+@needs_tmux
+def test_iv_a_pane_whose_path_has_no_session_fails_loudly(tmp_path):
+    """(iv), ruling 4d: the pane cannot find `session`. Measured on tmux
+    3.8: a new pane's PATH is the CREATING client's (the launcher's, less
+    its venv: `host_environ`), not the server's global one, so this is a
+    launcher whose PATH has no `session` (a venv-only install). The window
+    stays, status 127, `command not found` readable."""
+    require_remain_on_exit_failed()
+    result, record, _work = tmux_launch_e2e(tmp_path, "--tmux-target", "bare", "scout",
+                                            shim=False)
+    assert result.returncode == 0, result.stderr
+    window_id = window_id_of(result.stdout)
+    assert dead_with(window_id, 127)
+    assert "command not found" in captured(window_id)
+    assert not (record / "argv").exists()
+
+
+@needs_tmux
+def test_v_a_clean_exit_closes_the_window(tmp_path):
+    """(v): remain-on-exit FAILED keeps only a pane that failed."""
+    require_remain_on_exit_failed()
+    result, record, _work = tmux_launch_e2e(tmp_path, "--tmux-target", "eng", "scout",
+                                            stub_body=CLEAN_EXIT_STUB)
+    assert result.returncode == 0, result.stderr
+    assert pane_ran(record, window_id_of(result.stdout)), result.stdout
+    window_id = window_id_of(result.stdout)
+    assert wait_for(lambda: window_id not in tmux_in(
+        "list-windows", "-a", "-F", "#{window_id}").stdout.split()), "the window stayed"
+
+
+@needs_tmux
+def test_vi_a_respawn_rereads_the_file_and_records_the_pane_line(tmp_path):
+    """(vi): `respawn-pane -k` runs the pane line again: a FRESH seat, the
+    same first message from the file, and (no hand-off survives a respawn)
+    its record holds the pane line. With the file gone, the respawn is
+    refused (exit 2) and its reason stays readable."""
+    require_remain_on_exit_failed()
+    result, record, _work = tmux_launch_e2e(tmp_path, "--tmux-target", "eng", "scout",
+                                            "zebrafish")
+    assert result.returncode == 0, result.stderr
+    assert pane_ran(record, window_id_of(result.stdout)), result.stdout
+    window_id = window_id_of(result.stdout)
+    first_sid = (record / "session-id-env").read_text()
+    start_command = pane_fact(window_id, "#{pane_start_command}")
+    (record / "done").unlink()
+    # A respawned pane's PATH is the respawning client's (measured, tmux
+    # 3.8): respawn from one that can find `session`, as ST-30's would.
+    env, _record, _work = e2e_env(tmp_path)
+    respawn = subprocess.run(["tmux", "respawn-pane", "-k", "-t", window_id],
+                             env=private_env(env), capture_output=True, text=True,
+                             timeout=TIMEOUT_S, check=False)
+    assert respawn.returncode == 0, respawn.stderr
+    assert pane_ran(record, window_id), "the respawned pane never ran the vendor"
+    second_sid = (record / "session-id-env").read_text()
+    assert second_sid and second_sid != first_sid
+    fields = the_record(tmp_path, second_sid)
+    message = message_file_in(start_command)
+    assert shlex.split(fields["launch_command"]) == [
+        "session", "start", "--first-message-file", str(message),
+        "--first-message-file-over", "0", "scout"]
+    assert pane_fact(window_id, "#{pane_start_command}") == start_command
+    message.unlink()
+    respawn = subprocess.run(["tmux", "respawn-pane", "-k", "-t", window_id],
+                             env=private_env(env), capture_output=True, text=True,
+                             timeout=TIMEOUT_S, check=False)
+    assert respawn.returncode == 0, respawn.stderr
+    assert dead_with(window_id, 2)
+    assert "no such file" in captured(window_id)
+
+
+# ---------- review F1: a placed pane resolves in tmux's environment ---------------------------
+
+class FakeShowEnvironment:
+    """`placement._tmux.run` answering `show-environment`: GLOBAL for `-g`,
+    SESSION for a session read (None: no such session), every call kept."""
+
+    def __init__(self, monkeypatch, global_env: str | None, session_env: str | None = None):
+        self.calls: list[list[str]] = []
+        self.global_env, self.session_env = global_env, session_env
+        monkeypatch.setattr(placement._tmux, "run", self.run)
+
+    def run(self, arguments, env=None, timeout=None):
+        self.calls.append(list(arguments))
+        assert arguments[0] == "show-environment" and timeout
+        text = self.global_env if arguments[1:] == ["-g"] else self.session_env
+        if text is None:
+            return subprocess.CompletedProcess(arguments, 1, "", "no server running")
+        return subprocess.CompletedProcess(arguments, 0, text, "")
+
+
+SERVER = "AGENTS_DIR=/srv/agents\nSESSION_STATE_DIR=/srv/state\nSESSIONS_DIR=/srv/sessions\n"
+
+
+@pytest.mark.parametrize("name", placement.RESOLUTION_VARS)
+def test_a_differing_resolution_var_gives_one_line_naming_it(monkeypatch, name):
+    FakeShowEnvironment(monkeypatch, SERVER)
+    environ = {"AGENTS_DIR": "/srv/agents", "SESSION_STATE_DIR": "/srv/state",
+               "SESSIONS_DIR": "/srv/sessions", name: "/mine"}
+    lines = placement.environment_warnings("eng", environ)
+    assert len(lines) == 1
+    assert lines[0].startswith(f"warning: {name} is /mine here but /srv/")
+    assert "a placed pane resolves in tmux's environment" in lines[0]
+    assert "\n" not in lines[0]
+
+
+def test_each_differing_var_gets_its_own_line(monkeypatch):
+    FakeShowEnvironment(monkeypatch, SERVER)
+    environ = {name: "/mine" for name in placement.RESOLUTION_VARS}
+    lines = placement.environment_warnings("eng", environ)
+    assert [line.split()[1] for line in lines] == list(placement.RESOLUTION_VARS)
+
+
+def test_equal_or_unset_gives_none(monkeypatch):
+    fake = FakeShowEnvironment(monkeypatch, SERVER)
+    assert placement.environment_warnings("eng", {"AGENTS_DIR": "/srv/agents"}) == []
+    assert placement.environment_warnings("eng", {"SESSIONS_DIR": ""}) == []
+    calls = len(fake.calls)
+    assert placement.environment_warnings("eng", {"PATH": "/bin"}) == []
+    assert len(fake.calls) == calls           # nothing set: tmux is not even asked
+
+
+def test_a_var_tmux_does_not_hold_is_named_as_unset_there(monkeypatch):
+    FakeShowEnvironment(monkeypatch, "HOME=/h\n-AGENTS_DIR\n")
+    lines = placement.environment_warnings("eng", {"AGENTS_DIR": "/mine",
+                                                   "SESSIONS_DIR": "/s d"})
+    assert lines[0].startswith("warning: AGENTS_DIR is /mine here but unset in tmux's")
+    assert lines[1].startswith("warning: SESSIONS_DIR is '/s d' here but unset in tmux's")
+
+
+def test_the_sessions_own_environment_wins_over_the_global_one(monkeypatch):
+    """tmux builds a pane from the global environment with the session's over
+    it: a session-level value equal to the caller's is no difference."""
+    fake = FakeShowEnvironment(monkeypatch, SERVER, session_env="AGENTS_DIR=/mine\n")
+    assert placement.environment_warnings("eng", {"AGENTS_DIR": "/mine"}) == []
+    assert ["show-environment", "-t", "=eng"] in fake.calls
+    FakeShowEnvironment(monkeypatch, SERVER, session_env="-AGENTS_DIR\n")
+    assert "unset in tmux's" in placement.environment_warnings(
+        "eng", {"AGENTS_DIR": "/srv/agents"})[0]
+
+
+def test_the_callers_current_session_is_read_with_no_target(monkeypatch):
+    fake = FakeShowEnvironment(monkeypatch, SERVER, session_env="")
+    placement.environment_warnings("", {"AGENTS_DIR": "/mine"})
+    assert ["show-environment"] in fake.calls
+
+
+def test_no_server_or_no_tmux_gives_none(monkeypatch):
+    """A server this placement births is born from the caller's environment."""
+    FakeShowEnvironment(monkeypatch, None)
+    assert placement.environment_warnings("eng", {"AGENTS_DIR": "/mine"}) == []
+
+    def absent(*_args, **_kwargs):
+        raise FileNotFoundError("tmux")
+    monkeypatch.setattr(placement._tmux, "run", absent)
+    assert placement.environment_warnings("eng", {"AGENTS_DIR": "/mine"}) == []
+
+    def hangs(arguments, env=None, timeout=None):
+        raise subprocess.TimeoutExpired(arguments, timeout)
+    monkeypatch.setattr(placement._tmux, "run", hangs)
+    assert placement.environment_warnings("eng", {"AGENTS_DIR": "/mine"}) == []
+
+
+@needs_tmux
+def test_a_placement_whose_agents_dir_differs_from_tmux_warns_once_and_proceeds(tmp_path):
+    """End to end on the private server: the first launch births it (its
+    environment is the server's), the second sets its own AGENTS_DIR. One
+    stderr line names AGENTS_DIR; the window still opens (exit 0) and its
+    pane resolves the agent from tmux's AGENTS_DIR, so the stub still runs."""
+    first, record, _work = tmux_launch_e2e(tmp_path, "--tmux-target", "eng", "scout")
+    assert first.returncode == 0, first.stderr
+    assert "warning:" not in first.stderr               # born from this env: equal
+    assert pane_ran(record, window_id_of(first.stdout)), first.stdout
+    (record / "done").unlink()
+    elsewhere = tmp_path / "elsewhere-agents"
+    shutil.copytree(tmp_path / "agents", elsewhere, ignore=shutil.ignore_patterns("sessions"))
+    second, record, _work = tmux_launch_e2e(
+        tmp_path, "--tmux-target", "eng", "--allow-second-holder", "scout",
+        extra_env={"AGENTS_DIR": str(elsewhere)})
+    assert second.returncode == 0, second.stderr
+    warned = [line for line in second.stderr.splitlines() if "warning:" in line]
+    assert len(warned) == 1, second.stderr
+    assert "AGENTS_DIR" in warned[0] and str(elsewhere) in warned[0]
+    assert "SESSION_STATE_DIR" not in second.stderr and "SESSIONS_DIR" not in second.stderr
+    assert pane_ran(record, window_id_of(second.stdout)), second.stdout

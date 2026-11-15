@@ -1,5 +1,6 @@
 """The clock line: the time and the context as used/max on every tool batch,
-switched on, and a warn line at a mark the session set.
+switched on, and nothing else: no warn line (`SESSION_CLOCK_WARN_AT` is
+retired, ST-78 do-007; the one warning is the settle alert's).
 
 As in test_settle, the behaviour that matters is tested THROUGH THE REAL
 SHIM, as `hooks/hooks.json` runs it: `sh hooks/clock-hook` with the payload
@@ -22,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from sessiontools import clockline, settle, window
+from sessiontools import clockline, window
 
 ROOT = Path(__file__).resolve().parents[1]
 SHIM = ROOT / "hooks" / "clock-hook"
@@ -90,7 +91,8 @@ def assert_silent(result: subprocess.CompletedProcess) -> None:
 
 def said(result: subprocess.CompletedProcess) -> list[str]:
     """The lines the hook said: exactly one stdout line of hook JSON, whose
-    additionalContext is one line, or two joined by a newline."""
+    additionalContext is its lines joined by a newline (one since do-007;
+    the bound stays at two so a second line shows up as itself)."""
     assert result.returncode == 0 and result.stderr == "", result.stderr
     out_lines = result.stdout.splitlines()
     assert len(out_lines) == 1, result.stdout
@@ -120,17 +122,21 @@ def test_the_shim_says_the_clock_and_used_over_max(tmp_path, pybin):
     assert "mail" not in lines[0].lower()
 
 
-def test_the_shim_says_the_warn_line_at_the_token_mark(tmp_path, pybin):
-    over = transcript(tmp_path, 262_000)
-    lines = said(run_shim(payload(over), {**ON, "SESSION_CLOCK_WARN_AT": "250k"}, pybin))
-    assert lines[0].endswith(" | ctx 262K/1.00M (26%)")
-    assert lines[1] == "ctx past 250K: 262K of 1.00M used."
-
-
-def test_the_shim_says_the_warn_line_at_the_percent_mark(tmp_path, pybin):
-    over = transcript(tmp_path, 812_000)
-    lines = said(run_shim(payload(over), {**ON, "SESSION_CLOCK_WARN_AT": "80%"}, pybin))
-    assert lines == [lines[0], "ctx past 80% (800K): 812K of 1.00M used."]
+@pytest.mark.parametrize(("at", "tokens", "figure"), [
+    ("250k", 262_000, "ctx 262K/1.00M (26%)"),     # past a token mark
+    ("80%", 812_000, "ctx 812K/1.00M (81%)"),      # past a percent mark
+    ("1", 990_000, "ctx 990K/1.00M (99%)"),        # far past the lowest mark
+])
+def test_the_shim_says_the_figure_and_no_warn_line_with_the_retired_mark_set(
+        tmp_path, pybin, at, tokens, figure):
+    """ST-78 do-007: SESSION_CLOCK_WARN_AT set and crossed, through the real
+    shim: the clock keeps its figure and says nothing else."""
+    over = transcript(tmp_path, tokens)
+    lines = said(run_shim(payload(over), {**ON, "SESSION_CLOCK_WARN_AT": at}, pybin))
+    assert len(lines) == 1, lines
+    assert CLOCK_UTC.match(lines[0]), lines[0]
+    assert lines[0].endswith(f" | {figure}")
+    assert "past" not in lines[0]
 
 
 def test_the_clock_is_the_hooks_own_local_time(tmp_path, pybin):
@@ -212,75 +218,74 @@ def test_no_transcript_path_falls_back_to_the_projects_dir(tmp_path):
         "[clock] 12:34 UTC | ctx 182K/1.00M (18%)"]
 
 
-# 3. The warn line -----------------------------------------------------------
+# 3. No warn line: SESSION_CLOCK_WARN_AT is retired (ST-78 do-007) -------------
 
-@pytest.mark.parametrize(("at", "shown"), [("250000", "250K"), ("250k", "250K"),
-                                           ("250K", "250K"), (" 250 k ", "250K"),
-                                           ("0.25M", "250K")])
-def test_the_token_mark_in_settles_grammar(tmp_path, at, shown):
-    path = transcript(tmp_path, 262_000)
-    lines = decide({**ON, "SESSION_CLOCK_WARN_AT": at}, payload(path))
-    assert lines[1] == f"ctx past {shown}: 262K of 1.00M used."
-
-
-@pytest.mark.parametrize(("at", "past"), [("80%", "80% (800K)"), ("12.5%", "12.5% (125K)"),
-                                          (" 50 % ", "50% (500K)"), ("100%", "100% (1.00M)")])
-def test_the_percent_mark(tmp_path, at, past):
+@pytest.mark.parametrize("at", ["250000", "250k", " 250 k ", "0.25M", "1", "80%", "12.5%",
+                                "100%", "1%", "", "nonsense", "0", "-5"])
+def test_any_retired_mark_leaves_the_clock_line_alone(tmp_path, at):
+    """Set to anything, crossed or not: one line, the figure, never a mark."""
     path = transcript(tmp_path, 1_000_000)
-    lines = decide({**ON, "SESSION_CLOCK_WARN_AT": at}, payload(path))
-    assert lines[1] == f"ctx past {past}: 1.00M of 1.00M used."
+    assert decide({**ON, "SESSION_CLOCK_WARN_AT": at}, payload(path)) == [
+        "[clock] 12:34 UTC | ctx 1.00M/1.00M (100%)"]
 
 
-def test_the_percent_mark_is_of_the_tightened_window(tmp_path):
+def test_the_retired_mark_with_a_tightened_or_unknown_window(tmp_path):
     path = transcript(tmp_path, 160_000)
     env = {**ON, "SESSION_CLOCK_WARN_AT": "80%", "CONTEXT_MAX": "200000"}
-    assert decide(env, payload(path))[1] == "ctx past 80% (160K): 160K of 200K used."
+    assert decide(env, payload(path)) == ["[clock] 12:34 UTC | ctx 160K/200K (80%)"]
+    path = transcript(tmp_path, 262_000, model="claude-unknown-9", name="unknown")
+    assert decide({**ON, "SESSION_CLOCK_WARN_AT": "250k"}, payload(path)) == [
+        "[clock] 12:34 UTC | ctx 262K/?"]
 
 
-def test_reaching_the_mark_counts_as_past_it(tmp_path):
-    env = {**ON, "SESSION_CLOCK_WARN_AT": "250000"}
-    assert len(decide(env, payload(transcript(tmp_path, 250_000, name="at")))) == 2
-    assert len(decide(env, payload(transcript(tmp_path, 249_999, name="under")))) == 1
-
-
-def test_a_token_mark_with_the_window_unknown_names_no_max(tmp_path):
-    path = transcript(tmp_path, 262_000, model="claude-unknown-9")
-    lines = decide({**ON, "SESSION_CLOCK_WARN_AT": "250k"}, payload(path))
-    assert lines == ["[clock] 12:34 UTC | ctx 262K/?", "ctx past 250K: 262K used."]
-
-
-def test_a_percent_mark_with_the_window_unknown_never_warns(tmp_path):
-    path = transcript(tmp_path, 990_000, model="claude-unknown-9")
-    assert decide({**ON, "SESSION_CLOCK_WARN_AT": "1%"}, payload(path)) == [
-        "[clock] 12:34 UTC | ctx 990K/?"]
-
-
-def test_under_the_mark_is_the_clock_line_alone(tmp_path):
-    path = transcript(tmp_path, 100_000)
-    assert len(decide({**ON, "SESSION_CLOCK_WARN_AT": "250k"}, payload(path))) == 1
-    assert len(decide({**ON, "SESSION_CLOCK_WARN_AT": "80%"}, payload(path))) == 1
-
-
-@pytest.mark.parametrize("at", [None, "", "   ", "nonsense", "0", "-5", "0k", "k", "nan",
-                                "inf", "12x", "0%", "-1%", "101%", "nan%", "inf%", "%",
-                                "x%", "0.00000001%", "80%%"])
-def test_no_usable_mark_is_no_warn_line(tmp_path, at):
+def test_the_settle_variable_adds_no_line_either(tmp_path):
     path = transcript(tmp_path, 990_000)
-    env = dict(ON) if at is None else {**ON, "SESSION_CLOCK_WARN_AT": at}
-    assert decide(env, payload(path)) == ["[clock] 12:34 UTC | ctx 990K/1.00M (99%)"]
+    assert len(decide({**ON, "SESSION_SETTLE_AT": "1"}, payload(path))) == 1
 
 
-def test_the_mark_never_falls_back_to_the_settle_threshold(tmp_path):
-    path = transcript(tmp_path, 990_000)
-    assert len(decide({**ON, settle.AT_ENV: "1"}, payload(path))) == 1
-
-
-def test_the_degraded_forms_never_warn(tmp_path):
+def test_the_degraded_forms_say_the_clock_alone(tmp_path):
     env = {**ON, "SESSION_CLOCK_WARN_AT": "1", "CLAUDE_PROJECTS_DIR": str(tmp_path / "p")}
     empty = tmp_path / "empty.jsonl"
     empty.write_text("")
     assert decide(env, payload(empty)) == ["[clock] 12:34 UTC | ctx ?"]
     assert decide(env, payload(tmp_path / "missing.jsonl")) == ["[clock] 12:34 UTC | ctx ?"]
+
+
+class Recording(dict):
+    """An environment that records every name read from it."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.read: list[str] = []
+
+    def get(self, key, default=None):
+        self.read.append(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self.read.append(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        self.read.append(key)
+        return super().__contains__(key)
+
+
+def test_the_retired_variable_is_never_read(tmp_path):
+    """Not ignored after a read: never looked up at all, nor the settle one."""
+    rec = Recording({**ON, "SESSION_CLOCK_WARN_AT": "1", "SESSION_SETTLE_AT": "1"})
+    out = io.StringIO()
+    path = transcript(tmp_path, 990_000)
+    assert clockline.main(io.StringIO(json.dumps(payload(path))), out, rec) == 0
+    done = subprocess.CompletedProcess([], 0, out.getvalue(), "")
+    assert len(said(done)) == 1
+    assert "SESSION_CLOCK_WARN_AT" not in rec.read and "SESSION_SETTLE_AT" not in rec.read
+    assert rec.read, "the recorder saw no read at all: the test proves nothing"
+
+
+def test_the_warn_helpers_are_gone():
+    for name in ("WARN_ENV", "warn_at", "warning", "_percent"):
+        assert not hasattr(clockline, name), name
 
 
 # 4. The switch: off by default, on by word -----------------------------------
@@ -474,11 +479,10 @@ def test_the_batch_row_that_lands_after_the_hook_starts_is_counted(tmp_path):
     timer.start()
     try:
         body = payload(path, tool_calls=[{"tool_name": "Bash", "tool_use_id": TOOL_ID}])
-        lines = decide({**ON, "SESSION_CLOCK_WARN_AT": "250k"}, body)
+        lines = decide(dict(ON), body)
     finally:
         timer.join()
-    assert lines == ["[clock] 12:34 UTC | ctx 300K/1.00M (30%)",
-                     "ctx past 250K: 300K of 1.00M used."]
+    assert lines == ["[clock] 12:34 UTC | ctx 300K/1.00M (30%)"]
 
 
 # 8. The clock ------------------------------------------------------------------
@@ -510,8 +514,11 @@ def test_hooks_json_runs_the_clock_after_settle_with_timeout_5():
 
 def test_hooks_json_says_what_it_does_and_how_to_switch_it_on():
     description = json.loads(HOOKS.read_text())["description"]
-    for word in ("clock-hook", f"{clockline.SWITCH_ENV}=on", clockline.WARN_ENV):
+    for word in ("clock-hook", f"{clockline.SWITCH_ENV}=on"):
         assert word in description, word
+    clock = description[description.index("clock-hook, the clock line"):]
+    clock = clock[:clock.index("(hooks/clock-hook, sessiontools.clockline)")]
+    assert "no warn line" in clock and "SESSION_CLOCK_WARN_AT is retired" in clock
 
 
 def test_the_shim_exists_is_executable_and_posix_sh():
@@ -550,19 +557,6 @@ def test_no_role_seat_or_crew_check_anywhere_in_the_source(source):
 
 
 # 10. The pure functions ------------------------------------------------------------
-
-@pytest.mark.parametrize(("raw", "size", "mark"), [
-    ("250k", None, (250_000, None)), ("250k", 1_000_000, (250_000, None)),
-    ("80%", 1_000_000, (800_000, 80.0)), ("80%", None, None), ("12.5%", 200_000, (25_000, 12.5)),
-    ("", 1_000_000, None), ("x", 1_000_000, None), ("101%", 1_000_000, None),
-])
-def test_warn_at(raw, size, mark):
-    assert clockline.warn_at({"SESSION_CLOCK_WARN_AT": raw}, size) == mark
-
-
-def test_warn_at_unset_is_none():
-    assert clockline.warn_at({}, 1_000_000) is None
-
 
 @pytest.mark.parametrize(("usage", "used"), [
     (None, None), (window.Usage(), None), (window.Usage(used=0, peak=5, usage_rows=2), None),

@@ -128,6 +128,10 @@ def node(name: str, parser: argparse.ArgumentParser) -> Node:
     positionals: list[Positional] = []
     stop_after = None
     for action in parser._actions:  # the same private read start.args makes
+        if action.option_strings and action.help is argparse.SUPPRESS:
+            # Hidden from --help (`session start --first-message-file`, the
+            # pane's re-entry path): never offered either.
+            continue
         if isinstance(action, argparse._SubParsersAction):
             subs.update((sub, node(sub, sp)) for sub, sp in action.choices.items())
         elif action.option_strings:

@@ -38,8 +38,7 @@ sidecar or a live claim. A session in the launcher's own tmux pane
 only when it is not the launcher's ancestor (a `respawn-pane -k`); a tmux
 placement, or a start nested in the holder's own shell, replaces nothing.
 A free agent is CLAIMED under its lock before the exec (`door_start`), so
-two near-simultaneous launches give one holder; on the tmux path the claim
-moves to the new pane's process after placement. A lock or a claim that
+two near-simultaneous launches give one holder. A lock or a claim that
 cannot be had warns once and launches with no claim.
 
 THE DEFAULT SEAT (`default_seat`). A bare `session start` - no
@@ -52,8 +51,15 @@ seat's sake. `session start -` is always plain (a `-` resume of a session
 born as the seat says it took nothing: `RESUMED`). A NAMED launch of the
 seat word meets the seat's check in place of the front door: a hand launch
 that meets a holder is refused (exit 3), `-n` starts plain, and a free seat
-is claimed even when a gate failed (`named_seat_start`). On the tmux path
-the claim moves to the new pane's process after placement.
+is claimed even when a gate failed (`named_seat_start`).
+
+THE TMUX PATH (`place`). A placement only READS the door or the
+seat's check (a held hand launch is refused at the caller, exit 3), asks
+the home-folder question, and opens a window that runs the entered line
+again, in place: the pane takes the claim, mints and records. The line as
+typed and its directory reach the pane's record through the window's
+environment (`pane.take_handoff`); bare first-message words reach it by a
+0600 file, never the pane's line.
 
 THE HOME-FOLDER OFFER (`homefolder`). At a terminal, a launch typed in
 the home folder on macOS is asked whether to start in `~/work` instead
@@ -61,15 +67,21 @@ the home folder on macOS is asked whether to start in `~/work` instead
 It comes after the front door, or after the seat's check and claim with
 the seat's lock let go (a question waits on a person), and before mint.
 
-Exit codes: 0 ok, 1 launch failed, 2 usage or a refusal, 3 the agent is
-already held (the front door, or the default seat's check for a named
-launch of its word), 130 Ctrl-C at the home-folder question.
+A REQUIRED CONTEXT GENERATOR that fails refuses the seat (ST-307): the
+refusal on stderr, `<session dir>/launch/refused` on a live launch, no
+vendor, exit 1. A dry run says the same and writes nothing.
+
+Exit codes: 0 ok, 1 launch failed (a required generator that failed
+among them), 2 usage or a refusal, 3 the agent is already held (the
+front door, or the default seat's check for a named launch of its
+word), 130 Ctrl-C at the home-folder question.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 from collections.abc import Callable, Mapping
 from typing import NamedTuple
@@ -85,16 +97,30 @@ from sessiontools.start.errors import (
     EXIT_OK,
     EXIT_USAGE,
     PROG,
+    ContextRefused,
     LaunchError,
 )
 from sessiontools.start.holders import enforce, front_door
 from sessiontools.start.homefolder import home_folder_notice, offer_work_folder
 from sessiontools.start.identity import SessionIdentity
+from sessiontools.start.pane import (
+    ENTERED_DIR_ENV,
+    ENTERED_ENV,
+    message_file_path,
+    message_text,
+    message_words,
+    new_token,
+    pane_argv,
+    pane_line,
+    take_handoff,
+    write_message_file,
+)
 from sessiontools.start.placement import (
     check_placeable,
     default_session,
+    environment_warnings,
     parse_tmux_target,
-    place_in_tmux,
+    place_pane,
     receipt,
     should_switch,
 )
@@ -107,11 +133,14 @@ from sessiontools.start.plan import (
     prepare,
     resolve,
 )
+from sessiontools.start.record import entered_dir
 from sessiontools.start.run import (
     check_terminal,
     default_window_name,
     execute,
+    record_refusal,
     render_dry_run_report,
+    render_refusal,
     report_generator_failures,
 )
 
@@ -131,6 +160,14 @@ def main(argv: list[str]) -> int:
         for name, mark in list_agent_rows():
             print(f"{name}\t{mark}" if mark else name)
         return EXIT_OK
+    # THE HAND-OFF: popped at entry by EVERY launch, so no vendor
+    # inherits it; used only when it derives this pane's own argv.
+    handed = take_handoff(os.environ, argv, args.first_message_file)
+    if handed is not None:
+        args.entered_argv, args.entered_dir = handed
+    # A pane the outer launcher already asked: no second question there.
+    offer = _no_offer if handed is not None else _offer
+    launch = minted = None
     try:
         in_tmux = bool(args.in_tmux or args.tmux_target)
         session, window = parse_tmux_target(args.tmux_target)
@@ -148,6 +185,13 @@ def main(argv: list[str]) -> int:
             # terminal there it cannot be interactive. Refused before the
             # seat's gates, claim and mint. A tmux pane has its own.
             check_terminal(args.rest, args.dry_run)
+        if in_tmux and not args.dry_run:
+            return place(args, argv, session, window, switch)
+        pane = None
+        if in_tmux:
+            # The dry run of a placement: the pane's line, then the in-place
+            # plan of that line (its words reach the vendor by a file).
+            pane, args = _dry_pane(args, argv)
         seat = door = None
         try:
             if args.agent is None or args.agent == default_seat.word():
@@ -157,15 +201,17 @@ def main(argv: list[str]) -> int:
                 # for it; a named one meets Q3's refusal (exit 3). The
                 # home-folder offer rides inside: after the check and the
                 # claim, with the seat's lock let go, before mint.
-                seat = (bare_start if args.agent is None else named_seat_start)(args, in_tmux)
+                seat = (bare_start if args.agent is None else named_seat_start)(
+                    args, in_tmux, offer=offer)
                 launch, minted, noticed = seat.launch, seat.minted, seat.noticed
             else:
                 launch = resolve(args)
                 # THE FRONT DOOR: after resolve (it names the agent),
                 # before mint - a refusal leaves nothing minted, written or placed.
                 # A free agent is claimed here, under its lock; the claim's
-                # SeatStart rides as `seat` so the tmux path re-points it.
-                door, seat = door_start(args, launch, in_tmux)
+                # SeatStart rides as `seat`. (A live placement never gets
+                # here: `place` takes no claim.)
+                door, seat = door_start(args, launch, in_tmux, offer=offer)
                 if args.agent == NO_AGENT:
                     _resumed(launch, in_tmux)
                 if seat is not None:
@@ -175,16 +221,20 @@ def main(argv: list[str]) -> int:
                     # launch is asked nothing), before mint (Ctrl-C at the
                     # question leaves nothing minted). Only at a terminal, in
                     # the home folder itself.
-                    launch, noticed = _offer(launch)
+                    launch, noticed = offer(launch)
                     minted = mint(launch)
         except _Interrupted:
             print(file=sys.stderr)
             return EXIT_INTERRUPTED
-        plan = assemble(launch, minted)
+        # The seat whose claim this launch wrote, if it wrote one: the
+        # identity block names it, as `session list` does.
+        plan = assemble(launch, minted,
+                        claimed=seat.seat if seat is not None and seat.claim else None)
         # The directory is final here (a resume's recorded cwd included):
         # one line before any of the three endings, the dry run too, unless
         # the offer already printed it.
-        notice = None if noticed else home_folder_notice(plan.work_dir, launch.environ)
+        notice = (None if noticed or handed is not None
+                  else home_folder_notice(plan.work_dir, launch.environ))
         if notice is not None:
             _warn(notice)
         if in_tmux:
@@ -196,16 +246,17 @@ def main(argv: list[str]) -> int:
             else:
                 holder = door.report_line(args.allow_second_holder) if door else None
             print(render_dry_run_report(plan, tmux=(session, window) if in_tmux else None,
-                                        switch=switch, holder=holder), end="")
-            return EXIT_OK
-        if in_tmux:
-            report_generator_failures(plan)
-            placed = place_in_tmux(plan, session, window, switch)
-            if seat is not None:
-                _repoint(seat, plan, placed)
-            print(receipt(plan, placed))
+                                        switch=switch, holder=holder, pane=pane), end="")
             return EXIT_OK
         execute(plan)
+    except ContextRefused as refused:
+        # A REQUIRED context generator failed (ST-307): `assemble` stopped
+        # there, so there is no plan, nothing on stdout, and no vendor. A
+        # live launch with a minted session dir records why, keyed or not;
+        # a dry run says the same and writes nothing. Exit 1 either way.
+        line = record_refusal(refused, minted, launch)
+        print(render_refusal(refused, line), end="", file=sys.stderr)
+        return refused.code
     except LaunchError as error:
         print(f"{PROG}: {error}", file=sys.stderr)
         return error.code
@@ -214,6 +265,90 @@ def main(argv: list[str]) -> int:
 
 def _warn(line: str) -> None:
     print(f"{PROG}: {line}", file=sys.stderr)
+
+
+def place(args: argparse.Namespace, argv: list[str], session: str, window: str,
+          switch: bool, environ: Mapping[str, str] | None = None,
+          warn: Callable[[str], None] = _warn) -> int:
+    """THE OUTER LAUNCHER of a tmux placement: the pane runs the
+    entered line again, in place, and that launch mints, claims and records.
+    Here, only what needs no act, then the window:
+
+    1. resolve (every agent-file refusal, exit 2, at the caller);
+    2. a READ of who holds the agent: the front door, or for the seat word
+       the seat's check; a hand launch that meets a holder is refused here
+       (exit 3). NO CLAIM (ruled, 3): a claim naming this launcher would
+       refuse its own pane, and the pane claims for itself. Two placements
+       racing past this read are accepted: the second pane refuses, and
+       its dead pane keeps the reason (`placement.REMAIN_ON_EXIT`);
+    3. the home-folder offer (a yes opens the window in the work folder);
+    4. the first-message file, when words were typed (ruling 7);
+    5. the window (`place_pane`), and the receipt.
+
+    First, one warning line per resolution variable the caller set to a
+    value tmux's environment does not hold (`environment_warnings`; review
+    F1): a placed pane resolves in tmux's environment. Never a refusal."""
+    environ = os.environ if environ is None else environ
+    if args.agent is None and args.keyed:
+        raise LaunchError(KEYED_NEEDS_AN_AGENT, code=EXIT_USAGE)
+    for line in environment_warnings(session, environ):
+        warn(line)
+    launch = resolve(args, environ=environ)
+    allowed = bool(args.allow_second_holder)
+    seat_word = default_seat.word()
+    if args.agent is not None and args.agent == seat_word:
+        if not holders.names_the_seat(launch.cli_args) and not allowed:
+            found = default_seat.check(seat_word, environ, direct=False)
+            if found.holder is not None:
+                raise LaunchError(default_seat.door_for(seat_word, found.holder).refusal(),
+                                  code=EXIT_HELD)
+    elif launch.agent.name and not holders.names_the_seat(launch.cli_args):
+        enforce(front_door(launch.agent.name, launch.cli_args, environ, direct=False),
+                allowed, warn=warn)
+    try:
+        offered, noticed = _offer(launch)
+    except _Interrupted:
+        print(file=sys.stderr)
+        return EXIT_INTERRUPTED
+    if not noticed:
+        notice = home_folder_notice(offered.work_dir, environ)
+        if notice is not None:
+            warn(notice)
+    typed_in = entered_dir(environ)
+    cwd = offered.work_dir if offered.work_dir != launch.work_dir else typed_in
+    window = window or default_window_name(launch.agent, launch.start.vendor)
+    token = new_token()
+    words = message_words(argv)
+    message_file = None
+    if words:
+        try:
+            message_file = write_message_file(message_text(words), token, environ)
+        except OSError as error:
+            raise LaunchError(f"the first-message file could not be written "
+                              f"({error.strerror or error})") from error
+    line = pane_line(pane_argv(argv, message_file))
+    placed = place_pane(line, cwd, session, window, token, switch,
+                        {ENTERED_ENV: pane_line(argv), ENTERED_DIR_ENV: typed_in},
+                        message_file=message_file, environ=environ)
+    print(receipt(launch.agent.name or launch.start.vendor, placed, environ))
+    return EXIT_OK
+
+
+#: What a dry run shows for a placement's message file: no token is drawn.
+DRY_RUN_TOKEN = "<token>"
+
+
+def _dry_pane(args: argparse.Namespace, argv: list[str]) -> tuple[str, argparse.Namespace]:
+    """A placement's dry run: the `pane:` line a live placement would run
+    (no `--dry-run`; its message file at the representative path), and the args to plan in place, as the pane will:
+    with words typed, the vendor gets them by a file (`-over 0`)."""
+    words = message_words(argv)
+    shown = message_file_path(DRY_RUN_TOKEN) if words else None
+    live = [token for token in pane_argv(argv, shown) if token != "--dry-run"]
+    line = f"(cd {shlex.quote(entered_dir(os.environ))}) {pane_line(live)}"
+    if words:
+        args = argparse.Namespace(**{**vars(args), "first_message_file_over": 0})
+    return line, args
 
 
 class _Interrupted(Exception):
@@ -234,14 +369,16 @@ def _offer(launch: Launch) -> tuple[Launch, bool]:
 class SeatStart(NamedTuple):
     """What a seat-word launch resolved to: the launch and its mint, the dry
     run's `seat:` line (None on a live launch), the claim this launch
-    WROTE, if any (the tmux path re-points it at the new pane), and whether
-    the home-folder offer already printed the notice."""
+    WROTE, if any, whether the home-folder offer already printed the
+    notice, and the seat that claim is for (the claim file's name: the
+    seat `session list` shows, and the identity block's Seat)."""
 
     launch: Launch
     minted: object
     line: str | None = None
     claim: dict | None = None
     noticed: bool = False
+    seat: str | None = None
 
 
 Offer = Callable[[Launch], tuple[Launch, bool]]
@@ -265,8 +402,8 @@ def bare_start(args: argparse.Namespace, in_tmux: bool,
     mint. A dry run takes no lock, writes no claim and asks nothing: it
     reads the same things and reports what a live launch would do. The
     claim names this pid: the direct path execs in place, so it is the
-    session's own; the tmux path re-points it at the pane after placement
-    (`main`)."""
+    session's own. A live placement never calls this (`place`):
+    its pane's own in-place launch does."""
     environ = os.environ if environ is None else environ
     if args.keyed:
         raise LaunchError(KEYED_NEEDS_AN_AGENT, code=EXIT_USAGE)
@@ -568,16 +705,15 @@ def _finish(seat: str, launch: Launch, fields: dict, session_id: str | None,
     launch, noticed = offer(launch)
     minted = mint(launch)
     claim = _record_id(seat, fields, minted, session_id, fields["pid"], environ, warn)
-    return SeatStart(launch, minted, None, claim, noticed)
+    return SeatStart(launch, minted, None, claim, noticed, seat)
 
 
 def _record_id(seat: str, fields: dict, minted, session_id: str | None, pid: int,
                environ: Mapping[str, str], warn: Callable[[str], None]) -> dict:
-    """Rewrite the claim with the minted id, when the mint made one here (a
-    pane mint's id is born in the pane, and an unkeyed resume keeps its
-    own). It runs after the claim's lock was let go (the home-folder
+    """Rewrite the claim with the minted id, when the mint made one here (an
+    unkeyed resume keeps its own). It runs after the claim's lock was let go (the home-folder
     question sits between them), so it takes the lock again and writes only
-    while the claim still names this launcher, as the tmux re-point does.
+    while the claim still names this launcher.
     Returns the claim as it stands."""
     if not isinstance(minted, SessionIdentity) or minted.session_id == session_id:
         return fields
@@ -624,26 +760,6 @@ def _resumed(launch: Launch, in_tmux: bool, warn: Callable[[str], None] = _warn)
         return
     found = default_seat.check(seat, launch.environ, direct=not in_tmux)
     warn(default_seat.resumed_line(seat, sid, found.holder))
-
-
-def _repoint(start: SeatStart, plan: LaunchPlan, placed,
-             warn: Callable[[str], None] = _warn) -> None:
-    """The tmux path: the claim moves from this launcher to the new pane,
-    for the agent the claim holds (the default seat, or a named agent the
-    front door claimed): the launch's own agent word."""
-    if start.claim is None:
-        return
-    agent = start.launch.agent.name
-    sid = plan.identity.session_id if plan.identity is not None else None
-    why = default_seat.repoint(agent, start.claim, placed.pane_pid, placed.pane_id, sid,
-                               start.launch.environ)
-    if not why:
-        return
-    if agent == default_seat.word():
-        warn(default_seat.repoint_failed_line(agent, why))
-    else:
-        warn(f"placed, but {agent}'s claim could not move to the new pane ({why}); "
-             f"{agent} reads free until that session writes its sidecar")
 
 
 __all__ = [

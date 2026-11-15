@@ -48,8 +48,8 @@ THE OTHER ROADS (`start.named_seat_start`, do-004). A NAMED launch of the
 word takes or respects the same claim: the named lines are
 `named_gate_line` and `named_unsure_line`, a refusal is the front door's
 own line built from the seat's holder (`door_for`), a `-` resume of a
-seat-born session says `resumed_line`, and the tmux path moves the claim
-to the new pane (`repoint`).
+seat-born session says `resumed_line`. A tmux placement takes no claim:
+its pane runs `session start` in place and claims for itself.
 """
 
 from __future__ import annotations
@@ -492,46 +492,3 @@ def born_as_seat(seat: str, session_id: str, environ: Mapping[str, str] | None =
     return agent == seat and not role_seat
 
 
-def repoint(seat: str, launcher_claim: Mapping, pane_pid: int | None, pane_id: str,
-            session_id: str | None, environ: Mapping[str, str] | None = None,
-            table: Callable[[], dict] | None = None) -> str | None:
-    """The tmux path: move the seat's claim from this launcher to the new
-    pane's process, under the seat's lock, but only while the claim still
-    names THIS launcher (its pid and procStart: nobody else could take the
-    seat while it lives). Returns None when done, else why not (B4: the
-    caller says so; the seat then reads free until the pane's session
-    writes its sidecar)."""
-    if not pane_pid or not pane_id:
-        return "tmux printed no pane pid or id for the new window"
-    with holders.locked(seat, environ, wait=SEAT_LOCK_WAIT_S) as lock:
-        if not lock.ok:
-            return lock.why
-        try:
-            claim = holders.read_claim(seat, environ)
-        except holders.ClaimUnreadable as error:
-            return str(error)
-        if not claim or (claim.get("pid"), claim.get("procStart")) != (
-                launcher_claim.get("pid"), launcher_claim.get("procStart")):
-            return "the claim no longer names this launcher"
-        try:
-            procs = (table or _procs.table)()
-        except Exception as error:   # noqa: BLE001 - say why, never raise past a placed pane
-            return f"the process table could not be read ({error})"
-        start = holders.proc_start_of(pane_pid, procs)
-        if start is None:
-            return f"the pane's pid {pane_pid} is not running"
-        fields = {**claim, "sessionId": session_id, "pid": pane_pid, "procStart": start,
-                  "pane": pane_id, "via": VIA_TMUX}
-        fields.pop("v", None)
-        fields.pop("agent", None)
-        try:
-            holders.write_claim(seat, fields, environ)
-        except OSError as error:
-            return f"the claim could not be written ({error.strerror or error})"
-    return None
-
-
-def repoint_failed_line(seat: str, why: str) -> str:
-    """B4: the re-point failed after the window opened."""
-    return (f"placed, but the default seat {seat}'s claim could not move to the new pane "
-            f"({why}); the seat reads free until that session writes its sidecar")

@@ -87,8 +87,12 @@ def line_count(text: str) -> int:
     return text.count("\n") + (1 if text and not text.endswith("\n") else 0)
 
 
-def read(path: Path) -> Transcript:
-    """Every raw item in the transcript at PATH, in transcript order."""
+def read(path: Path, sidechain: bool = False) -> Transcript:
+    """Every raw item in the transcript at PATH, in transcript order.
+
+    SIDECHAIN: read the `isSidechain: true` records INSTEAD of skipping
+    them. A subagent's own transcript holds nothing else, so this is how
+    `session commands` reads one (ST-320); the ledger never passes it."""
     uses: dict[str, dict] = {}
     raws: list[Raw] = []
     by_use: dict[str, Raw] = {}
@@ -101,7 +105,7 @@ def read(path: Path) -> Transcript:
                 rec = json.loads(line)
             except ValueError:
                 continue
-            if not isinstance(rec, dict) or rec.get("isSidechain") is True:
+            if not isinstance(rec, dict) or (rec.get("isSidechain") is True) != sidechain:
                 continue
             if not session and isinstance(rec.get("sessionId"), str):
                 session = rec["sessionId"]

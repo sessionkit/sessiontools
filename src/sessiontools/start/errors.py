@@ -1,4 +1,4 @@
-"""The launcher's exit codes and its two exceptions, shared by every module.
+"""The launcher's exit codes and its exceptions, shared by every module.
 
 Its own module so the rest can import it without a cycle: agents, the
 agent file, the gates and the plan all raise `LaunchError`, and `main`
@@ -30,6 +30,30 @@ class LaunchError(Exception):
     def __init__(self, message: str, code: int = EXIT_LAUNCH_FAILED) -> None:
         super().__init__(message)
         self.code = code
+
+
+class ContextRefused(LaunchError):
+    """A generator the agent file marked `required: true` failed (a non-zero
+    exit it did not declare informational, a timeout, or a built-in that
+    raised), so the seat is refused: no vendor starts. Exit 1, launch
+    failed - the environment failed at launch time, not the author.
+
+    result   the failing required `context.ContextResult`, its stdout (partial
+             on a timeout) and full stderr kept
+    door     "system-prompt" or "initial": the list it was declared in
+    position (index, count): 1-based place of the entry within that list;
+             every later entry, in either list, was not run
+    earlier  the non-required failed results that ran before it, in run order
+    """
+
+    def __init__(self, result: object, door: str, position: tuple[int, int],
+                 earlier: tuple = ()) -> None:
+        super().__init__(f"required context generator `{result.source}` "
+                         f"{result.error}", EXIT_LAUNCH_FAILED)
+        self.result = result
+        self.door = door
+        self.position = position
+        self.earlier = tuple(earlier)
 
 
 class AuthoringError(ValueError):

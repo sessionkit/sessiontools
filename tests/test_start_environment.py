@@ -11,10 +11,13 @@ import re
 import shutil
 import subprocess
 
+import pytest
 from start_support import ROOT, TIMEOUT_S
 
 from sessiontools.start import environment as e
+from sessiontools.start import secrets
 from sessiontools.start.agentfile import parse_agent_markdown
+from sessiontools.start.errors import AuthoringError
 
 BASH = shutil.which("bash") or "/bin/bash"
 ENV_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
@@ -121,6 +124,24 @@ def test_the_prelude_reads_only_what_the_agent_declared():
 def test_a_dry_run_names_secrets_and_resolves_none():
     assert e.declared_secrets({"DEMO_TOKEN": "pass:demo/token"}) == [
         e.DeclaredSecret("DEMO_TOKEN", "pass", "demo/token")]
+
+
+def test_the_authoring_names_agree_with_the_resolvers():
+    """The authoring error's "known backends" and the backends a launch
+    resolves through are one set: a name in one and not the other is a
+    secret the error offers and the launch refuses, or the reverse."""
+    assert set(e.SECRET_BACKENDS) == set(secrets.BACKENDS) == {"pass", "passage"}
+
+
+def test_a_malformed_reference_names_every_known_backend():
+    with pytest.raises(AuthoringError,
+                       match=r"known backends: pass, passage$"):
+        e.declared_secrets({"DEMO_TOKEN": "passage"})
+
+
+def test_a_dry_run_names_a_passage_secret_and_resolves_none():
+    assert e.declared_secrets({"GH": "passage:svc/github/pat"}) == [
+        e.DeclaredSecret("GH", "passage", "svc/github/pat")]
 
 
 def test_the_secret_prelude_sources_the_file_last_and_removes_it(tmp_path):

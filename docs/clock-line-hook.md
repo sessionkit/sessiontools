@@ -9,17 +9,15 @@ python starts.
 [clock] 12:34 UTC | ctx 182K/1.00M (18%)
 ```
 
-At or past a warn mark the session set, a second line follows:
-
-```text
-[clock] 12:34 UTC | ctx 262K/1.00M (26%)
-ctx past 250K: 262K of 1.00M used.
-```
+That one line is all it says. It has no warn line: a session hears one
+warning, [the settle alert][settle]'s.
 
 | variable | what it does |
 | --- | --- |
 | `SESSIONTOOLS_HOOK_CLOCK=on` | switches it on (also `1`, `true`, `yes`, any case). Anything else, unset included, is off. |
-| `SESSION_CLOCK_WARN_AT` | the warn mark: tokens (`250000`, `250k`, `1.5M`) or a percent of the window (`80%`, `12.5%`). Unset means no warn line. |
+
+`SESSION_CLOCK_WARN_AT` is retired. It used to add a second
+line at a mark; set or not, nothing reads it now.
 
 - **The clock** is the host's local time, `HH:MM` and the zone name, as
   `date '+%H:%M %Z'` prints it.
@@ -31,14 +29,7 @@ ctx past 250K: 262K of 1.00M used.
 - **It never guesses.** An unknown window renders `ctx 182K/?`. No
   transcript or no usage row renders `ctx ?`, and so does a transcript
   whose last row reads 0 after a real count (a synthetic tail, not a
-  reading). The clock is still said. `ctx ?` never warns; `ctx 182K/?`
-  warns only at a token mark (below).
-- **The warn line** is said at `used >= mark`: reaching the mark counts.
-  A percent mark names both figures, `ctx past 80% (800K): 812K of 1.00M
-  used.` With the window unknown, a token mark drops the `of`
-  (`ctx past 250K: 262K used.`) and a percent mark says nothing, since
-  it cannot be worked out. An empty, unparsable or zero mark means no
-  warn line.
+  reading). The clock is still said.
 - **There is no mail count.** Mail is not this hook's.
 - **The count is this batch's own**, as for the settle alert: the hook
   waits for the batch's own assistant row to reach the transcript, 1 s
@@ -60,16 +51,12 @@ both on each batch and shows each line. They share no state, and each
 has its own switch:
 
 - **The clock line is a gauge.** It is said on every batch once switched
-  on. Its warn line is a figure, "past X", and gives no instruction.
-- **The settle alert is an instruction**: settle, save, hand over. It is
-  said only past the session's own `SESSION_SETTLE_AT`
+  on. It is a figure and gives no instruction, and no warning.
+- **The settle alert is the one warning**: settle, save, hand over. It
+  is said only past the lines the session's settings set
   ([the settle alert][settle]).
-- **The warn mark does not fall back to `SESSION_SETTLE_AT`.** With both
-  on one value, the session would hear one crossing twice. Set
-  `SESSION_CLOCK_WARN_AT` below `SESSION_SETTLE_AT` for an early
-  warning, or leave it unset and let the settle alert speak at the mark.
 - With both on, each batch starts python twice and reads the transcript
-  twice. The settle alert runs only when a threshold is set.
+  twice. The settle alert runs only when a line is set.
 
 ## Speed
 
@@ -82,7 +69,6 @@ Apple Silicon Mac under heavy load.
 | --- | --- | --- | --- |
 | off (unset) | 9.3 ms | 5.3 ms | 45.1 ms |
 | on | 133.7 ms | 104.3 ms | 285.5 ms |
-| on, with the warn line | 144.4 ms | 106.5 ms | 347.6 ms |
 
 - Off is the shell alone: no python starts.
 - On, python's start and the imports took about 53 ms of that, and the

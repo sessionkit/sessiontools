@@ -873,11 +873,14 @@ def read_ids(sid: str, env: Mapping[str, str] | None = None) -> set[str]:
     return {m[0] for m in map(_mark, text.splitlines()) if m and m[1] == "read"}
 
 
-def _headers(path: Path) -> tuple[str, str]:
-    """(Message-ID, Supersedes) of the mail at PATH, bare. Reads the header
-    block only, never the body."""
+def _headers(path: Path) -> tuple[str, str, str]:
+    """(Message-ID, Supersedes, From) of the mail at PATH. The ids are
+    bare; From is its one addr-spec, lowercased, the display name dropped,
+    or empty when the mail names no address or more than one (in one From:
+    or across several). Reads the header block only, never the body."""
     from email.parser import BytesHeaderParser
     from email.policy import compat32
+    from email.utils import getaddresses
     lines = []
     size = 0
     with open(path, "rb") as fh:
@@ -890,7 +893,34 @@ def _headers(path: Path) -> tuple[str, str]:
 
     def bare(name: str) -> str:
         return " ".join(str(headers.get(name) or "").split()).strip("<>")
-    return bare("Message-ID"), bare("Supersedes")
+    addrs = [a.lower() for _name, a in getaddresses(
+        [str(v) for v in headers.get_all("From") or []]) if a]
+    return bare("Message-ID"), bare("Supersedes"), addrs[0] if len(addrs) == 1 else ""
+
+
+def _supersede(mail: list[tuple[Path, str, str, str]]) -> tuple[set[str], list[str]]:
+    """Which ids MAIL's `Supersedes:` headers hide, and the carriers refused,
+    by sessionmail's same-sender supersede rule: a carrier hides target
+    id X only when it has one From addr-spec and every file here with
+    Message-ID X has that same one (case-blind, display name ignored), so a
+    planted copy of X under another sender cannot vouch for it. A target
+    not in the box hides nothing and refuses nothing. A refused carrier is
+    named by its id, else its file. This stops the wrong sender, not a
+    forger: anyone who can write into the box can copy X's From."""
+    senders: dict[str, set[str]] = {}
+    for _p, mid, _sup, frm in mail:
+        if mid:
+            senders.setdefault(mid, set()).add(frm)
+    hidden: set[str] = set()
+    refused: list[str] = []
+    for p, mid, sup, frm in mail:
+        if not sup or sup not in senders:
+            continue
+        if frm and senders[sup] == {frm}:
+            hidden.add(sup)
+        else:
+            refused.append(f"<{mid}>" if mid else p.name)
+    return hidden, refused
 
 
 def check_mail(sid: str, env: Mapping[str, str] | None = None,
@@ -902,6 +932,13 @@ def check_mail(sid: str, env: Mapping[str, str] | None = None,
     with no Message-ID can never be marked read: it is unread, named by its
     file. SUBSCRIBE, the boxes the seat also hears, cannot be read here:
     any at all is UNKNOWN. Only ids are named, never a subject or a body.
+
+    One place this is stricter than `message list --unread`: a supersede
+    hides mail only from the target's own sender (`_supersede`, sessionmail's
+    same-sender rule), where `message list` hides any target a `Supersedes:`
+    names. A refused supersede leaves its target counted as usual, and the
+    carrier is named: after the unread ids on a FAIL, as UNKNOWN when
+    nothing is unread.
 
     The box is where sessionmail says it is (`message path SID`, under
     ENV; RUN replaces subprocess.run): no box is a PASS, nothing was ever
@@ -929,7 +966,7 @@ def check_mail(sid: str, env: Mapping[str, str] | None = None,
         except OSError as e:
             read, files = set(), []
             unknowns.append(f"session box or marks unreadable ({type(e).__name__})")
-        mail: list[tuple[Path, str, str]] = []
+        mail: list[tuple[Path, str, str, str]] = []
         for p in files:
             info = _INFO.search(p.name)
             if info and "D" in info.group(1):
@@ -938,16 +975,22 @@ def check_mail(sid: str, env: Mapping[str, str] | None = None,
                 mail.append((p, *_headers(p)))
             except (OSError, ValueError) as e:
                 unknowns.append(f"{p.name} unreadable ({type(e).__name__})")
-        superseded = {sup for _p, _mid, sup in mail if sup}
-        for p, mid, _sup in mail:
+        superseded, refused = _supersede(mail)
+        for p, mid, _sup, _frm in mail:
             if mid and mid in superseded:
                 continue
             if not mid:
                 unread.append(p.name)
             elif mid not in read:
                 unread.append(f"<{mid}>")
+        if refused:
+            plural = "s" if len(refused) > 1 else ""
+            unknowns.append(f"{len(refused)} refused supersede{plural}: {_count(refused)}")
         if unread:
-            verdict = Check("mail", FAIL, f"{len(unread)} unread: {_count(unread)}")
+            why = f"{len(unread)} unread: {_count(unread)}"
+            if refused:
+                why += f"; {unknowns[-1]}"
+            verdict = Check("mail", FAIL, why)
         elif unknowns:
             verdict = Check("mail", UNKNOWN, "; ".join(unknowns))
         else:

@@ -1,0 +1,58 @@
+#!/bin/sh
+# sed-guard - the plugin's PreToolUse entry for Bash (matcher Bash): run
+# sessiontools.sed_guard on the hook's JSON, from this plugin's own src/, to
+# refuse `sed -i ''` (BSD sed's form) when the sed the call runs is GNU.
+# Python prints Claude Code's PreToolUse refusal (JSON on stdout,
+# permissionDecision "deny"), exit 0; this shim passes stdout through. A
+# hook must never be the reason a turn breaks, so everything else is SILENT.
+#
+#   SESSIONTOOLS_HOOK_SED=off      exit 0 (or 0/false/no, any case; nothing
+#                                  is trimmed) - ON BY DEFAULT
+#   no `sed` in the payload        exit 0 - python never starts
+#   no '' or "" in the payload     exit 0 - python never starts (a "" pair
+#                                  arrives JSON-escaped, as \"\")
+#   no pick-python.sh beside it    exit 0
+#   no python at all               exit 0
+#   python older than 3.11         exit 0 (the -c guard below)
+#   python crashes, or anything    exit 0, stderr to /dev/null
+#
+# The fast path reads the payload with `read` and tests it with `case`:
+# builtins, no fork. The whole payload is tested, description and cwd
+# included, so the promise is: a payload with no `sed`, or no empty quote
+# pair, starts no python. Python then parses the command (sessiontools.
+# sed_guard) and refuses only a real `sed -i ''`.
+#
+# The python is the one the other hooks run: `pick`, from pick-python.sh
+# beside this file, sourced with `.` (no fork) and only after the fast
+# path. The payload goes to python by a heredoc (an expansion in a heredoc
+# is not re-read, so its backslashes stay as they are). No `exec python`:
+# the `|| exit 0` has to run after python returns. The shim's OWN stderr
+# goes to /dev/null too: when python is killed, sh itself reports it on
+# stderr, and a hook's stderr is shown.
+exec 2>/dev/null
+case "${SESSIONTOOLS_HOOK_SED:-}" in
+  [Oo][Ff][Ff] | 0 | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo]) exit 0 ;;
+esac
+p=
+nl='
+'
+while IFS= read -r l || [ -n "$l" ]; do
+  p=$p$l$nl
+done
+case "$p" in *sed*) ;; *) exit 0 ;; esac
+case "$p" in *"''"* | *'\"\"'*) ;; *) exit 0 ;; esac
+# This file's dir, by builtins (no `$(dirname)` fork). A bare `$0` is ".".
+case "$0" in */*) here=${0%/*} ;; *) here=. ;; esac
+[ -r "$here/pick-python.sh" ] || exit 0   # `.` of a missing file exits 1
+py=
+# shellcheck disable=SC1091 # linted on its own
+. "$here/pick-python.sh"
+pick || exit 0
+"$py" -I -c 'import sys
+if sys.version_info < (3, 11):
+    sys.exit(0)
+sys.path.insert(0, sys.argv[1])
+from sessiontools.sed_guard import main
+sys.exit(main())' "$here/../src" <<EOF || exit 0
+$p
+EOF

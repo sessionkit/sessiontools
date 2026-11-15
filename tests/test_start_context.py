@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
+import time
 
 import pytest
 from start_support import quiet
@@ -20,6 +22,7 @@ from sessiontools.start.agentfile import (
     switch_enabled,
 )
 from sessiontools.start.agents import Agent
+from sessiontools.start.errors import EXIT_LAUNCH_FAILED, ContextRefused, LaunchError
 from sessiontools.start.vendor import VENDORS
 
 
@@ -365,12 +368,13 @@ def test_claude_carries_the_agent_definition_in_a_plugin_dir(tmp_path):
     md.write_text("---\nname: scout\n---\nbody\n", encoding="utf-8")
     agent = Agent(name="scout", file=str(md), directory="", home="")
     argv, planned = c.agent_plugin_argv("claude", agent, directory=str(tmp_path))
-    assert argv == ["--plugin-dir", planned.path]
+    assert argv == ["--plugin-dir", planned.path, "--add-dir", planned.path]
     root = c.materialize(planned)
-    carried = os.path.join(root, "agents", "scout.md")
-    with open(carried, encoding="utf-8") as handle:
-        assert handle.read() == md.read_text(encoding="utf-8")
-    assert not os.path.islink(carried)
+    for carried in (os.path.join(root, "agents", "scout.md"),
+                    os.path.join(root, ".claude", "agents", "scout.md")):
+        with open(carried, encoding="utf-8") as handle:
+            assert handle.read() == md.read_text(encoding="utf-8")
+        assert os.path.isfile(carried) and not os.path.islink(carried)
     with open(os.path.join(root, ".claude-plugin", "plugin.json")) as handle:
         assert json.load(handle)["name"] == "session-agent-scout"
     assert stat.S_IMODE(os.stat(root).st_mode) == 0o700
@@ -389,13 +393,189 @@ def test_a_dry_run_names_the_plugin_dir_and_creates_nothing(tmp_path):
     agent = Agent(name="scout", file=str(md), directory="", home="")
     argv, planned = c.agent_plugin_argv("claude", agent, directory=str(tmp_path),
                                         dry_run=True)
-    assert argv == ["--plugin-dir", os.path.join(str(tmp_path), "agent-plugin")]
+    named = os.path.join(str(tmp_path), "agent-plugin")
+    assert argv == ["--plugin-dir", named, "--add-dir", named]
     assert planned is None and list(tmp_path.iterdir()) == [md]
+
+
+def test_the_add_dir_names_the_carrier_dir_only(tmp_path):
+    """The add-dir grants file access: the carrier dir, never the launch dir
+    the prompt and first-message files sit in."""
+    md = tmp_path / "scout.md"
+    md.write_text("---\nname: scout\n---\n", encoding="utf-8")
+    agent = Agent(name="scout", file=str(md), directory="", home="")
+    argv, planned = c.agent_plugin_argv("claude", agent, directory=str(tmp_path))
+    added = argv[argv.index("--add-dir") + 1]
+    assert added == planned.path != str(tmp_path)
+    assert os.path.basename(added).startswith(c.PLUGIN_PREFIX)
+    root = c.materialize(planned)
+    assert sorted(os.listdir(root)) == [".claude", ".claude-plugin", "agents"]
+    assert os.listdir(os.path.join(root, ".claude")) == ["agents"]
+    c.discard(planned)
+
+
+def test_a_vendor_without_an_add_dir_flag_gets_the_plugin_half_alone(tmp_path, monkeypatch):
+    monkeypatch.setitem(VENDORS["claude"], "agent_add_dir_arg", None)
+    md = tmp_path / "scout.md"
+    md.write_text("---\nname: scout\n---\n", encoding="utf-8")
+    agent = Agent(name="scout", file=str(md), directory="", home="")
+    argv, _ = c.agent_plugin_argv("claude", agent, directory=str(tmp_path), dry_run=True)
+    assert argv == ["--plugin-dir", os.path.join(str(tmp_path), "agent-plugin")]
+
+
+def test_a_failed_carrier_write_leaves_nothing_behind(tmp_path):
+    agent = Agent(name="scout", file=str(tmp_path / "gone.md"), directory="", home="")
+    _argv, planned = c.agent_plugin_argv("claude", agent, directory=str(tmp_path))
+    with pytest.raises(FileNotFoundError):
+        c.materialize(planned)
+    assert not os.path.exists(planned.path)
+
+
+# ---------- the add-dir copy drops what only an add-dir agent honours ---------
+
+def _carry(tmp_path, source: bytes) -> tuple[bytes, bytes]:
+    """(plugin copy, add-dir copy) of an agent file holding `source`."""
+    md = tmp_path / "scout.md"
+    md.write_bytes(source)
+    agent = Agent(name="scout", file=str(md), directory="", home="")
+    _argv, planned = c.agent_plugin_argv("claude", agent, directory=str(tmp_path))
+    root = c.materialize(planned)
+    try:
+        with open(os.path.join(root, "agents", "scout.md"), "rb") as handle:
+            plugin = handle.read()
+        with open(os.path.join(root, ".claude", "agents", "scout.md"), "rb") as handle:
+            add_dir = handle.read()
+    finally:
+        c.discard(planned)
+    return plugin, add_dir
+
+
+def test_the_dropped_keys_are_the_three_only_an_add_dir_agent_honours():
+    assert c.ADD_DIR_DROPPED_KEYS == ("hooks", "mcpServers", "permissionMode")
+
+
+@pytest.mark.parametrize("line", [
+    b"permissionMode: bypassPermissions\n",
+    b"mcpServers: {voice: {command: speak}}\n",
+    b"hooks: {}\n",
+])
+def test_each_key_is_left_out_of_the_add_dir_copy_alone(tmp_path, line):
+    source = b"---\nname: scout\n" + line + b"model: haiku\n---\nbody\n"
+    plugin, add_dir = _carry(tmp_path, source)
+    assert add_dir == b"---\nname: scout\nmodel: haiku\n---\nbody\n"
+    assert plugin == source
+
+
+def test_all_three_go_and_everything_else_stays_byte_for_byte(tmp_path):
+    source = (b"---\n"
+              b"# the scout\n"
+              b"name: scout\n"
+              b"permissionMode: acceptEdits\n"
+              b"description: looks around   # trailing comment\n"
+              b"hooks:\n"
+              b"  Stop:\n"
+              b"    - hooks:\n"
+              b"        - type: command\n"
+              b"          command: echo done\n"
+              b"\n"
+              b"tools: Read, Grep\n"
+              b"mcpServers:\n"
+              b"  voice:\n"
+              b"    command: speak\n"
+              b"    args: [--quiet]\n"
+              b"model: haiku\n"
+              b"---\n"
+              b"\n"
+              b"The body.\n")
+    plugin, add_dir = _carry(tmp_path, source)
+    assert add_dir == (b"---\n"
+                       b"# the scout\n"
+                       b"name: scout\n"
+                       b"description: looks around   # trailing comment\n"
+                       b"\n"
+                       b"tools: Read, Grep\n"
+                       b"model: haiku\n"
+                       b"---\n"
+                       b"\n"
+                       b"The body.\n")
+    assert plugin == source
+
+
+def test_a_nested_hooks_block_goes_whole_even_across_a_blank_line(tmp_path):
+    source = (b"---\nname: scout\nhooks:\n  Stop:\n\n# inside\n"
+              b"    - command: x\n  PreToolUse: []\nmodel: haiku\n---\n")
+    _plugin, add_dir = _carry(tmp_path, source)
+    assert add_dir == b"---\nname: scout\nmodel: haiku\n---\n"
+
+
+def test_a_block_sequence_at_column_zero_goes_with_its_key(tmp_path):
+    source = b"---\nname: scout\nmcpServers:\n- voice\n- search\nmodel: haiku\n---\n"
+    _plugin, add_dir = _carry(tmp_path, source)
+    assert add_dir == b"---\nname: scout\nmodel: haiku\n---\n"
+
+
+def test_a_dropped_key_at_the_end_keeps_the_blank_line_before_the_fence(tmp_path):
+    source = b"---\nname: scout\npermissionMode: default\n\n---\nbody"
+    _plugin, add_dir = _carry(tmp_path, source)
+    assert add_dir == b"---\nname: scout\n\n---\nbody"
+
+
+def test_crlf_line_endings_and_a_missing_final_newline_survive(tmp_path):
+    source = b"---\r\nname: scout\r\nhooks:\r\n  Stop: []\r\nmodel: haiku\r\n---\r\nbody"
+    _plugin, add_dir = _carry(tmp_path, source)
+    assert add_dir == b"---\r\nname: scout\r\nmodel: haiku\r\n---\r\nbody"
+
+
+def test_a_quoted_key_is_still_the_key(tmp_path):
+    source = b"---\nname: scout\n\"permissionMode\": bypassPermissions\n---\n"
+    _plugin, add_dir = _carry(tmp_path, source)
+    assert add_dir == b"---\nname: scout\n---\n"
+
+
+def test_a_dot_dot_dot_closing_fence_is_honoured(tmp_path):
+    source = b"---\nname: scout\nhooks: {}\n...\npermissionMode: x\n"
+    _plugin, add_dir = _carry(tmp_path, source)
+    assert add_dir == b"---\nname: scout\n...\npermissionMode: x\n"
+
+
+@pytest.mark.parametrize("source", [
+    b"no front matter at all\npermissionMode: bypassPermissions\n",
+    b"---\nname: scout\nmodel: haiku\n---\nbody\n",
+    b"---\nname: scout\nhooksExtra: 1\nmcpServersOld: {}\npermissionModes: [a]\n---\n",
+    b"---\nname: scout\n  hooks: indented under nothing\n---\n",
+    b"---\nname: scout\n# hooks: a comment\n---\n",
+    b"---\nname: scout\n---\npermissionMode: bypassPermissions\nhooks:\n  Stop: []\n",
+    b"---\nname: scout\npermissionMode: bypassPermissions\n",
+    b"",
+])
+def test_a_file_with_none_of_the_keys_in_its_front_matter_is_copied_byte_for_byte(
+        tmp_path, source):
+    plugin, add_dir = _carry(tmp_path, source)
+    assert plugin == source
+    assert add_dir == source
+
+
+def test_bytes_that_are_not_utf8_pass_through_untouched(tmp_path):
+    source = b"---\nname: scout\ndescription: caf\xe9\nhooks: {}\n---\nbody \xff\n"
+    _plugin, add_dir = _carry(tmp_path, source)
+    assert add_dir == b"---\nname: scout\ndescription: caf\xe9\n---\nbody \xff\n"
+
+
+def test_the_filtered_copy_still_parses_to_the_same_other_keys(tmp_path):
+    source = (b"---\nname: scout\nhooks:\n  Stop:\n    - command: x\n"
+              b"permissionMode: bypassPermissions\nmodel: haiku\n---\nbody\n")
+    _plugin, add_dir = _carry(tmp_path, source)
+    before, body = parse_agent_markdown(source.decode())
+    after, body_after = parse_agent_markdown(add_dir.decode())
+    for key in c.ADD_DIR_DROPPED_KEYS:
+        before.pop(key, None)
+    assert after == before and body_after == body
 
 
 def test_every_vendor_declares_its_doors_explicitly():
     for vendor, table in VENDORS.items():
-        for field in ("agent_plugin_dir_arg", "system_prompt_door", "system_prompt_file_door"):
+        for field in ("agent_plugin_dir_arg", "agent_add_dir_arg", "system_prompt_door",
+                      "system_prompt_file_door"):
             assert field in table, (vendor, field)
             assert table[field] is None or isinstance(table[field], str)
 
@@ -510,3 +690,300 @@ def test_the_sm706_shape_end_to_end_from_the_agent_file():
         f"CONTEXT GENERATOR NOTE: `{source}` exited 3. {NOTE_TAIL}\n"
         "not yet - not deaf\n")
     assert [r.ok for r in injected.results] == [True, True]
+
+
+# ---------- a REQUIRED entry that fails stops the run (ST-307) ----------------
+
+def required(command, codes=()):
+    return c.ContextEntry(command, frozenset(codes), True)
+
+
+def test_a_failing_required_entry_stops_the_run_and_keeps_its_streams(tmp_path):
+    entries = ["printf 'one\\n'",
+               required("printf 'wake half\\n'; printf 'a\\nwhy it broke\\n' >&2; exit 1"),
+               "touch later-ran"]
+    results = c.run_context_entries(entries, cwd=str(tmp_path), announce=quiet)
+    assert len(results) == 2
+    assert not (tmp_path / "later-ran").exists()
+    failed = results[-1]
+    assert failed.required and not failed.ok
+    assert failed.output == "wake half\n"
+    assert failed.stderr == "a\nwhy it broke\n"
+    assert failed.error == "exited 1 -- why it broke"
+    assert c.stopped_on_required(results)
+
+
+def test_a_required_entry_that_succeeds_does_not_stop(tmp_path):
+    entries = [required("printf 'fine\\n'"), "touch later-ran"]
+    results = c.run_context_entries(entries, cwd=str(tmp_path), announce=quiet)
+    assert [r.ok for r in results] == [True, True]
+    assert results[0].required and not results[1].required
+    assert (tmp_path / "later-ran").exists()
+    assert not c.stopped_on_required(results)
+
+
+def test_a_failing_unmarked_entry_does_not_stop(tmp_path):
+    results = c.run_context_entries(["exit 1", "touch later-ran"], cwd=str(tmp_path),
+                                    announce=quiet)
+    assert [r.ok for r in results] == [False, True]
+    assert (tmp_path / "later-ran").exists()
+
+
+def test_a_required_entrys_declared_informational_exit_does_not_stop(tmp_path):
+    entries = [required(SM706, {3}), "touch later-ran"]
+    results = c.run_context_entries(entries, cwd=str(tmp_path), announce=quiet)
+    assert results[0].ok and results[0].note is not None
+    assert (tmp_path / "later-ran").exists()
+
+
+def test_a_required_builtin_that_raises_stops_the_run(tmp_path):
+    def explode():
+        raise RuntimeError("no clock")
+    results = c.run_context_entries([required("launch-info"), "touch later-ran"],
+                                    cwd=str(tmp_path), announce=quiet,
+                                    builtins={"launch-info": explode})
+    assert len(results) == 1 and not results[0].ok and results[0].required
+    assert "no clock" in results[0].error
+    assert not (tmp_path / "later-ran").exists()
+
+
+def test_a_required_system_prompt_failure_refuses_and_runs_no_initial_entry(tmp_path):
+    start = parse_start({"context": {
+        "system-prompt": ["printf 'x\\n' >&2; exit 2",
+                          {"run": "printf 'wake\\n'; exit 1", "required": True},
+                          "touch later-sp"],
+        "initial": ["touch later-initial"]}})
+    with pytest.raises(ContextRefused) as excinfo:
+        build(start, cwd=str(tmp_path))
+    refused = excinfo.value
+    assert isinstance(refused, LaunchError) and refused.code == EXIT_LAUNCH_FAILED == 1
+    assert refused.door == "system-prompt"
+    assert refused.position == (2, 3)
+    assert refused.result.source == "printf 'wake\\n'; exit 1"
+    assert refused.result.output == "wake\n"
+    assert [r.source for r in refused.earlier] == ["printf 'x\\n' >&2; exit 2"]
+    assert str(refused) == "required context generator `printf 'wake\\n'; exit 1` exited 1"
+    assert not (tmp_path / "later-sp").exists()
+    assert not (tmp_path / "later-initial").exists()
+
+
+def test_a_required_initial_failure_refuses_naming_the_initial_door(tmp_path):
+    """design-001 review F3: the marking works through the other door too."""
+    start = parse_start({"context": {
+        "system-prompt": ["printf 'ok\\n'", "exit 4"],
+        "initial": ["exit 5",
+                    {"run": "printf 'brief\\n' >&2; exit 1", "required": True},
+                    "touch later-initial"]}})
+    with pytest.raises(ContextRefused) as excinfo:
+        build(start, cwd=str(tmp_path))
+    refused = excinfo.value
+    assert refused.door == "initial"
+    assert refused.position == (2, 3)
+    assert refused.result.stderr == "brief\n"
+    assert [r.source for r in refused.earlier] == ["exit 4", "exit 5"]
+    assert not (tmp_path / "later-initial").exists()
+
+
+def test_idle_runs_nothing_so_a_required_entry_cannot_refuse_it():
+    start = parse_start({"context": {"system-prompt": [
+        {"run": "exit 1", "required": True}]}})
+    assert build(start, idle=True).results == []
+
+
+def test_a_launch_with_a_passing_required_entry_builds_as_usual():
+    start = parse_start({"context": {"system-prompt": [
+        {"run": "printf 'wake\\n'", "required": True}]}})
+    assert build(start).system_prompt == "<!-- source: printf 'wake\\n' -->\nwake\n"
+
+
+# ---------- a timeout: partial output, kept only when required (ST-307) --------
+
+def test_a_required_timeout_keeps_its_partial_stdout_and_stderr():
+    result = run(required("printf 'partial\\n'; printf 'err so far\\n' >&2; sleep 30"),
+                 timeout=1)
+    assert not result.ok and result.error == "timed out after 1s"
+    assert result.output == "partial\n"
+    assert result.stderr == "err so far\n"
+
+
+def test_a_required_timeout_keeps_output_with_no_final_newline():
+    result = run(required("printf 'no newline'; exec sleep 30"), timeout=1)
+    assert result.output == "no newline"
+
+
+def test_a_required_timeout_that_wrote_nothing_has_empty_output():
+    result = run(required("sleep 30"), timeout=1)
+    assert result.output == "" and result.stderr == ""
+    assert not result.ok
+
+
+def test_a_required_timeout_stops_the_run(tmp_path):
+    results = c.run_context_entries([required("sleep 30"), "touch later-ran"],
+                                    cwd=str(tmp_path), announce=quiet, timeout=1)
+    assert len(results) == 1 and "timed out" in results[0].error
+    assert not (tmp_path / "later-ran").exists()
+
+
+def test_a_grandchild_holding_the_pipe_does_not_hang_the_timeout():
+    began = time.monotonic()
+    result = run(required("printf 'partial\\n'; (sleep 5; echo late) & sleep 5"),
+                 timeout=1)
+    assert time.monotonic() - began < 4
+    assert result.output == "partial\n" and "timed out" in result.error
+
+
+def test_an_unmarked_timeout_keeps_no_output_as_today():
+    result = run("printf 'partial\\n'; sleep 30", timeout=1)
+    assert result.output == "" and not result.required
+
+
+def test_an_unmarked_timeouts_failed_block_is_pinned_byte_for_byte():
+    """design §6: any later change to the timeout branch shows as a diff here.
+    Unmarked and `required: false` render the same, partial output dropped."""
+    command = "printf 'partial\\n'; sleep 30"
+    expected = (
+        f"<!-- source: {command} -->\n"
+        f"CONTEXT GENERATOR FAILED: `{command}` timed out after 1s. This section "
+        "is missing or incomplete -- do not read its absence as an empty "
+        "result.\n")
+    assert c.render_context([run(command, timeout=1)]) == expected
+    assert c.render_context([run(c.ContextEntry(command, frozenset(), False),
+                                 timeout=1)]) == expected
+
+
+def test_render_ignores_the_new_fields():
+    plain = c.ContextResult("x", "out\n", "exited 1")
+    marked = c.ContextResult("x", "out\n", "exited 1", required=True, stderr="why\n")
+    assert c.render_context([plain]) == c.render_context([marked])
+
+
+def test_an_unmarked_file_runs_to_the_same_injected_context_as_required_false():
+    """The opt-in proof at run level: failing and timing-out entries, unmarked
+    vs `required: false` on each, give identical injected text."""
+    commands = ["printf 'a\\n'", "printf 'b\\n'; exit 3", "printf 'c\\n'; sleep 30"]
+    unmarked = parse_start({"context": {"system-prompt": commands,
+                                        "initial": commands}})
+    marked_false = parse_start({"context": {
+        "system-prompt": [{"run": x, "required": False} for x in commands],
+        "initial": [{"run": x, "required": False} for x in commands]}})
+    assert unmarked == marked_false
+    one, two = build(unmarked, timeout=1), build(marked_false, timeout=1)
+    assert (one.system_prompt, one.initial) == (two.system_prompt, two.initial)
+    assert [r.ok for r in one.results] == [True, False, False] * 2
+
+
+# ---------- a timeout kills the whole process group (ST-317) -------------------
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # it exists, owned by someone else
+        return True
+    return True
+
+
+def _gone_within(pid: int, seconds: float) -> bool:
+    """Poll briefly: a killed sleeper is reparented to init, which reaps it
+    a moment later; until then `kill(pid, 0)` still finds the zombie."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _alive(pid):
+            return True
+        time.sleep(0.05)
+    return not _alive(pid)
+
+
+@pytest.mark.parametrize("make", [lambda cmd: cmd, required],
+                         ids=["unmarked", "required"])
+def test_a_timed_out_generators_grandchildren_are_killed_with_it(tmp_path, make):
+    """The shell is the direct child; the sleeper it forks is a grandchild.
+    Killing only the shell left the sleeper running (ST-317): the command
+    runs in its own process group, and a timeout kills the GROUP."""
+    pidfile = tmp_path / "sleeper.pid"
+    command = f"sleep 300 & echo $! > {pidfile}; printf 'partial\\n'; wait"
+    pid = None
+    try:
+        result = run(make(command), timeout=1)
+        pid = int(pidfile.read_text().strip())
+        assert result.error == "timed out after 1s"
+        assert _gone_within(pid, 5), f"sleeper pid {pid} outlived the timeout"
+    finally:
+        if pid is None and pidfile.exists():
+            pid = int(pidfile.read_text().strip())
+        if pid is not None and _alive(pid):
+            os.kill(pid, 9)  # by its exact pid: the test never leaks it
+
+
+@pytest.fixture
+def launcher_stdin_with_data():
+    """fd 0 of THIS process is a pipe holding a line, for the length of the
+    test. pytest's own capture leaves /dev/null on fd 0, which would make a
+    stdin test pass with or without the fix; a planted pipe tells them apart."""
+    read_end, write_end = os.pipe()
+    os.write(write_end, b"leaked from the launcher\n")
+    os.close(write_end)
+    saved = os.dup(0)
+    os.dup2(read_end, 0)
+    os.close(read_end)
+    try:
+        yield
+    finally:
+        os.dup2(saved, 0)
+        os.close(saved)
+
+
+def test_a_generators_stdin_is_dev_null_not_the_launchers(launcher_stdin_with_data):
+    """A generator in its own session inherited the launcher's stdin; with a
+    pty slave there, the launcher's own later stdout write failed EIO (exit
+    120, ST-317 fix-002). Its stdin is /dev/null, so it holds no terminal."""
+    probe = ("import os; s = os.fstat(0); n = os.stat(os.devnull); "
+             "print((s.st_dev, s.st_ino, s.st_rdev) == (n.st_dev, n.st_ino, n.st_rdev))")
+    result = run(f"{sys.executable} -c \"{probe}\"", timeout=10)
+    assert result.ok and result.output.strip() == "True"
+
+
+def test_a_generator_that_reads_stdin_sees_eof_not_the_launchers_input(
+        launcher_stdin_with_data):
+    result = run("cat; printf 'after\\n'", timeout=10)
+    assert result.ok and result.output == "after\n"
+
+
+def test_a_required_timeout_still_keeps_its_partial_output_after_a_group_kill(tmp_path):
+    pidfile = tmp_path / "sleeper.pid"
+    command = (f"sleep 300 & echo $! > {pidfile}; printf 'partial\\n'; "
+               "printf 'err so far\\n' >&2; wait")
+    try:
+        result = run(required(command), timeout=1)
+        assert result.output == "partial\n" and result.stderr == "err so far\n"
+    finally:
+        if pidfile.exists():
+            pid = int(pidfile.read_text().strip())
+            if _alive(pid):
+                os.kill(pid, 9)
+
+
+def test_a_pipe_held_outside_the_group_does_not_hang_the_drain(tmp_path):
+    """A process that left the group (its own setsid) survives the group
+    kill and still holds stdout: the post-kill drain is bounded, and what
+    was written before the timeout is kept."""
+    pidfile = tmp_path / "escaper.pid"
+    escaper = (f"import os, time; os.setsid(); open({str(pidfile)!r}, 'w')"
+               f".write(str(os.getpid())); time.sleep(30)")
+    command = (f"printf 'partial\\n'; {sys.executable} -c \"{escaper}\" & "
+               "sleep 30")
+    began = time.monotonic()
+    try:
+        result = run(required(command), timeout=1)
+        took = time.monotonic() - began
+        assert took < 1 + c.DRAIN_AFTER_KILL_S + 2
+        assert result.output == "partial\n" and result.error == "timed out after 1s"
+    finally:
+        deadline = time.monotonic() + 5
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if pidfile.exists() and pidfile.read_text().strip():
+            pid = int(pidfile.read_text().strip())
+            if _alive(pid):
+                os.kill(pid, 9)

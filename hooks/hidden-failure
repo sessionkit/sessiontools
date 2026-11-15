@@ -1,0 +1,72 @@
+#!/bin/sh
+# hidden-failure - the plugin's PreToolUse (verb pre) and PostToolUse (verb
+# post) Bash hook: run sessiontools/hidden_failure.py on the hook's JSON,
+# from this plugin's own src/, and stay SILENT whatever goes wrong. A hook
+# must never be the reason a turn breaks. It ADVISES only: one line of
+# additionalContext, never a decision, never a rewrite.
+#
+#   no TASKMASTER_ROLE and no CLAUDE_CODE_AGENT   exit 0 - SEATS ONLY; no python
+#   SESSIONTOOLS_HOOK_HIDDEN_FAILURE off/0/false/no   exit 0 (any case); no python
+#   a verb other than pre or post               exit 0
+#   a payload with no `|`, no gate word, no head (pre) / head or tail
+#     (post), or (post) no failure-marker word    exit 0; no python
+#   no pick-python.sh beside it                 exit 0
+#   no python at all                            exit 0
+#   python older than 3.11                      exit 0 (the -c guard below)
+#   python crashes, or anything                 exit 0, stderr to /dev/null
+#
+# The payload is read once, with `cat`, and tested by `case`: a superset
+# test on the raw text (correctness is python's), so most Bash calls, and
+# a green gate | tail, cost one small fork and no python. The words must
+# stay a superset of the module's GATES and FAIL_MARKERS: the hook tests
+# run every gate and every marker through this shim. The payload reaches
+# python through a here-document, whose expansion is never evaluated
+# again: a `$( )` in it stays text.
+#
+# The module is loaded by FILE path, never `import sessiontools`: the
+# package's __init__ costs ~40 ms of imports, and the budget is 50 ms.
+#
+# The python is the one the other hooks run: `pick`, from pick-python.sh
+# beside this file, sourced with `.` (no fork). No `exec python`: the
+# `|| exit 0` has to run after python returns. The shim's OWN stderr goes to
+# /dev/null too: when python is killed, sh itself reports it on stderr.
+exec 2>/dev/null
+[ -n "${TASKMASTER_ROLE:-}" ] || [ -n "${CLAUDE_CODE_AGENT:-}" ] || exit 0
+case "${SESSIONTOOLS_HOOK_HIDDEN_FAILURE:-}" in
+  [Oo][Ff][Ff] | 0 | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo]) exit 0 ;;
+esac
+verb=${1:-}
+case "$verb" in pre | post) ;; *) exit 0 ;; esac
+payload=$(cat) || exit 0
+case "$payload" in *'|'*) ;; *) exit 0 ;; esac
+case "$payload" in *pytest* | *make* | *message* | *git*) ;; *) exit 0 ;; esac
+case "$verb:$payload" in
+  pre:*head*) ;;
+  post:*head* | post:*tail*) ;;
+  *) exit 0 ;;
+esac
+# post: a word every FAIL_MARKERS pattern needs, so a green run starts no python
+case "$verb:$payload" in
+  pre:*) ;;
+  *failed* | *FAILED* | *error* | *ERROR* | *Error* | *'***'* | *Traceback* | *fatal*) ;;
+  *'not found'* | *'No such file'* | *'Permission denied'*) ;;
+  *'nothing to commit'* | *'no changes added'*) ;;
+  *) exit 0 ;;
+esac
+# This file's dir, by builtins (no `$(dirname)` fork). A bare `$0` is ".".
+case "$0" in */*) here=${0%/*} ;; *) here=. ;; esac
+[ -r "$here/pick-python.sh" ] || exit 0   # `.` of a missing file exits 1
+py=
+# shellcheck disable=SC1091 # linted on its own
+. "$here/pick-python.sh"
+pick || exit 0
+"$py" -I -c 'import sys
+if sys.version_info < (3, 11):
+    sys.exit(0)
+import importlib.util as u
+spec = u.spec_from_file_location("sessiontools_hidden_failure", sys.argv[1])
+mod = u.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.main(sys.argv[2]))' "$here/../src/sessiontools/hidden_failure.py" "$verb" <<EOF || exit 0
+$payload
+EOF

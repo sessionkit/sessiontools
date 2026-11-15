@@ -248,6 +248,31 @@ def test_no_agent_says_claude_and_an_agent_is_bracketed(base):
     assert got.stdout.decode().startswith("[scout] ")
 
 
+def test_the_launchers_carrier_scope_is_stripped_from_the_agent_name(base):
+    """`session start` carries the agent in a plugin named session-agent-<name>,
+    and the vendor reports a plugin agent as <plugin>:<name>: the seat reads
+    by its plain name. Only that scope goes; another plugin's stays."""
+    _root, env = base
+    cases = {
+        "session-agent-scout:scout": "[scout] ",
+        "scout": "[scout] ",
+        "session-agent-a-b:a-b": "[a-b] ",
+        "other-plugin:scout": "[other-plugin:scout] ",
+        "x-session-agent-scout:scout": "[x-session-agent-scout:scout] ",
+    }
+    for name, lead in cases.items():
+        got = render(json.dumps({"agent": {"name": name}}), env)
+        assert got.returncode == 0 and got.stderr == b"", name
+        assert got.stdout.decode().startswith(lead), (name, got.stdout)
+
+
+def test_an_agent_name_that_is_not_a_string_still_renders(base):
+    _root, env = base
+    got = render(json.dumps({"agent": {"name": 7}}), env)
+    assert got.returncode == 0 and got.stderr == b""
+    assert got.stdout.decode().startswith("[7] ")
+
+
 # --- the repo segment (A4: builtins, no git fork) ----------------------------
 
 def test_cwd_missing_or_not_a_directory_has_no_repo_segment(base):

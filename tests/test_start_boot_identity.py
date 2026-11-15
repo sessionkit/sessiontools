@@ -193,40 +193,6 @@ def test_a_holder_with_no_id_yet_is_named_by_pid():
 
 # ---------- the tmux path: the claim moves from the launcher to the pane ----------
 
-def test_the_writer_waits_for_the_launcher_to_repoint_the_claim(env):
-    """The launcher (alive: this test's pid) still holds the claim when the
-    pane's writer runs; it moves to the pane, and the writer says yes."""
-    word = default_seat.word()
-    launcher = os.getpid()
-    claim(env, word, launcher)
-    sleeps = []
-
-    def sleep(_s):
-        sleeps.append(_s)
-        claim(env, word, SELF, None, "%271")     # the launcher's re-point lands
-
-    facts = bi.gather(SID, word, None, keyed=False, self_pids=[SELF], launcher_pid=launcher,
-                      environ=env, table=lambda: table(SELF), sleep=sleep)
-    assert sleeps and facts.holder == "yes"
-
-
-def test_a_repoint_that_never_lands_is_unknown_not_a_guess(env):
-    word = default_seat.word()
-    launcher = os.getpid()
-    claim(env, word, launcher)
-    now = [0.0]
-
-    def clock():
-        now[0] += 1.0
-        return now[0]
-
-    facts = bi.gather(SID, word, None, keyed=False, self_pids=[SELF], launcher_pid=launcher,
-                      environ=env, table=lambda: table(SELF, launcher),
-                      sleep=lambda _s: None, clock=clock)
-    assert facts.holder == ("unknown (the seat's claim had not moved from the launcher to "
-                            "this pane after 3s)")
-
-
 # ---------- the write -----------------------------------------------------------------
 
 def test_main_writes_the_block_0600_atomically(tmp_path, env):
@@ -280,7 +246,7 @@ def test_the_script_writes_the_block_after_the_record_and_before_the_vendor(tmp_
     assert f"--seat {shlex.quote(SEAT)}" in lines[call]
     assert f"--name={shlex.quote('scout+' + plan.identity.session_id[:8])}" in lines[call]
     assert '--self-pid "$$"' in lines[call] and "$PPID" not in lines[call]
-    assert "--keyed" not in lines[call] and "--launcher-pid" not in lines[call]
+    assert "--keyed" not in lines[call]
 
 
 def test_the_block_is_never_in_argv(tmp_path):
@@ -290,22 +256,24 @@ def test_the_block_is_never_in_argv(tmp_path):
     assert bi.MODULE not in text
 
 
-def test_a_pane_mint_writes_into_the_dir_the_pane_mints(tmp_path):
+def test_a_keyed_tmux_plan_writes_the_block_as_any_in_place_launch(tmp_path):
+    """ST-285: a placed pane runs `session start` in place, so its plan is
+    the direct one: the block names the minted dir, the script's own pid,
+    and no parent (there is no trampoline shell to be the pane's)."""
     stub, _record = write_key_init_stub(tmp_path)
     plan = plan_for(tmp_path, "", argv_tail=["-n", "scout+{shortsid}"],
                     flags=("--in-tmux", "--keyed"), extra_env={"SESSION_KEY_INIT": stub})
-    assert plan.pane_mint is not None
+    assert plan.identity is not None
     lines, _record, call, vendor = _lines_of(plan)
-    mint = next(i for i, line in enumerate(lines) if "session-key-init failed" in line)
-    assert mint < call < vendor
-    root = shlex.quote(plan.pane_mint.sessions_root)
-    assert f'--dir {root}/"$CLAUDE_SESSION_ID" ' in lines[call]
-    assert '--name="scout+${CLAUDE_SESSION_ID:0:8}"' in lines[call]
-    assert "--keyed" in lines[call] and '--self-pid "$PPID"' in lines[call]
+    assert call < vendor
+    assert f"--dir {shlex.quote(plan.identity.session_dir)} " in lines[call]
+    assert "--keyed" in lines[call] and '--self-pid "$$"' in lines[call]
+    assert "$PPID" not in lines[call]
 
 
-def test_a_default_seat_tmux_launch_hands_the_pane_its_launcher(tmp_path, monkeypatch):
-    """Only a default-seat launch placed in tmux waits for its claim to move."""
+def test_a_default_seat_tmux_launch_waits_for_no_launcher(tmp_path, monkeypatch):
+    """ST-285: the launcher that places a pane takes no claim, and the
+    pane's own launch claims for itself, so no block waits on a launcher."""
     work = tmp_path / "work"
     work.mkdir()
     environ = {"AGENTS_DIR": str(tmp_path / "agents"), "PATH": os.environ.get("PATH", ""),
@@ -315,7 +283,7 @@ def test_a_default_seat_tmux_launch_hands_the_pane_its_launcher(tmp_path, monkey
                    environ=environ, work_dir=str(work))
     call = next(line for line in plan.script.splitlines() if bi.MODULE in line)
     assert f"--seat {default_seat.word()}" in call
-    assert f"--launcher-pid {os.getpid()}" in call
+    assert "$PPID" not in call
 
 
 def test_a_resume_writes_no_block(tmp_path):

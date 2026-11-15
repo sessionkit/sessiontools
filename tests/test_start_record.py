@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from start_support import launch_e2e, plan_for, recorded_argv, write_key_init_stub
-from test_start_placement import pane_ran, tmux_launch_e2e
+from test_start_placement import pane_ran, tmux_launch_e2e, window_id_of
 
 from sessiontools.start import record, run
 from sessiontools.start.record import (
@@ -226,6 +226,29 @@ def test_main_never_fails_a_launch(tmp_path, capsys):
     assert "nothing recorded" in capsys.readouterr().err
 
 
+def test_a_git_guard_past_its_budget_writes_nothing_and_the_launch_goes_on(
+        tmp_path, monkeypatch, capsys):
+    """`git check-ignore` past GIT_TIMEOUT_S (a loaded host): the guard
+    cannot say the record is safe, so none is written, and `main` still
+    exits 0, so the launch script goes on to the vendor. One stderr line
+    says why."""
+    calls = []
+
+    def stalled(argv, *args, **kwargs):
+        calls.append((argv, kwargs.get("timeout")))
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+    monkeypatch.setattr(record.subprocess, "run", stalled)
+    (tmp_path / "s").mkdir()
+    assert record.main(["--dir", str(tmp_path / "s"), "--", "claude"],
+                       environ=no_repo_env(tmp_path)) == 0
+    assert [(argv[0], argv[3], timeout) for argv, timeout in calls] == [
+        ("git", "check-ignore", record.GIT_TIMEOUT_S)]
+    assert "not written (TimeoutExpired" in capsys.readouterr().err
+    written = sorted(os.listdir(tmp_path / "s" / RECORD_DIR))
+    assert not set(written) & set(record.RECORD_FILES), written
+
+
 def test_main_takes_the_vendor_argv_after_the_separator(tmp_path):
     (tmp_path / "s").mkdir()
     assert record.main(["--dir", str(tmp_path / "s"), "--start-command", "session start x",
@@ -283,17 +306,15 @@ def test_a_launcher_minted_script_records_before_the_exec(tmp_path):
     assert tags["plugin"].startswith(plan.identity.session_dir)
 
 
-def test_a_pane_minted_script_records_into_the_dir_the_pane_mints(tmp_path):
+def test_a_keyed_tmux_script_records_into_its_own_minted_dir(tmp_path):
+    """ST-285: the pane mints in place, so the record's dir is the minted one."""
     stub, _record = write_key_init_stub(tmp_path)
     plan = plan_for(tmp_path, "", flags=("--in-tmux", "--keyed"),
                     extra_env={"SESSION_KEY_INIT": stub})
-    assert plan.identity is None and plan.pane_mint is not None
-    root = shlex.quote(plan.pane_mint.sessions_root)
+    assert plan.identity is not None
     lines = plan.script.splitlines()
     call = next(i for i, line in enumerate(lines) if "from sessiontools.start.record import main" in line)
-    assert f'--dir {root}/"$CLAUDE_SESSION_ID" ' in lines[call]
-    mint = next(i for i, line in enumerate(lines) if "session-key-init failed" in line)
-    assert mint < call
+    assert f"--dir {shlex.quote(plan.identity.session_dir)} " in lines[call]
 
 
 @pytest.mark.parametrize("keyed", [False, True])
@@ -348,13 +369,13 @@ def test_a_direct_launch_writes_the_record_with_the_planted_token_masked(tmp_pat
     assert "plugin\t" in startup
 
 
-def test_a_pane_minted_launch_writes_the_record_in_the_pane(tmp_path):
+def test_a_keyed_tmux_launch_writes_the_record_in_the_pane(tmp_path):
     stub, _key_record = write_key_init_stub(tmp_path)
     result, rec, _work = tmux_launch_e2e(tmp_path, "--tmux-target", "eng", "--keyed", "scout",
                                          extra_env={"SESSION_KEY_INIT": stub,
                                                     "FOO_TOKEN": FAKE_TOKEN})
     assert result.returncode == 0, result.stderr
-    assert pane_ran(rec), result.stdout
+    assert pane_ran(rec, window_id_of(result.stdout)), result.stdout
     session = tmp_path / "agents" / "sessions" / (rec / "session-id-env").read_text()
     env = env_lines(session)
     assert env["FOO_TOKEN"] == "*" * len(FAKE_TOKEN)

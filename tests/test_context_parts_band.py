@@ -1,6 +1,8 @@
 """`band` (ST-26 do-004, design section 6): ok / near / over / null against
 the settle threshold, with the near cut read through the settings cascade
-under one key, a named default of 20, and no environment variable.
+under one key, a named default of 20, and no environment variable. The
+threshold is the soft line's mark, `settle.soft.at`, read through the same
+cascade (ST-78 do-007), never `SESSION_SETTLE_AT` from the environment.
 
 Every settings tree here is a temp HOME; nothing reads the real one."""
 
@@ -28,6 +30,12 @@ def nested(dotted: str, value) -> dict:
     for part in reversed(dotted.split(".")):
         out = {part: out}
     return out
+
+
+def soft(at) -> dict:
+    """A layer's settle block turning the soft line on at AT: the
+    threshold the band reads."""
+    return {"settle": {"soft": {"at": at}}}
 
 
 def write(path: Path, data) -> Path:
@@ -70,9 +78,9 @@ def used() -> int:
     (lambda u: u * 2, BAND.OK),                    # 50% under
 ])
 def test_each_band_from_the_fixture_through_parts_json(threshold, want, tree):
-    env, _host, _session = tree
+    env, _host, session = tree
     u = used()
-    env = {**env, SETTLE: str(threshold(u))}
+    write(session, soft(threshold(u)))
     got = BAND.band_for(u, SID, env)
     assert got == want
     doc = R.parts_json(parts(FIXTURE), band=got)
@@ -92,9 +100,99 @@ def test_unknown_used_or_no_usable_threshold_is_null(u, t):
 
 
 def test_the_threshold_is_settles_own_reading(tree):
+    """`settle.soft.at` read as the alert reads it: settle_settings.tokens."""
+    env, _host, session = tree
+    for raw, want in (("250k", 250_000), (250_000, 250_000), ("1.5M", 1_500_000),
+                      ("nope", None), ("", None), (0, None), (True, None)):
+        write(session, soft(raw))
+        assert BAND.threshold(SID, env) == want, raw
+
+
+# ---------- the threshold through the cascade (ST-78 do-007, design R7) ----------
+SEAT = "st-78-worker"
+
+
+def seat_file(env) -> Path:
+    return Path(env["HOME"]) / ".session" / "seats" / SEAT / "settings" / "session.json"
+
+
+def name_the_seat(session: Path) -> None:
+    write(session.with_name("session.d") / "00-birth.json", {"seat": SEAT})
+
+
+def test_the_threshold_follows_settle_soft_at_from_a_seat_layer(tree):
+    """The do-007 criterion: a seat layer's settle.soft.at IS the band's
+    threshold, and an edit to it is read at the next call (live)."""
+    env, host, session = tree
+    name_the_seat(session)
+    assert BAND.threshold(SID, env) is None                 # no layer: no threshold
+    write(seat_file(env), soft("300k"))
+    assert BAND.threshold(SID, env) == 300_000
+    assert BAND.band_for(299_999, SID, env) == BAND.NEAR    # 20% under: near
+    assert BAND.band_for(300_000, SID, env) == BAND.OVER    # reaching it is over
+    write(host, soft(100_000))
+    assert BAND.threshold(SID, env) == 300_000              # the seat beats the host
+    write(seat_file(env), soft(350_000))
+    assert BAND.threshold(SID, env) == 350_000              # an edit is heard at once
+    write(session, soft("250k"))
+    assert BAND.threshold(SID, env) == 250_000              # the session beats the seat
+    assert BAND.threshold(SID[:8], env) == 250_000          # a short prefix is the same
+
+
+def test_the_threshold_agrees_with_the_alerts_own_reading(tree):
+    from sessiontools import settle_settings
+    env, _host, session = tree
+    name_the_seat(session)
+    write(seat_file(env), {"settle": {"soft": {"at": "275k", "every": "25k"},
+                                      "hard": {"at": "350k"}}})
+    found = settle_settings.read(SID, env)
+    assert found is not None and found.soft is not None
+    assert BAND.threshold(SID, env) == found.soft.at == 275_000
+
+
+def test_the_environment_alone_sets_no_threshold(tree):
+    """The environment is not a layer: SESSION_SETTLE_AT reaches the band
+    only as session start's birth copy into the session layer."""
     env, _host, _session = tree
-    for raw, want in (("250k", 250_000), ("1.5M", 1_500_000), ("nope", None), ("", None)):
-        assert BAND.threshold({**env, SETTLE: raw}) == want
+    rec = Recording({**env, SETTLE: "1k"})
+    assert BAND.threshold(SID, rec) is None
+    assert BAND.band_for(used(), SID, rec) is None
+    assert SETTLE not in rec.read
+
+
+def test_a_hard_line_alone_is_no_threshold(tree):
+    env, _host, session = tree
+    write(session, {"settle": {"hard": {"at": "350k", "before_compact": "25k"}}})
+    assert BAND.threshold(SID, env) is None
+
+
+def test_settle_null_in_a_lower_layer_switches_the_threshold_off(tree):
+    env, host, session = tree
+    write(host, soft("250k"))
+    assert BAND.threshold(SID, env) == 250_000
+    assert BAND.threshold(None, env) == 250_000             # no session: template + host
+    write(session, {"settle": None})
+    assert BAND.threshold(SID, env) is None
+    assert BAND.threshold(None, env) == 250_000
+
+
+def test_an_unreadable_layer_or_an_ambiguous_prefix_is_no_threshold(tree):
+    env, _host, session = tree
+    write(session, soft("250k"))
+    twin = session.parents[2] / (SID[:8] + "-0000-4000-8000-000000000000") / "settings"
+    write(twin / f"{BAND.NEAR_TOOL}.json", soft("100k"))
+    assert BAND.threshold(SID[:8], env) is None             # never a guess
+    assert BAND.threshold(SID, env) == 250_000
+    write(session, "{not json")
+    assert BAND.threshold(SID, env) is None
+
+
+def test_the_threshold_writes_no_off_stamp(tree):
+    """Read-only: `read`, not `resolve`; the OFF stamp is the hook's."""
+    env, _host, session = tree
+    session.parent.mkdir(parents=True)
+    assert BAND.threshold(SID, env) is None
+    assert not (session.parents[1] / "settle" / "off").exists()
 
 
 # ---------- the near cut through the cascade -------------------------------------
@@ -110,8 +208,8 @@ def test_a_session_layer_file_overrides_the_default(tree):
     assert BAND.near_pct(SID, env) == 5
     # 10% under the threshold: near at the default 20, ok at a 5% cut.
     u = used()
-    env = {**env, SETTLE: str(int(u / 0.9))}
-    assert BAND.band(u, BAND.threshold(env), BAND.DEFAULT_NEAR_PCT) == BAND.NEAR
+    write(session, {**nested(BAND.NEAR_KEY, 5), **soft(int(u / 0.9))})
+    assert BAND.band(u, BAND.threshold(SID, env), BAND.DEFAULT_NEAR_PCT) == BAND.NEAR
     assert BAND.band_for(u, SID, env) == BAND.OK
 
 
@@ -221,7 +319,7 @@ def test_a_short_prefix_reads_the_same_session_layer_as_the_full_id(tree):
     assert BAND.near_pct(short, env) == BAND.near_pct(SID, env) == 5
     assert BAND.near_pct(short.upper(), env) == 5    # as resolve_sid: case-blind
     u = used()
-    env = {**env, SETTLE: str(int(u / 0.9))}         # near at 20, ok at 5
+    write(session, {**nested(BAND.NEAR_KEY, 5), **soft(int(u / 0.9))})   # near at 20, ok at 5
     assert BAND.band_for(u, short, env) == BAND.band_for(u, SID, env) == BAND.OK
 
 
@@ -270,12 +368,13 @@ def test_settings_settle_and_window_never_import_the_band():
 
 
 def test_the_band_reads_no_settle_variable_of_its_own():
-    """The threshold is `settle.threshold`'s reading, never re-read here."""
+    """The threshold is the alert's own cascade reading
+    (`settle_settings.read`), never an environment variable."""
     src = (ROOT / "src" / "sessiontools" / "band.py").read_text(
         encoding="utf-8")
     assert f'"{SETTLE}"' not in src and f"'{SETTLE}'" not in src   # docs may name it
-    assert "environ.get" not in src and "environ[" not in src
-    assert "settle.threshold(" in src
+    assert "environ" not in src.split('"""', 2)[2]                 # code, not the docstring
+    assert "settle_settings.read(" in src
 
 
 @pytest.mark.parametrize("u, want", [(799, BAND.OK), (800, BAND.NEAR), (999, BAND.NEAR),

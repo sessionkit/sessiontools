@@ -1,10 +1,12 @@
-"""`session default-model show|list|enforce|watch|unit`: the verb over `default_model`.
+"""`session default-model show|list|enforce|watch|unit|agent`: the verb over `default_model`.
 
 The core (`sessiontools.default_model`) reads the setting and makes the
 edit; `default_model_watch` runs it on each change and renders the units.
 This module parses argv, calls them and prints what they found. Nothing
-here writes a file but through `default_model.enforce`, and nothing
-installs or loads a unit: `unit` prints one.
+here writes a file but through `default_model.enforce`. `agent on`
+installs and loads the launchd agent (`default_model_agent`, handed
+`agent` first, by GROUP); `unit` prints it for a host or a hand install.
+Nothing turns itself on: only a user runs `agent on`.
 
     session default-model                      same as `show`
     session default-model show [--json]        the pin, settings.json's "model", in sync or not
@@ -12,10 +14,11 @@ installs or loads a unit: `unit` prints one.
     session default-model enforce [--dry-run]  ONE pass: put "model" back; unset: nothing
     session default-model watch [--interval S] enforce now, then on every change (foreground)
     session default-model unit launchd|systemd PRINT a unit that runs enforce on every change
+    session default-model agent on|off|status  the launchd agent: install and load it (opt-in)
 
 Exit codes: 0 done, in sync or unset; 2 usage; 3 refused, nothing written;
-4 a backup, write, read-back or log line failed; 5 settings.json unreadable.
-`show` exits with the code `enforce` would, so a script can ask first.
+4 a backup, write, read-back or log line failed, or a launchctl load (`agent`);
+5 settings.json unreadable. `show` exits with the code `enforce` would, so a script can ask first.
 
 Stdlib only, and nothing that loads PyYAML: `import sessiontools.cli` and
 this verb's path never may (AGENTS.md rule 3).
@@ -28,6 +31,7 @@ from pathlib import Path
 
 from sessiontools import default_model as dm
 from sessiontools import default_model_watch as dmw
+from sessiontools.verbs import Group
 
 PROG = "session default-model"
 
@@ -39,6 +43,7 @@ SUBVERBS = (
                "changes")),
     ("unit", ("print a launchd agent or systemd units that run enforce on every change; "
               "installs nothing")),
+    ("agent", "on|off|status: the launchd agent that runs enforce on every change; opt-in"),
 )
 
 #: Said under `list`, both forms: the list is shipped, not measured.
@@ -57,10 +62,13 @@ no log, nothing. Set, enforce edits only the top-level "model" member of
 $CLAUDE_CONFIG_DIR/settings.json (else ~/.claude/settings.json), backs the
 old file up first, and reads the new one back. Fable is never pinned.
 
-To keep it pinned, run enforce on every change. `unit` prints what does
-that; save it and load it yourself (nothing here installs or loads one).
-Render it from the shell whose settings it should guard: it carries
-CLAUDE_CONFIG_DIR and SESSION_STATE_DIR when they are set.
+To keep it pinned, run enforce on every change. On a Mac, `agent on`
+installs and loads the launchd agent that does that (opt-in: nothing turns
+it on for you), and `agent off` removes it; see `session default-model
+agent --help`. `unit` prints it for a host or a hand install: save it and
+load it yourself. Render either from the shell whose settings it should
+guard: it carries CLAUDE_CONFIG_DIR and SESSION_STATE_DIR when they are
+set.
 
     session default-model unit launchd > LABEL.plist &&
         mv LABEL.plist ~/Library/LaunchAgents/
@@ -79,14 +87,15 @@ put it back over each other for ever. With neither launchd nor systemd,
 `watch` does the same in the foreground.
 
 Exit codes: 0 done, in sync or unset; 2 usage; 3 refused, nothing
-written; 4 a backup, write, read-back or log line failed; 5 settings.json
-unreadable. show exits with the code enforce would.""".replace(
+written; 4 a backup, write, read-back or log line failed, or a launchctl
+load; 5 settings.json unreadable. show exits with the code enforce would.""".replace(
     "LABEL", dmw.LABEL).replace("PATHUNIT", dmw.SYSTEMD_PATH_UNIT).replace(
     "SERVICEUNIT", dmw.SYSTEMD_SERVICE_UNIT)
 
 
 def build_parser():
-    """`session default-model`'s parser: show, list and enforce."""
+    """`session default-model`'s parser: show, list, enforce, watch, unit and
+    the `agent` placeholder (GROUP hands `agent` to its own parser)."""
     import argparse
     p = argparse.ArgumentParser(prog=PROG, epilog=EPILOG,
                                 formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -94,7 +103,7 @@ def build_parser():
                                             "model.default is set, put \"model\" in Claude "
                                             "Code's settings.json back if something rewrote "
                                             "it. Unset, it does nothing.")
-    sub = p.add_subparsers(dest="verb", metavar="show|list|enforce|watch|unit")
+    sub = p.add_subparsers(dest="verb", metavar="show|list|enforce|watch|unit|agent")
     help_ = dict(SUBVERBS)
     sp = sub.add_parser("show", help=help_["show"],
                         description="The pin and why it reads as set or unset, the "
@@ -131,7 +140,14 @@ def build_parser():
                                     "they are set, so render it from the shell whose "
                                     "settings it should guard.")
     up.add_argument("kind", choices=dmw.KINDS, help="launchd (macOS) or systemd (Linux)")
+    sub.add_parser("agent", add_help=False, help=help_["agent"])
     return p
+
+
+#: `session default-model`: `agent` is dispatched by hand, to its own
+#: parser, before this module's parser sees its arguments.
+GROUP = Group(subs={"agent": "sessiontools.default_model_agent:build_parser"},
+              rest="sessiontools.default_model_cli:build_parser")
 
 
 def _positive(text: str) -> float:
@@ -147,6 +163,9 @@ def _positive(text: str) -> float:
 
 
 def main(argv: list[str]) -> int:
+    if argv[:1] and argv[0] in GROUP.subs:
+        from sessiontools import default_model_agent
+        return default_model_agent.main(argv[1:])
     a = build_parser().parse_args(argv)
     if a.verb in (None, "show"):
         return show(json_out=getattr(a, "json", False))

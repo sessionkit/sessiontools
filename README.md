@@ -14,7 +14,7 @@ uv tool install sessiontools
 ```
 
 Python 3.11 to 3.14. Optional: [the Claude Code plugin][plugin] adds
-the `session` skill and four hooks.
+the `session` skill and five hooks.
 
 Shell completion, one line per shell ([shell completion][completion]).
 For zsh, in `~/.zshrc` after compinit:
@@ -44,12 +44,18 @@ eval "$(session completion bash)"
 - `session context --parts`: what filled it: boot, then growth by
   category.
 - `session ledger --short`: each file read and command run, by tokens.
+- `session commands SEAT --since 7d --count`: the programs a seat's
+  sessions ran in a week, by how often.
+- `session list --past SEAT`: every session recorded as SEAT on this
+  host, oldest first.
 - `session account status`: which Claude account this Mac is on.
 - `session account verify`: which account the API bills for this seat's
   token, from one 1-token request.
 - `session start --list-agents`: the agents it can start.
 - `session reap`: seats idle past 1h, each CLOSE or KEEP, and why. A dry
   run.
+- `session respawn`: the plan to restart this seat in its pane with the
+  line it was started with. `--go` acts.
 - `session default-model`: the model every new `claude` starts on, and
   whether a pin keeps it there. Off until you set `model.default`.
 - `session --help`: every verb.
@@ -133,30 +139,36 @@ it. Each line says what puts it there and what takes it away.
     `log.jsonl`, the first time `session default-model enforce` changes
     settings.json.
   - `~/.sessionkit/tools/accounts/`: `session account new` and `use`.
+  - `~/.sessionkit/tools/services/`, beside `settings/`: one file per
+    service, for `sessionkit service list`. `pane-state.json`:
+    `session pane-state agent on|off`. `sound-engine.json`: `session
+    sound engine on|off`. `default-model.json`: `session default-model
+    agent on|off`. `web.json`: `session web declare`, which installs
+    nothing. `off` rewrites a file with `enabled: false` and keeps it.
   - `~/.sessionkit/tools/state/sound/bin/`: `session sound engine on`
     builds the sound engine there with `swiftc` (in
     `~/.local/share/sessiontools/sound/bin/` while that old folder is
     still there).
-  - `~/.sessionkit/tools/log/`: the services' logs and `reap.log`
-    (Logs, below). An older release wrote them elsewhere, and those
-    files stay where they were.
+  - `~/.sessionkit/tools/log/`: the services' logs, `reap.log` and
+    `respawn.log` (Logs, below). An older release wrote them elsewhere,
+    and those files stay where they were.
   - `SESSIONS_DIR`, `SESSION_STATE_DIR` and `SESSIONTOOLS_SOUND_HOME`
     move these folders when set.
 - **Services (launchd agents):** none until you turn one on. Each `on`
   writes a plist in `~/Library/LaunchAgents/` and loads it, and it
   starts again at every login. Each `off` unloads it and deletes the
-  plist. Both `on` and `off` also retire a job an older release set up
-  under its old label: they unload it and delete its plist. `status`
-  names one that is still there, and `--dry-run` lists the retire and
-  changes nothing.
+  plist. For pane-state and the sound engine, `on` and `off` also
+  retire a job an older release set up under its old label: they unload
+  it and delete its plist. `status` names one that is still there, and
+  `--dry-run` lists the retire and changes nothing.
   - `dev.sessionkit.tools.sound-engine`: `session sound engine on`.
     `off --purge` also deletes the engine it built.
   - `dev.sessionkit.tools.pane-state`: `session pane-state agent on`.
     It sets `@session_state` and `@session_state_why` on each seat's
     tmux pane.
-  - `dev.sessionkit.tools.default-model`: no verb writes or loads it.
-    `session default-model unit launchd` prints it, and it is there only
-    if you save and load it yourself
+  - `dev.sessionkit.tools.default-model`: `session default-model agent
+    on`. Opt-in: nothing turns it on for you. `session default-model
+    unit launchd` prints the same plist for a hand install
     ([the default model][default-model]).
 - **Plugin and hooks, optional:** `claude plugin marketplace add` and
   `claude plugin install` ([the Claude Code plugin][plugin]). Claude
@@ -164,9 +176,10 @@ it. Each line says what puts it there and what takes it away.
   (`extraKnownMarketplaces`, `enabledPlugins`), lists them in
   `~/.claude/plugins/`, and keeps a copy in
   `~/.claude/plugins/cache/sessiontools/`. The plugin brings the
-  `session` skill and nine hook entries: SessionStart (two),
-  PreToolUse, PostToolBatch (three), Stop, UserPromptSubmit and
-  SessionEnd. Each is silent unless set.
+  `session` skill and twelve hook entries: SessionStart (three),
+  PreToolUse (two), PostToolBatch (three), PreCompact, Stop,
+  UserPromptSubmit and SessionEnd. Most are silent unless set; the sed
+  guard is on, and refuses only `sed -i ''` against GNU sed.
   Uninstalling the plugin takes it out of the settings and leaves the
   cached copy.
 - **Settings:** the install writes none, and none are needed.
@@ -239,6 +252,7 @@ packages keep their files in it too.
 - [The `session list` cache][cache]: one computation, many readers
 - [Operator and privileged seats][operator]: who seats ask
 - [Closing idle seats][reap]: `session reap`, a dry run by default
+- [Restarting a seat][respawn]: `session respawn`, a plan unless `--go`
 - [Where tools keeps its state][state-paths]: each folder, old and new,
   the rule, and `session path`, the verb peers ask
 - [Moving tools' state][state-migrate]: `session path migrate`, one host
@@ -248,7 +262,13 @@ packages keep their files in it too.
 - [The Claude Code plugin][plugin]: the skill and the hooks
 - [The settle alert][settle]: one line past a context threshold
 - [The clock line][clock]: the time and the context on every tool batch
+- [The Markdown lint][md-lint]: wide table lines and `shape`, named
+  after a `.md` write
+- [The hidden-failure note][hidden-failure]: one line when an agent's test
+  run piped into `head` or `tail` exits 0 with failures shown
 - [The busy sound][busy]: a sound while a tool batch runs long
+- [The sed guard][sed-guard]: refuses `sed -i ''` where sed is GNU, and
+  names the GNU form
 - [The session-info hooks][session-info]: the short session id as the
   session title, and the session's facts in context, both off by default
 - [The identity block][identity]: who a launched session is, in its
@@ -299,8 +319,8 @@ be set, and where each one lives ([configuration][configuration]):
   - **Upgrade every copy of sessiontools on a host together,** other
     packages' copies included: an older copy writes the old `state`
     folder, and `session path --json` shows `stranded` when one lags.
-- **Environment variables:** the settle alert's `SESSION_SETTLE_AT`, the
-  clock line's `SESSION_CLOCK_WARN_AT`, the hooks' `SESSIONTOOLS_HOOK_*`
+- **Environment variables:** `SESSION_SETTLE_AT`, which `session start`
+  copies once into the session layer, the hooks' `SESSIONTOOLS_HOOK_*`
   switches (`SESSIONTOOLS_HOOK_CLOCK=on` switches the clock line on), and
   the paths it reads, such as `SESSIONS_DIR` and `SESSION_STATE_DIR`.
   The configuration page lists each one with its default, under the part
@@ -322,6 +342,8 @@ be set, and where each one lives ([configuration][configuration]):
 - **Busy detection:** `~/.sessionkit/tools/log/busy.log`, one line each
   time voice could not be asked where its mouth is, naming why and the
   folder used instead ([the busy sound][busy]).
+- **`session respawn --go`:** `~/.sessionkit/tools/log/respawn.log`, one line
+  for each pane it respawned, written before the kill.
 - **Each session's settings at birth:**
   `~/.session/sessions/<session-id>/log/settings.jsonl`, what `session
   start` read into that session's settings: each environment variable
@@ -354,13 +376,17 @@ Follow one as it grows with `tail -F`, for example
 [cache]: docs/list-snapshot-cache.md
 [operator]: docs/operator-privileged-seats.md
 [reap]: docs/session-reap.md
+[respawn]: docs/session-respawn.md
 [completion]: docs/shell-completion.md
 [state-paths]: docs/tools-state-paths.md
 [state-migrate]: docs/tools-state-migrate.md
 [plugin]: docs/claude-code-plugin.md
 [settle]: docs/settle-alert-hook.md
 [clock]: docs/clock-line-hook.md
+[md-lint]: docs/md-lint-hook.md
+[hidden-failure]: docs/hidden-failure-hook.md
 [busy]: docs/busy-sound-hook.md
+[sed-guard]: docs/sed-guard-hook.md
 [session-info]: docs/session-info-hook.md
 [identity]: docs/identity-block.md
 [engine]: docs/sound-engine-agent.md

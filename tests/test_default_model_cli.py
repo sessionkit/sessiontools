@@ -63,7 +63,10 @@ def test_the_verb_is_in_every_table():
     assert "default-model" in dict(cli.VERBS)
     assert "the default every NEW claude starts on" in dict(cli.VERBS)["default-model"]
     assert cli.HANDLERS["default-model"] is cli._default_model
-    assert verbs.resolve(cli.PARSERS["default-model"]) is default_model_cli.build_parser
+    assert verbs.resolve(cli.PARSERS["default-model"]) is default_model_cli.GROUP
+    assert default_model_cli.GROUP.subs == {
+        "agent": "sessiontools.default_model_agent:build_parser"}
+    assert verbs.resolve(default_model_cli.GROUP.rest) is default_model_cli.build_parser
 
 
 def test_the_usage_lists_it(capsys):

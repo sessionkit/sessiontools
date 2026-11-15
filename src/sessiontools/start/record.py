@@ -9,16 +9,20 @@ directory writes, beside its other files:
         .gitignore                    0600  `*`: the dir and itself, in any repo
         env                           0600  NAME=value, sorted, secrets masked
         command                       0600  the vendor argv, the `session start`
-                                            command line, the working directory
+                                            command line, the working directory,
+                                            then the line as ENTERED and the
+                                            directory it was entered from
         startup-files                 0600  TAG<TAB>PATH, one per line
 
+A launch REFUSED because a required context generator failed (ST-307)
+starts no vendor, so it writes none of those three. It writes one file,
+`refused` (0600, O_EXCL, the same dir and guard), from `session start`
+itself: `write_refusal`, called by `run.record_refusal`.
+
 WHO WRITES IT: the launch script, on the line before the vendor, by
-running this module (`render_record_call`). Two reasons, both measured: a
-keyed launch placed in tmux has no session
-directory until its pane mints one, so only the script knows where to
-write; and the env the script holds THERE is the env the vendor inherits -
-after the identity block and the declared-environment prelude - which is
-the whole point of recording it.
+running this module (`render_record_call`). The env the script holds THERE
+is the env the vendor inherits - after the identity block and the
+declared-environment prelude - which is the whole point of recording it.
 
 THE GIT GUARD, before the first record byte: `launch/` and its
 `.gitignore` are made first, then `git check-ignore` must say `env` is
@@ -31,6 +35,34 @@ WRITTEN ONCE, NEVER READ BACK: an existing `launch/` is left exactly as
 it is, and every file is created O_EXCL. A record must never cost a
 session: any failure here is one stderr line and exit 0, and the vendor
 still starts.
+
+THE ENTERED LINE: `command` carries two keys after `cwd:`.
+`launch_command:` is the `session start` line as the human typed it,
+`shlex.join(["session", "start", *argv])`: argv[0] is the one console
+script's name, never `sys.executable`, and every typed word stays,
+placement flags and bare first-message words included (it is a 0600
+file, not argv). It never holds `--session-id`: that is minted, not
+typed. `launch_dir:` is the directory it was typed in (`entered_dir`).
+`start:` stays the EVALUATED line, unchanged beside them. A record with
+neither key is a launch from before they were recorded; a reader says
+"absent" and never falls back to `start:` or `vendor:`.
+
+THE ENTERED LINE NEVER RIDES ARGV. `ps` is
+world-readable, and the entered line can hold first-message words. So the
+script's record call takes no `--launch-command` value. `run.execute` puts
+the line and its directory in the `bash -c` script's ENVIRONMENT
+(`launch_environ`: LAUNCH_COMMAND_ENV, LAUNCH_DIR_ENV), the call's bare
+`--launch-from-env` reads them there, and the line after the call unsets
+both, so the vendor never inherits them. The `env` file never lists them
+either: it is the env the vendor gets. The record's content is unchanged:
+`launch_command:` is still the line exactly as entered.
+
+A RESUME RECORDS NEITHER (ruling 6). A resume writes no record at all
+(`plan.assemble_resume`): an unkeyed resume keeps the source's own dir and
+its written-once record, so it reports the ORIGINAL line; a keyed resume
+forks into a fresh dir that gets no record, so it reports the line as
+absent. The resume line (`... --resume ID`) is never recorded: a respawn
+of it would resume, not start a fresh seat.
 
 MASKING (v1, deliberately simple): a NAME
 that says secret (TOKEN, KEY, SECRET, PASSWORD, PASSWD, AUTH, CREDENTIAL,
@@ -56,11 +88,21 @@ from typing import NamedTuple
 from sessiontools.settings import ensure_private_dir
 
 RECORD_DIR = "launch"
+
+#: The entered line's road from the launcher to the record call: the
+#: script's environment, never its argv (ruling 7, F2). Internal plumbing.
+LAUNCH_COMMAND_ENV = "SESSION_RECORD_LAUNCH_COMMAND"
+LAUNCH_DIR_ENV = "SESSION_RECORD_LAUNCH_DIR"
+LAUNCH_ENV_NAMES = (LAUNCH_COMMAND_ENV, LAUNCH_DIR_ENV)
+LAUNCH_FROM_ENV_FLAG = "--launch-from-env"
 GITIGNORE = ".gitignore"
 ENV_FILE = "env"
 COMMAND_FILE = "command"
 STARTUP_FILE = "startup-files"
 RECORD_FILES = (ENV_FILE, COMMAND_FILE, STARTUP_FILE)
+#: A refused launch's record (ST-307): no vendor ran, so no env and no
+#: command; this file alone says why the seat never started.
+REFUSED_FILE = "refused"
 
 PROG = "session start: launch record"
 MODULE = "sessiontools.start.record"
@@ -216,14 +258,15 @@ def render_startup_files(files: Iterable[tuple[str, str]]) -> str:
 class LaunchRecord(NamedTuple):
     """What the launch script hands this module, planned launcher-side.
 
-    session_dir   the session directory: a literal path, or for a keyed
-                  launch placed in tmux a bash expression (the pane mints
-                  the id), already rendered for the script
+    session_dir   the session directory: a literal path, already
+                  rendered for the script
     shown_dir     the same, said in words, for the dry-run report
     start_command the `session start` command line that produced this
     work_dir      where the session runs
     files         ((tag, path), ...) known launcher-side
     secret_names  the agent file's declared secrets: masked by name always
+    launch_command  the line as ENTERED (shell text); "" records neither key
+    launch_dir    the directory it was entered from
     """
 
     session_dir: str
@@ -232,6 +275,41 @@ class LaunchRecord(NamedTuple):
     work_dir: str
     files: tuple
     secret_names: tuple
+    launch_command: str = ""
+    launch_dir: str = ""
+
+
+def launch_environ(record: LaunchRecord | None) -> dict[str, str]:
+    """What `run.execute` adds to the script's environment for RECORD's call:
+    the entered line and its directory, or nothing when there is no line
+    to record (no record, or one with no `launch_command`)."""
+    if record is None or not record.launch_command:
+        return {}
+    return {LAUNCH_COMMAND_ENV: record.launch_command, LAUNCH_DIR_ENV: record.launch_dir}
+
+
+def entered_line(argv: Iterable[str]) -> str:
+    """The `session start` line as entered: `argv` is what followed
+    `start`, and the program is spelled `session`, the one console script
+    (a shebang replaces the typed word with a resolved path, so it cannot
+    be measured; a bare `session` also respawns into the current install)."""
+    return shlex.join(["session", "start", *argv])
+
+
+def entered_dir(environ: Mapping[str, str], cwd: str | None = None) -> str:
+    """The directory the line was entered from: `$PWD`, the logical path
+    the human saw (`pwd -L`; macOS `/tmp` is `/private/tmp`), when it names
+    the same directory as `getcwd()`; `getcwd()` otherwise (a stale or
+    inherited `$PWD`)."""
+    cwd = os.getcwd() if cwd is None else cwd
+    pwd = environ.get("PWD", "")
+    if pwd and os.path.isabs(pwd):
+        try:
+            if os.path.samefile(pwd, cwd):
+                return pwd
+        except OSError:
+            pass
+    return cwd
 
 
 def record_path(session_dir: str) -> str:
@@ -256,11 +334,19 @@ def render_record_call(record: LaunchRecord, vendor_argv: str,
     ENTRY), then the
     rendered vendor argv after `--`, so bash expands it exactly as it
     expands the line that runs the vendor. `|| :` - a record never stops a
-    launch, even one whose interpreter has vanished."""
+    launch, even one whose interpreter has vanished.
+
+    The entered line is NOT in this text (ruling 7, F2): a bare
+    `--launch-from-env` tells the call to read it from the environment
+    `launch_environ` gives the script, and the next line unsets that
+    hand-off, so nothing after the record (the identity block, the vendor)
+    inherits it."""
     python = python or sys.executable
     parts = [shlex.quote(python), "-I", "-c", shlex.quote(ENTRY), "--dir", record.session_dir,
              "--start-command", shlex.quote(record.start_command),
              "--cwd", shlex.quote(record.work_dir)]
+    if record.launch_command:
+        parts.append(LAUNCH_FROM_ENV_FLAG)
     for tag, path in record.files:
         parts += ["--file", shlex.quote(f"{tag}={path}")]
     for name in record.secret_names:
@@ -270,6 +356,7 @@ def render_record_call(record: LaunchRecord, vendor_argv: str,
         "# launch record: env (secrets masked), command, startup files",
         f"# -> {record.shown_dir}/{RECORD_DIR}/ (written once, 0600, git-ignored)",
         " ".join(parts) + " || :",
+        "unset " + " ".join(LAUNCH_ENV_NAMES),
     ])
 
 
@@ -304,17 +391,69 @@ def _write_new(path: str, text: str) -> None:
         stream.write(text)
 
 
-def render_command(vendor_argv: list[str], start_command: str, work_dir: str) -> str:
-    """Three `key: value` lines; each value is shell-quoted text that
-    `shlex.split` turns back into the argv (a respawn reads `start`)."""
-    return (f"vendor: {shlex.join(vendor_argv)}\n"
+def render_command(vendor_argv: list[str], start_command: str, work_dir: str,
+                   launch_command: str = "", launch_dir: str = "") -> str:
+    """`key: value` lines; each value is shell-quoted text that
+    `shlex.split` turns back into the argv. Three always, then the entered
+    line and its directory when there is one (both, or neither). A value
+    may hold a newline inside its quotes: `parse_command` reads it back."""
+    text = (f"vendor: {shlex.join(vendor_argv)}\n"
             f"start: {start_command}\n"
             f"cwd: {shlex.quote(work_dir)}\n")
+    if launch_command:
+        text += (f"launch_command: {launch_command}\n"
+                 f"launch_dir: {shlex.quote(launch_dir)}\n")
+    return text
+
+
+def _value_end(text: str, start: int) -> int:
+    """Where the shell text from `start` ends: the first newline outside
+    quotes and not backslash-escaped, else the end of `text`."""
+    quote = ""
+    index = start
+    while index < len(text):
+        char = text[index]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+        elif char == "\\":
+            index += 1
+        elif quote == '"':
+            if char == '"':
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == "\n":
+            return index
+        index += 1
+    return len(text)
+
+
+def parse_command(text: str) -> dict[str, str]:
+    """The `command` file's keys, each to its value as shell TEXT
+    (`shlex.split` it for the argv). A quoted newline stays inside its
+    value, so a typed message with a line break reads back whole. A line
+    that is not `key: value` is skipped."""
+    fields: dict[str, str] = {}
+    index = 0
+    while index < len(text):
+        newline = text.find("\n", index)
+        line_end = len(text) if newline < 0 else newline
+        key, sep, _value = text[index:line_end].partition(": ")
+        if not sep or not key or " " in key:
+            index = line_end + 1
+            continue
+        start = index + len(key) + len(sep)
+        end = _value_end(text, start)
+        fields.setdefault(key, text[start:end])
+        index = end + 1
+    return fields
 
 
 def write_record(session_dir: str, environ: Mapping[str, str], vendor_argv: list[str],
                  start_command: str = "", work_dir: str = "",
                  files: Iterable[tuple[str, str]] = (), secret_names: Iterable[str] = (),
+                 launch_command: str = "", launch_dir: str = "",
                  ) -> str | None:
     """Write the record into `<session_dir>/launch/` once. Returns its path,
     or None when nothing was recorded (a record is there already, or the
@@ -338,9 +477,38 @@ def write_record(session_dir: str, environ: Mapping[str, str], vendor_argv: list
         return None
     _write_new(os.path.join(directory, ENV_FILE), render_env(environ, secret_names))
     _write_new(os.path.join(directory, COMMAND_FILE),
-               render_command(vendor_argv, start_command, work_dir))
+               render_command(vendor_argv, start_command, work_dir,
+                              launch_command=launch_command, launch_dir=launch_dir))
     _write_new(os.path.join(directory, STARTUP_FILE), render_startup_files(files))
     return directory
+
+
+def write_refusal(session_dir: str, text: str,
+                  environ: Mapping[str, str] | None = None) -> str | None:
+    """Write `<session_dir>/launch/refused` once: a launch the launcher
+    REFUSED because a required context generator failed (ST-307). No vendor
+    starts, so this is the whole record - never an `env` (no session ran in
+    one) and never a `command` (a reader would take a seat that never
+    started for one that can be respawned). The same pieces as the record,
+    in the same order: the 0700 dir and its `.gitignore`, the git guard,
+    then an O_EXCL 0600 write. Returns the file's path, or None when
+    nothing was written (a `refused` is there already, left as it is; or
+    the guard refused) after one stderr line. Raises OSError on a failed
+    write: the caller turns that into a line, and the refusal stands."""
+    directory = record_path(session_dir)
+    path = os.path.join(directory, REFUSED_FILE)
+    if os.path.lexists(path):
+        print(f"{PROG}: {path} is there already; left as it is (written once)",
+              file=sys.stderr)
+        return None
+    ensure_record_dir(session_dir)
+    if git_ignore_state(path, environ) == "not-ignored":
+        print(f"{PROG}: NOT WRITTEN -- {directory} is inside a git repo that does not "
+              "ignore it (git check-ignore), so a refusal record there is one `git add` "
+              "from a commit", file=sys.stderr)
+        return None
+    _write_new(path, text)
+    return path
 
 
 def parse_record_args(argv: list[str]) -> argparse.Namespace:
@@ -348,6 +516,9 @@ def parse_record_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--dir", required=True, help="the session directory")
     parser.add_argument("--start-command", default="")
     parser.add_argument("--cwd", default="")
+    parser.add_argument(LAUNCH_FROM_ENV_FLAG, action="store_true",
+                        help="read the entered line and its directory from "
+                             f"{LAUNCH_COMMAND_ENV} and {LAUNCH_DIR_ENV}")
     parser.add_argument("--file", action="append", default=[], metavar="TAG=PATH")
     parser.add_argument("--secret", action="append", default=[], metavar="NAME")
     parser.add_argument("vendor_argv", nargs=argparse.REMAINDER)
@@ -359,17 +530,30 @@ def parse_record_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None) -> int:
     """The script's entry. Always exit 0: a missing record is a stderr
-    line, never a session that did not start."""
+    line, never a session that did not start. With `--launch-from-env` the
+    entered line and its directory come from the environment; the env file
+    never lists that hand-off (the vendor never gets it)."""
+    environ = os.environ if environ is None else environ
     try:
         args = parse_record_args(list(sys.argv[1:] if argv is None else argv))
         files = []
         for item in args.file:
             tag, _sep, path = item.partition("=")
             files.append((tag, path))
-        write_record(args.dir, os.environ if environ is None else environ,
+        launch_command = launch_dir = ""
+        if args.launch_from_env:
+            launch_command = environ.get(LAUNCH_COMMAND_ENV, "")
+            launch_dir = environ.get(LAUNCH_DIR_ENV, "")
+            if not launch_command:
+                print(f"{PROG}: {LAUNCH_COMMAND_ENV} was not handed down; the record "
+                      "has no launch_command", file=sys.stderr)
+        vendor_env = {name: value for name, value in environ.items()
+                      if name not in LAUNCH_ENV_NAMES}
+        write_record(args.dir, vendor_env,
                      args.vendor_argv, start_command=args.start_command,
                      work_dir=args.cwd or os.getcwd(), files=files,
-                     secret_names=args.secret)
+                     secret_names=args.secret, launch_command=launch_command,
+                     launch_dir=launch_dir)
     except SystemExit:
         print(f"{PROG}: bad arguments; nothing recorded", file=sys.stderr)
     except Exception as error:  # noqa: BLE001 - a record never costs a session
@@ -378,13 +562,21 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
 
 
 __all__ = [
+    "LAUNCH_COMMAND_ENV",
+    "LAUNCH_DIR_ENV",
+    "LAUNCH_ENV_NAMES",
+    "REFUSED_FILE",
     "LaunchRecord",
     "ensure_record_dir",
+    "entered_dir",
+    "entered_line",
     "git_ignore_state",
     "is_secret_name",
+    "launch_environ",
     "looks_secret_value",
     "main",
     "mask",
+    "parse_command",
     "record_path",
     "render_command",
     "render_env",
@@ -393,6 +585,7 @@ __all__ = [
     "should_mask",
     "vendor_startup_files",
     "write_record",
+    "write_refusal",
 ]
 
 

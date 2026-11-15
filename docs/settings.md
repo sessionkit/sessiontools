@@ -12,7 +12,8 @@ read from today.
 - **Not every key follows the cascade.** Most `session` keys are read
   from the template and host layers only, so an agent, a seat or a
   session cannot change them. The `sounds` keys, the `claude-code` keys,
-  `context.near_pct`, `home` and `home_dir` are read from all five layers
+  `context.near_pct`, `settle.*`, `home` and `home_dir` are read from all
+  five layers
   ([who reads which layers][layers]).
 - **See what applies:** `session settings <session-id> [tool]` prints each
   key with the file that set it.
@@ -102,7 +103,9 @@ the code, reader by reader.
 | --- | --- | --- |
 | `session`: `operator.*`, `list.max_age`, `pane_state.*`, `account.*`, `model.default` | template and host only | `session operator`, `session list`, `session pane-state`, `session account`, `session default-model` |
 | `session`: `context.near_pct` | all five | `session context` |
+| `session`: `settle.soft.at` | all five | `session context`, as its `band`'s threshold (`sessiontools.band`). No soft line, no band: `settle.hard.*` is not read here. |
 | `session`: `home`, `home_dir` | all five (session only once its id is known at launch) | `session start` |
+| `session`: `settle.*` | all five, live on every tool batch | the settle alert and its PreCompact guard (`hooks/settle-hook`, through `sessiontools.settle_settings`), only in a session `session start` launched ([the settle alert][settle]) |
 | `sounds`: every key | all five | the busy sound hook (the busy sound and the stop sound), `session sound` |
 | `claude-code`: every key | all five (session only once its id is known at launch) | `session start` |
 | `claude-code`: `statusLine` | template and host only | `session statusline install` and `check` |
@@ -129,19 +132,38 @@ drop-in in `~/.sessionkit/tools/settings/session.d/`.
 | `list.max_age` | number (seconds) | `2` | How old a `session list` snapshot may be and still be served. `0` turns the cache off. `SESSION_LIST_MAX_AGE` wins over it. | template and host |
 | `pane_state.listeners` | list of strings | `["pager listen"]` | Commands that do not count as work, so a seat running only these reads FREE. An empty list: every tool shell is work. | template and host |
 | `pane_state.interval` | number (seconds) | `1.0` | Seconds between the pane signal's ticks. Anything but a number above 0 reads as the default. | template and host |
-| `context.near_pct` | number, 0 to 100 | `20` | How close to the settle threshold, in percent, counts as `near` in `session context`. Anything else reads as the default. | all five |
+| `context.near_pct` | number, 0 to 100 | `20` | How close to the settle threshold (`settle.soft.at`), in percent, counts as `near` in `session context`. Anything else reads as the default. | all five |
 | `account.token_file` | string (a path) | none | On a host that signs in from a token file, the file `session account use` swaps. Unset, the route is the Keychain. | template and host |
 | `account.limits_file` | string (a path) | none | The limits file `session account status` reads when no usage exporter answers. | template and host |
 | `account.passage_prefix` | string (a folder) | `claude/oauth-tokens` | The passage folder `session account new` saves a token under. | template and host |
 | `model.default` | string, a model `session default-model list` names | none: nothing is pinned | The model every new `claude` starts on. When set, `session default-model enforce` puts it back as the top-level `"model"` in Claude Code's settings.json if something rewrote it. Unset, or anything but a non-empty string, does nothing at all. A value off the list, or any Fable model, is refused and nothing is written ([the default model][default-model]). | template and host |
 | `home` | boolean | `false` | Give the session a home directory, exported to it as `SESSION_HOME`. Where depends on the layer that set it: the agent's, the seat's, or the session's own. | all five |
 | `home_dir` | string (a path) | none | The home directory itself. Setting it turns `home` on. `home: false` lower down turns it off again. | all five |
+| `settle` | map, or `null` | none: off | The settle warning. Unset says nothing. `null` turns it off until a layer below sets a `settle` key again. A host `_locked: ["settle"]` pins it for every layer below. | all five |
+| `settle.soft.at` | tokens: `250000` or `"250k"` | none: no soft line | Where the soft line starts. `SESSION_SETTLE_AT` at launch is copied here, once ([written for you][written]). | all five |
+| `settle.soft.every` | tokens | none: every batch | How far apart the soft line repeats past `at`. | all five |
+| `settle.soft.say` | string | `You're past {at} ({used} used). At a good stopping point, settle: save what matters, then hand over.` | The soft line's words. `{at}`, `{used}`, `{left}` and `{compact_at}` are filled in, as on the hard line. `SESSION_SETTLE_SAY` at launch is copied here, once. | all five |
+| `settle.hard.at` | tokens | none | Where the hard line, "now", starts. | all five |
+| `settle.hard.before_compact` | tokens | none | Start the hard line this far short of the compaction point the launch SET. With no set point, `hard.at` alone counts. | all five |
+| `settle.hard.every` | tokens | none: every batch | How far apart the hard line repeats. | all five |
+| `settle.hard.say` | string | `Now: {used} used, {left} before compaction. Settle: save what matters, then hand over.` | The hard line's words. `{used}`, `{left}`, `{at}` and `{compact_at}` are filled in. `{left}` and `{compact_at}` read `?` when the point is not set. | all five |
 
 - **Nothing is a default person.** With no `operator` block, no one is the
   operator and no one is privileged.
 - **A bad file removes, never grants.** For the operator, a file that
   cannot be read, is not JSON or has the wrong shape reads as nothing
   configured.
+- **Tokens are a number or a string.** `250000`, `"250k"` and `"1.5M"`
+  all count. A value that is not an amount above zero reads as unset.
+- **`session start` installs the `session` schema.** Each launch writes
+  it to `~/.sessionkit/tools/settings/.session.schema.json` before the
+  birth reads it, and leaves a current file alone. It names the `settle`
+  keys only. Every `settle` key name and default line is defined once,
+  in `sessiontools.settle_settings`.
+- **The `settle` keys are heard only in a session `session start`
+  launched,** live on every tool batch. A session with no session dir is
+  silent whatever any layer sets: birth-only ([the settle
+  alert][settle]).
 - **The account keys never guess.** A bad `token_file` or
   `passage_prefix` is refused with exit 5, naming the key and the file. A
   bad `limits_file` leaves the usage unavailable, and the exit is still 0.
@@ -184,6 +206,8 @@ key names. Any other key is named on stderr and dropped.
 | `statusLine.padding` | integer, 0 or more | none | Claude Code's status line padding. | all five |
 | `statusLine.refreshInterval` | integer, 1 or more | none | Claude Code's status line refresh interval. | all five |
 | `statusLine.hideVimModeIndicator` | boolean | none | Claude Code's vim mode indicator switch. | all five |
+| `autoCompactWindow` | integer, 100000 to 1000000 | none: Claude Code's own | The window Claude Code cuts its auto-compaction point from. The settle alert and its guard read it back from the `--settings` file to know the point; unset, the point is unknown. Measured live: Claude Code honours it there. `auto` is refused: Claude Code takes it only per model. | all five |
+| `idleCompaction` | boolean | none: Claude Code's own (on) | `false` stops Claude Code compacting a seat while it is idle, between turns, where no settle line can be said. Static evidence only: no live probe saw an idle compaction either way. | all five |
 | `tui` | string | `default`, when nothing else names `tui` | Claude Code's renderer (`default` or `fullscreen`). Naming it, here or in Claude's own settings, stops the fullscreen offer. | all five |
 
 - **The launcher's `tui` default** is added only when no layer, no
@@ -211,8 +235,11 @@ settings for you to set:
   session's agent and seat layers from here.
 - `<sessions>/<session-id>/settings/<tool>.d/50-env.json`: each
   environment variable an installed schema names (`x-env`), read once. The
-  environment is not a layer after that. sessiontools' own schema names no
-  variable.
+  environment is not a layer after that. The `session` schema, which
+  `session start` installs, names two: `SESSION_SETTLE_AT` lands as
+  `settle.soft.at` and `SESSION_SETTLE_SAY` as `settle.soft.say`, in
+  `settings/session.d/50-env.json`. A copy there is the session layer, so a
+  shell-rc export beats every seat.
 
 ## Other tools
 
@@ -230,4 +257,5 @@ stack: the Session Kit settings guide,
 [layers]: #who-reads-which-layers
 [written]: #written-for-you
 [default-model]: default-model.md
+[settle]: settle-alert-hook.md
 [web-page]: session.md#session-web-the-settings-page

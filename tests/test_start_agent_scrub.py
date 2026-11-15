@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 from start_support import VENDOR_STUB, launch_e2e, plan_for, recorded_argv
@@ -114,13 +115,19 @@ def test_a_server_born_inside_the_seat_never_gets_the_seat_word(tmp_path, monkey
         envs[arguments[0]] = environ
         return "@9\n" if arguments[0] == "new-window" else ""
 
+    def placing(arguments, env=None):
+        envs[arguments[0]] = env
+        return SimpleNamespace(returncode=0, stdout="@9 %3 42\n", stderr="")
+
     monkeypatch.setattr(placement, "run_tmux", recording)
+    monkeypatch.setattr(placement._tmux, "run", placing)
     monkeypatch.setattr(placement, "session_exists", lambda name, environ=None: False)
-    placement.place_in_tmux(plan, "alpha", "scout", False, environ=caller)
+    placement.place_pane("session start scout", str(tmp_path), "alpha", "scout", "t0k",
+                         False, {}, environ=caller)
     assert AGENT_ENV not in envs["new-session"]
     assert envs["new-session"] == {"PATH": "/usr/bin", "HOME": str(tmp_path),
                                    "TERM": "xterm"}
-    # The pane itself runs the trampoline, whose first line unsets it too.
+    # The pane runs `session start` in place, whose script unsets it too.
     assert render_identity_unset() in plan.script.splitlines()
 
 

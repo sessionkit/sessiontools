@@ -38,6 +38,8 @@ FOLD_LINES, FOLD_TOKENS = 40, 400
 #: why. A held verb appears nowhere in the skill. Striking an entry is the
 #: one-line follow-up when its question is ruled, with the skill line added.
 HELD = {"ledger": "ST-26 OQ3: teaching agents the verb waits on the maintainer",
+        "commands": "ST-320: built on a branch at Mike's word; whether agents are taught it "
+                    "waits on the maintainer, and the skill is at its 400-token cap",
         "account": "ST-26 OQ3: the skill is at its 400-token cap; the line waits on the maintainer",
         "reap": "ST-146: a verb that closes seats; whether agents are taught it is the "
                 "foreman's to put up, and the skill is at its 400-token cap",
@@ -52,6 +54,9 @@ HELD = {"ledger": "ST-26 OQ3: teaching agents the verb waits on the maintainer",
         "identity": "the identity hook already puts the block in a launched agent's context "
                     "on turn one, and mail's wake prints it; the skill is at its 400-token "
                     "cap (a line measured 420)",
+        "respawn": "ST-30: `--go` is built in do-002, and whether agents are taught a verb "
+                   "that restarts seats is the foreman's to put up; the skill is at its "
+                   "400-token cap",
         "path": "a path query for scripts and the kit's other packages (ST-266), not an "
                 "agent's verb; the skill is at its 400-token cap",
         "web": "PROPOSED (kit-web-shell, ST-249): a spike, and a human's login, not an "
@@ -131,7 +136,7 @@ def test_the_props_it_names_are_the_props_get_lists():
     text = SKILL.read_text()
     line = re.search(r"The props are (.+?)\.\s", text, re.DOTALL)
     assert line, "the get bullet no longer lists the props"
-    named = re.findall(r"[a-z]+", line.group(1).replace(" and ", ", "))
+    named = re.findall(r"[a-z_]+", line.group(1).replace(" and ", ", "))
     assert named == [p for p, _ in get.PROPS]
 
 

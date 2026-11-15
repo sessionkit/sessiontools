@@ -5,14 +5,16 @@
     session start --tmux-target work --switch alice   ...and move the client there
     session start --in-tmux alice   (outside tmux)    a window in session `agents`
 
-The pane runs the plan's own launch script, written as a 0700 trampoline:
-`render_launch_script` with a shebang, extended and never forked, so the
-dry-run report of a tmux launch prints exactly what the pane will run. A
-launcher-side identity puts the trampoline in its session directory; a
-keyed launch mints in the pane (`identity.PaneMint`), has no session
-directory yet, and gets a fresh 0700 temp directory instead.
+The pane runs the ENTERED line again: `session start` with the
+placement flags taken off, and any bare first-message words moved to a
+0600 file (`pane`). No launch script is frozen to disk, so a `respawn-pane
+-k` starts a fresh seat. The pane's run is an ordinary in-place launch:
+mint, files, claim, record, exec. The launcher that places it mints
+nothing and takes no claim; it refuses what needs no act, writes the
+message file, and opens the window.
 
-Three rules, each measured in the old launcher before it became one:
+Four rules, the first three measured in the old launcher before it became
+one:
 
 - EVERY `-t` IS ANCHORED with `=`: tmux matches a target by
   prefix, so an unanchored `alpha` lands in an existing `alpha-beta`. After
@@ -20,10 +22,22 @@ Three rules, each measured in the old launcher before it became one:
 - SWITCHING FOLLOWS THE CALLER: a human at a terminal inside tmux
   is moved to the new window by default; an agent's launch (no tty) never
   moves anyone's view. `--switch` and `--no-switch` override, not both.
-- `new-window` IS THE HANDOVER. Before it, a failure removes the files the
-  launch wrote (nothing will ever read them). After it the pane owns them,
-  so a failure there (automatic-rename, switch-client) is reported and
-  nothing is unwound: the session IS placed.
+- `new-window` IS THE HANDOVER. Before it, a failure removes the message
+  file (nothing will ever read it). After it the pane owns it, so a
+  failure there (a window option, switch-client) is reported and nothing
+  is unwound: the session IS placed.
+- A PANE THAT FAILS STAYS (`remain-on-exit failed`): a refused pane, or a
+  server whose PATH has no `session`, leaves its reason readable in the
+  dead pane instead of closing on it.
+
+A PLACED PANE RESOLVES IN TMUX'S ENVIRONMENT (review F1, ruled): its
+variables are the tmux server's global environment, the session's own
+over it, and the hand-off; not the caller's. So a caller's `AGENTS_DIR=/x
+session start --in-tmux pip` finds `pip` where tmux's `AGENTS_DIR` says.
+The pane's own resolution and claim are the authority; the launcher's
+check is advisory. `environment_warnings` gives the launcher ONE line per
+RESOLUTION_VARS name the caller set to something tmux's environment does
+not hold, and never refuses.
 
 Every tmux command runs under `host_environ()`: the SERVER may be born from
 this very call, and a server born inside this package's venv would hand
@@ -34,23 +48,37 @@ from __future__ import annotations
 
 import os
 import shlex
+import subprocess
 import sys
-import tempfile
 from collections.abc import Mapping
 from typing import NamedTuple
 
 from sessiontools import tmux as _tmux
 from sessiontools.start.environment import host_environ, without_session_identity
 from sessiontools.start.errors import EXIT_USAGE, PROG, LaunchError
-from sessiontools.start.plan import LaunchPlan
-from sessiontools.start.run import discard_files, run_tmux, write_files
-
-TRAMPOLINE = "launch.sh"
+from sessiontools.start.pane import discard_message_file, temp_window_name
+from sessiontools.start.run import run_tmux
 
 #: The session a placement with no target lands in when the caller is not
 #: inside tmux: one fixed name, so a second launch from a plain terminal
 #: adds a window beside the first instead of a session per agent.
 DEFAULT_TMUX_SESSION = "agents"
+
+#: A pane that exits non-zero STAYS, showing its own stderr and tmux's
+#: `Pane is dead (status N, ...)`: a refused pane (a held agent, a missing
+#: message file) or a shell that cannot find `session` (status 127) leaves
+#: a readable reason. A pane that exits 0 closes.
+#: Measured on tmux 3.8; a tmux without the `failed` value refuses the
+#: option, and the placement says so and goes on (`place_pane`).
+REMAIN_ON_EXIT = "failed"
+
+
+#: What a pane resolves its agent, its state and its sessions by. A caller
+#: whose value differs from tmux's is told, once per name (review F1).
+RESOLUTION_VARS = ("AGENTS_DIR", "SESSION_STATE_DIR", "SESSIONS_DIR")
+
+#: The advisory read must never hold a launch up for long.
+SHOW_ENVIRONMENT_TIMEOUT_S = 5
 
 
 class TmuxPlacement(NamedTuple):
@@ -62,7 +90,6 @@ class TmuxPlacement(NamedTuple):
     created_session: bool
     #: The new pane's id (`%12`) and the pid of the process it runs, as
     #: `new-window -P` printed them; "" and None when tmux printed none.
-    #: The default seat's claim is re-pointed at them.
     pane_id: str = ""
     pane_pid: int | None = None
 
@@ -106,8 +133,8 @@ def should_switch(switch: bool, no_switch: bool,
 
 def check_placeable(session: str, environ: Mapping[str, str] | None = None) -> None:
     """Refuse a tmux launch with nowhere to go. Answerable from argv and the
-    environment alone, so `main` asks before anything is minted or written;
-    `place_in_tmux` asks again, so its contract does not depend on a caller
+    environment alone, so `main` asks before anything is written;
+    `place_pane` asks again, so its contract does not depend on a caller
     having asked first."""
     environ = os.environ if environ is None else environ
     if not session and not environ.get("TMUX"):
@@ -145,59 +172,134 @@ def ensure_session(name: str, environ: Mapping[str, str] | None = None) -> bool:
     return True
 
 
-def write_trampoline(plan: LaunchPlan) -> str:
-    """The plan's script as a 0700 file a pane can execute: in the session
-    directory, or for a pane-minted launch (no directory yet) in a fresh
-    0700 temp directory."""
-    if plan.identity is not None:
-        directory = plan.identity.session_dir
-    else:
-        directory = tempfile.mkdtemp(prefix="session-start-pane-")
-    path = os.path.join(directory, TRAMPOLINE)
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(plan.script)
-    os.chmod(path, 0o700)
-    return path
-
-
-def place_in_tmux(plan: LaunchPlan, session: str, window: str, switch: bool,
-                  environ: Mapping[str, str] | None = None) -> TmuxPlacement:
-    """Write the plan's files and trampoline, then open a DETACHED window
-    that runs it. Returns where it landed; raises LaunchError, leaving
-    nothing behind, if it never got that far."""
-    environ = os.environ if environ is None else environ
-    written: list = []
-    trampoline = None
+def _show_environment(arguments: list[str], environ: Mapping[str, str]
+                      ) -> dict[str, str | None] | None:
+    """`tmux show-environment ARGUMENTS` as {name: value}, a removed name
+    (`-NAME`) as None. None when tmux gives no answer: no server, no such
+    session, no tmux, or one that hangs."""
     try:
-        written = write_files(plan)
-        trampoline = write_trampoline(plan)
+        result = _tmux.run(["show-environment", *arguments], env=host_environ(environ),
+                           timeout=SHOW_ENVIRONMENT_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    shown: dict[str, str | None] = {}
+    for line in result.stdout.splitlines():
+        if line.startswith("-"):
+            shown[line[1:]] = None
+            continue
+        name, sep, value = line.partition("=")
+        if sep:
+            shown[name] = value
+    return shown
+
+
+def pane_environment(session: str, environ: Mapping[str, str] | None = None
+                     ) -> dict[str, str | None] | None:
+    """The environment tmux builds a new pane in SESSION from: the server's
+    global environment (`show-environment -g`), the session's own over it
+    when the session exists ("" is the caller's current one). None when no
+    server answers: a server this placement births is born from the
+    caller's own environment, so there is nothing to differ from."""
+    environ = os.environ if environ is None else environ
+    found = _show_environment(["-g"], environ)
+    if found is None:
+        return None
+    own = _show_environment(["-t", "=" + session] if session else [], environ)
+    if own:
+        found.update(own)
+    return found
+
+
+def environment_warnings(session: str, environ: Mapping[str, str] | None = None
+                         ) -> list[str]:
+    """One line per RESOLUTION_VARS name the caller set (non-empty) to a
+    value tmux's environment for SESSION does not hold (`pane_environment`):
+    a placed pane resolves in tmux's environment, not the caller's. A name
+    the caller left unset or empty, or one that matches, gives none; so
+    does a server that does not answer. Advisory: never a refusal."""
+    environ = os.environ if environ is None else environ
+    mine = {name: environ.get(name, "") for name in RESOLUTION_VARS}
+    if not any(mine.values()):
+        return []
+    theirs = pane_environment(session, environ)
+    if theirs is None:
+        return []
+    lines = []
+    for name, value in mine.items():
+        server = theirs.get(name) or ""
+        if value and value != server:
+            shown = shlex.quote(server) if server else "unset"
+            lines.append(f"warning: {name} is {shlex.quote(value)} here but {shown} in "
+                         "tmux's environment; a placed pane resolves in tmux's "
+                         "environment, so the pane uses tmux's")
+    return lines
+
+
+def placement_sequence(line: str, cwd: str, session: str, window: str, token: str,
+                       handoff: Mapping[str, str]) -> list[str]:
+    """The ONE tmux call that places a pane, so nothing lands between the
+    window and its options:
+
+        new-window -d -P -F FMT -c CWD [-t =S:] -n ssp-TOKEN -e K=V... LINE
+          ; set-option -p -t [=S:]ssp-TOKEN remain-on-exit failed
+          ; rename-window -t [=S:]ssp-TOKEN WINDOW
+
+    The temporary name is unique per launch, so its `-t` finds this window
+    and no other; with no SESSION it is looked up in the caller's current
+    session. A `set-option -p` with NO target would hit the caller's pane,
+    not the new `-d` one (measured, tmux 3.8)."""
+    temporary = temp_window_name(token)
+    target = ["-t", "=" + session + ":"] if session else []
+    named = ("=" + session + ":" if session else "") + temporary
+    handed = [part for name, value in sorted(handoff.items())
+              for part in ("-e", f"{name}={value}")]
+    return ["new-window", "-d", "-P", "-F", NEW_WINDOW_FORMAT, "-c", cwd, *target,
+            "-n", temporary, *handed, line,
+            _tmux.SEPARATOR, "set-option", "-p", "-t", named, "remain-on-exit", REMAIN_ON_EXIT,
+            _tmux.SEPARATOR, "rename-window", "-t", named, window]
+
+
+def place_pane(line: str, cwd: str, session: str, window: str, token: str, switch: bool,
+               handoff: Mapping[str, str], message_file: str | None = None,
+               environ: Mapping[str, str] | None = None) -> TmuxPlacement:
+    """Open a DETACHED window running LINE (the pane's own `session start`)
+    in CWD, HANDOFF in its environment (`placement_sequence`). Returns where
+    it landed; raises LaunchError, having removed MESSAGE_FILE, if it never
+    got that far."""
+    environ = os.environ if environ is None else environ
+    try:
         created = False
-        target: list[str] = []
         if session:
             created = ensure_session(session, environ)
-            target = ["-t", "=" + session + ":"]
         else:
             check_placeable(session, environ)
-        # tmux hands a lone command argument to `sh -c`, so the path is quoted:
-        # a space or `$` in AGENTS_DIR or TMPDIR would split or expand it.
-        printed = run_tmux(["new-window", "-d", "-P", "-F", NEW_WINDOW_FORMAT,
-                            *target, "-n", window, shlex.quote(trampoline)],
-                           environ).split()
+        try:
+            result = _tmux.run(placement_sequence(line, cwd, session, window, token, handoff),
+                               env=host_environ(environ))
+        except FileNotFoundError:
+            raise LaunchError("tmux is not installed (or not on PATH)") from None
+        printed = result.stdout.split()
+        if not printed or not printed[0].startswith("@"):
+            detail = result.stderr.strip() or "(no stderr)"
+            raise LaunchError(f"tmux new-window failed: {detail}")
     except BaseException:
-        # The pane never ran: nothing will read these, so they go.
-        discard_files(written)
-        if trampoline is not None:
-            try:
-                os.unlink(trampoline)
-                if plan.identity is None:      # its own temp directory
-                    os.rmdir(os.path.dirname(trampoline))
-            except OSError:
-                pass
+        # The pane never ran: nothing will read the message file, so it goes.
+        discard_message_file(message_file)
         raise
-    # ---- past the handover: the pane owns the files and the launch --------
+    # ---- past the handover: the pane owns the file and the launch ---------
     window_id, pane_id, pane_pid = _parse_new_window(printed)
-    after = [("automatic-rename off",
-              ["set-window-option", "-t", window_id, "automatic-rename", "off"])]
+    after = []
+    if result.returncode != 0:
+        # new-window ran and a later command of the sequence did not (a tmux
+        # with no `remain-on-exit failed`): say so, and name the window.
+        detail = result.stderr.strip() or "(no stderr)"
+        print(f"{PROG}: placed, but could not set remain-on-exit {REMAIN_ON_EXIT} "
+              f"({detail}); a pane that fails will close with its reason", file=sys.stderr)
+        after.append(("name the window", ["rename-window", "-t", window_id, window]))
+    after.append(("automatic-rename off",
+                  ["set-window-option", "-t", window_id, "automatic-rename", "off"]))
     if created:
         # `new-session` made window 0, a bare shell, and `new-window -d`
         # left it current: make the agent's window the one an attach lands
@@ -217,14 +319,13 @@ def place_in_tmux(plan: LaunchPlan, session: str, window: str, switch: bool,
 
 
 #: What `new-window -P` prints: the window's @id, then the new pane's id and
-#: the pid of its process (the default seat's claim names that pid).
+#: the pid of its process.
 NEW_WINDOW_FORMAT = "#{window_id} #{pane_id} #{pane_pid}"
 
 
 def _parse_new_window(printed: list[str]) -> tuple[str, str, int | None]:
     """`@7 %12 4242` -> ("@7", "%12", 4242). A field tmux did not print is
-    "" or None: the window id is what placement needs, the rest is the
-    seat's."""
+    "" or None: the window id is what placement needs."""
     window_id = printed[0] if printed else ""
     pane_id = printed[1] if len(printed) > 1 and printed[1].startswith("%") else ""
     try:
@@ -234,22 +335,24 @@ def _parse_new_window(printed: list[str]) -> tuple[str, str, int | None]:
     return window_id, pane_id, pane_pid
 
 
-def receipt(plan: LaunchPlan, placement: TmuxPlacement,
+#: The receipt's session id: the pane mints it, after this launcher exits.
+PANE_MINTS = "id minted in the pane"
+
+
+def receipt(who: str, placement: TmuxPlacement,
             environ: Mapping[str, str] | None = None) -> str:
     """The one line a placement prints: who, which window (and its @id),
-    where, and the session id - or that the pane mints it. A caller outside
-    tmux is never switched to the window, so its line ends with how to
-    reach it; a caller inside tmux gets the line unchanged."""
+    where, and that the pane mints the session id. A caller outside tmux is
+    never switched to the window, so its line ends with how to reach it; a
+    caller inside tmux gets the line unchanged."""
     environ = os.environ if environ is None else environ
     if placement.session:
         created = " (created)" if placement.created_session else ""
         where = f"session '{placement.session}'{created}"
     else:
         where = "the current session"
-    sid = plan.identity.session_id if plan.identity is not None else "id minted in the pane"
-    who = plan.agent.name or plan.vendor
     line = (f"{PROG}: placed {who} in tmux window {placement.window!r} "
-            f"({placement.window_id}) of {where} -- session {sid}")
+            f"({placement.window_id}) of {where} -- session {PANE_MINTS}")
     if placement.session and not environ.get("TMUX"):
         line += f"; attach: tmux attach -t {shlex.quote(placement.session)}"
     return line
@@ -258,15 +361,19 @@ def receipt(plan: LaunchPlan, placement: TmuxPlacement,
 __all__ = [
     "DEFAULT_TMUX_SESSION",
     "NEW_WINDOW_FORMAT",
-    "TRAMPOLINE",
+    "PANE_MINTS",
+    "REMAIN_ON_EXIT",
+    "RESOLUTION_VARS",
     "TmuxPlacement",
     "check_placeable",
     "default_session",
     "ensure_session",
+    "environment_warnings",
+    "pane_environment",
     "parse_tmux_target",
-    "place_in_tmux",
+    "place_pane",
+    "placement_sequence",
     "receipt",
     "session_exists",
     "should_switch",
-    "write_trampoline",
 ]

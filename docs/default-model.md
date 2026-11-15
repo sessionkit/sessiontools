@@ -12,9 +12,11 @@ When the pin is set, `enforce` puts `"model"` back.
 - **It edits one member.** Only the top-level `"model"` changes. Every
   other byte of the file stays as it was, and the old file is backed up
   first.
-- **Nothing installs itself.** `enforce` is one pass. To keep the pin
-  standing, `unit` prints a launchd agent or systemd units that run
-  `enforce` on every change, and you install them yourself (below).
+- **Nothing turns itself on.** `enforce` is one pass. To keep the pin
+  standing on a Mac, `session default-model agent on` installs and loads
+  a launchd agent that runs `enforce` on every change. Nothing runs it
+  for you. `unit` prints the same agent, or systemd units, for you to
+  install yourself (below).
 - **Fable is never pinned,** whatever the environment says.
 - **One session, not the default?** This page is about the default every
   new `claude` starts on. It never changes a running session.
@@ -61,6 +63,10 @@ Name the model in the `session` tool's host settings,
   with no login session (below), or to see it work.
 - `session default-model unit launchd|systemd`: print the agent or the
   units on stdout. It installs and loads nothing.
+- `session default-model agent on|off|status`: on a Mac, install and
+  load the launchd agent, remove it, or report it. `on` and `off` take
+  `--dry-run`, and `status` takes `--json`
+  ([the agent][agent-on]).
 
 ```console
 $ session default-model enforce
@@ -82,9 +88,77 @@ the newest model in its family, so an alias is the pin most people want.
 ## Keep it pinned: install one unit
 
 `enforce` runs once. Something has to run it again each time
-settings.json is rewritten. `unit` prints that something, watching
-settings.json (and its target, when it is a symlink) and the `session`
-tool's host settings, so a change to the pin takes effect at once.
+settings.json is rewritten. The unit does that, watching settings.json
+(and its target, when it is a symlink) and the `session` tool's host
+settings, so a change to the pin takes effect at once. On a Mac,
+`agent on` installs it for you. `unit` prints it, for Linux or a hand
+install.
+
+### On a Mac: `agent on`
+
+```sh
+session default-model agent on
+```
+
+- **`on` is the install.** It writes
+  `~/Library/LaunchAgents/dev.sessionkit.tools.default-model.plist`, the
+  exact text `unit launchd` prints, and loads it into your login session
+  (`gui/<uid>`). It loads again at every login.
+- **It replaces a job of the same label,** one you loaded by hand
+  included. Run `on` again after an upgrade, or after you change
+  `CLAUDE_CONFIG_DIR` or `SESSION_STATE_DIR`.
+- **`on` exits 0 once launchd has the job loaded.** The job runs
+  `enforce` once at load and on each change, then exits, so `status`
+  shows no pid between runs. That is the healthy state.
+- **With the pin unset,** `on` still loads the job and says, on stderr,
+  that it will do nothing until `model.default` is set. Setting the pin
+  later takes effect at once.
+- **Refused, exit 3, nothing changed:** a host that is not macOS, a pin
+  off the list, or no `session` found.
+- `--dry-run` prints the plist, the service file and the launchctl steps,
+  and changes nothing.
+- `session default-model agent status` reports the plist, the program it
+  runs, whether it is loaded, the last exit, the log and the service file.
+
+### The service file
+
+`on` and `off` also write
+`~/.sessionkit/tools/services/default-model.json`. It is the file
+`sessionkit service list` reads to find this job. The folder sits beside
+`settings/`, never inside it, so `session settings` never reads it.
+
+- **`on`** writes it right after the plist, with `"enabled": true`.
+- **`off`** rewrites it with `"enabled": false` and keeps the file.
+- **A refused `on`** writes no file. **`--dry-run`** prints the file
+  under `service would write PATH:` and writes nothing.
+- **Each write is whole and atomic.** A reader never sees half a file.
+
+```json
+{
+  "service": 1,
+  "name": "default-model",
+  "label": "dev.sessionkit.tools.default-model",
+  "enabled": true,
+  "install": "session default-model agent on",
+  "uninstall": "session default-model agent off",
+  "description": "puts the pinned default model back in Claude Code's settings.json",
+  "kind": "on-demand"
+}
+```
+
+`kind` is `on-demand`: the job has no pid between runs, and that is not
+a fault.
+
+**If the write fails,** the job is still loaded by `on` (or booted out
+by `off`), as you asked. The verb prints this line, then exits 4:
+
+```text
+service could not write PATH: REASON; the previous file is unchanged
+```
+
+Run the same verb again once the folder is writable.
+
+### By hand: `unit`
 
 - **Render it from the shell whose settings it should guard.** It names
   the absolute `session` of this install, and carries
@@ -146,7 +220,15 @@ systemctl --user start sessiontools-default-model.service
 ## Turn it off
 
 Remove `model.default`, and the next pass does nothing. To remove the
-unit too:
+agent too, on a Mac:
+
+```sh
+session default-model agent off
+```
+
+`off` boots the job out and removes its plist, one you installed by hand
+included, and writes the service file with `"enabled": false`. To remove
+a unit by hand instead:
 
 ```sh
 launchctl bootout gui/$(id -u)/dev.sessionkit.tools.default-model
@@ -187,11 +269,12 @@ systemctl --user daemon-reload
 | `0` | done, already in sync, or unset |
 | `2` | usage |
 | `3` | refused, nothing written |
-| `4` | a backup, write, read-back or log line failed |
+| `4` | a backup, write, read-back or log line failed; for `agent`, a plist or service-file write or a launchctl load |
 | `5` | settings.json could not be read |
 
 `show` exits with the code `enforce` would, so a script can ask first.
 Under a unit, a non-zero exit is a line in its log, and the next change
 retries.
 
+[agent-on]: #on-a-mac-agent-on
 [session-keys]: settings.md#the-session-tools-keys

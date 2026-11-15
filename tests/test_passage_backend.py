@@ -12,7 +12,9 @@ and the conftest's walled stub, stay refused.
 
 The stub `passage` keeps a scratch store under the test's HOME
 (`PASSAGE_DIR`): `insert -m` stores the BASE64 of stdin in `<entry>.age`,
-so a plaintext token on disk is a leak, and `show` decodes it.
+so a plaintext token on disk is a leak, and `show` decodes it. Given
+`STDERR_AT_SHOW`, `show` first copies that file aside, so a launch test can
+read what the launch had already said when the decrypt began.
 """
 
 from __future__ import annotations
@@ -28,7 +30,14 @@ from pathlib import Path
 
 import pytest
 from settings_support import host
-from start_support import WALLED_STUBS, walled_bin
+from start_support import (
+    TIMEOUT_S,
+    WALLED_STUBS,
+    at_a_terminal,
+    clean_env,
+    make_agents_root,
+    walled_bin,
+)
 
 import sessiontools.account
 from sessiontools.account import registry as reg
@@ -53,6 +62,9 @@ case "$1" in
     base64 > "$store/$3.age"
     ;;
   show)
+    # A launch test names its stderr file: what the launch had said when
+    # the decrypt began is copied aside, so its order is measured.
+    [ -z "${STDERR_AT_SHOW:-}" ] || cp "$STDERR_AT_SHOW" "$STDERR_AT_SHOW.at-show"
     case "$mode" in
       fail)  echo "age: error: no identity matched any of the recipients" >&2
              echo "second line" >&2; exit 1 ;;
@@ -368,11 +380,71 @@ def test_the_account_registry_has_passage_at_the_cost_of_a_touch():
     assert st.sources_text(account) == "passage (touch), file (free)"
 
 
-def test_session_start_does_not_get_passage():
-    """OQ-6 default: the account registry only (design §5)."""
-    assert set(secrets.BACKENDS) == {"pass"}
+def test_session_start_resolves_passage(passage, capsys):
+    """A launch reads `NAME: passage:ENTRY` too, through the same backend
+    as the account registry."""
+    assert secrets.BACKENDS["passage"] is secrets.passage_backend
+    assert set(secrets.BACKENDS) == {"pass", "passage"}
+    token = synthetic_token()
+    passage.insert(ENTRY, f"{token}\n")
+    passage.forget()
     [result] = secrets.resolve_secrets([DeclaredSecret("T", "passage", ENTRY)])
-    assert result.error == "unknown backend 'passage' (known: pass)"
+    assert result.ok and result.value == token
+    assert token not in repr(result)
+    assert passage.calls() == [f"passage show {ENTRY}"]
+    assert_absent(token, capsys, *secrets.report_lines([result]))
+
+
+def test_a_launch_with_a_missing_passage_entry_fails_without_a_touch(passage):
+    """A typo in the agent file costs no touch: the entry is refused before
+    `passage show` runs, and the launch's result carries the reason."""
+    [result] = secrets.resolve_secrets([DeclaredSecret("T", "passage", "no/such/entry")])
+    assert not result.ok and result.value is None
+    assert result.error.startswith("no passage entry no/such/entry in ")
+    assert passage.calls() == []
+
+
+# The vendor records what it was handed; the launch's own stderr is a FILE,
+# so the stub passage can copy what had been said when it was asked.
+VENDOR_RECORDS = """#!/usr/bin/env bash
+printf '%s' "${GH_TOKEN-UNSET}" > "$RECORD_DIR/token"
+"""
+TOUCH_NOTICE = f"passage:{ENTRY} -- age may ask for Touch ID or a key touch"
+
+
+def test_a_launch_says_age_may_wait_before_passage_runs(passage, tmp_path):
+    """A real `session start` run, at a terminal, of an agent declaring a
+    `passage:` secret: the vendor gets the value, no output carries it, and
+    the Touch ID notice was ALREADY on the launch's stderr when the stub
+    `passage show` began. A wait for a touch is never silent."""
+    token = synthetic_token()
+    passage.insert(ENTRY, f"{token}\n")
+    passage.forget()
+    record, vbin, work = tmp_path / "record", tmp_path / "vbin", tmp_path / "work"
+    for path in (record, vbin, work):
+        path.mkdir()
+    (vbin / "claude").write_text(VENDOR_RECORDS)
+    (vbin / "claude").chmod(0o755)
+    root = make_agents_root(
+        tmp_path, front_matter=f"environment:\n  secrets:\n    GH_TOKEN: passage:{ENTRY}\n")
+    stderr_file = tmp_path / "launch-stderr"
+    env = clean_env(AGENTS_DIR=root, RECORD_DIR=str(record),
+                    STDERR_AT_SHOW=str(stderr_file),
+                    PATH=f"{vbin}{os.pathsep}{os.environ['PATH']}")
+    with stderr_file.open("w") as err:
+        result = subprocess.run(at_a_terminal("scout", "hello"), stdout=subprocess.PIPE,
+                                stderr=err, text=True, timeout=TIMEOUT_S, cwd=str(work),
+                                env=env, check=False)
+    stderr = stderr_file.read_text()
+    assert result.returncode == 0, stderr
+    assert passage.calls() == [f"passage show {ENTRY}"]
+    at_show = Path(f"{stderr_file}.at-show").read_text()
+    assert TOUCH_NOTICE in at_show, "passage ran before the launch said age may wait"
+    assert stderr.count(TOUCH_NOTICE) == 1
+    assert "secret: GH_TOKEN loaded from passage" in result.stdout
+    assert (record / "token").read_text() == token
+    for text in (result.stdout, stderr, at_show):
+        assert token not in text
 
 
 def test_the_add_help_names_passage():

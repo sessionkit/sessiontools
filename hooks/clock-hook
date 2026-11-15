@@ -11,8 +11,8 @@
 #   python older than 3.11          exit 0 (the -c guard below)
 #   python crashes, or anything     exit 0, stderr to /dev/null
 #
-# SESSION_CLOCK_WARN_AT (the warn mark) is read by python, not here: the
-# line is said on every batch once switched on, mark or no mark.
+# The line is said on every batch once switched on. It has no warn mark:
+# SESSION_CLOCK_WARN_AT is retired, and nothing reads it.
 #
 # The python is the one settle-hook and busy-sound run: `pick`, from
 # pick-python.sh beside this file, sourced with `.` (no fork) and only once

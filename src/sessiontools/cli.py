@@ -5,6 +5,7 @@ sessiontools provides `session`, same verbs, and the verbs are PORTED -
 package code, well structured, in the right place - not copied.
 
     session list [--json] [--no-recap] [--no-context] [--pane NAME] [--fresh]
+    session list --past SEAT [--json]   every session recorded as SEAT, oldest first
     session get [PROP [SEAT]] [--json]
     session context [SEAT] [--peak] [--max N] [--parts [--tools] | --startup | --boot | --hooks] [--json]
     session start ...        launch a session from an agent file
@@ -19,7 +20,10 @@ package code, well structured, in the right place - not copied.
     session default-model [show [--json] | list [--json] | enforce [--dry-run]]
     session default-model watch [--interval S] | unit launchd|systemd
                              pin the default every NEW claude starts on
+    session default-model agent on|off|status   the enforcer's launchd agent (opt-in)
     session ledger [SEAT] [--summary|--short|--long|--json] [--width N]
+    session commands [TARGET] [--count|--raw|--json] [--since WHEN] [--until WHEN]
+                     [--grep RE] [--width N]
     session account list | status | use NAME | add NAME | remove NAME
     session reap [--idle DURATION] [--json] [--yes] [SHORT...]   idle seats, CLOSE or KEEP
     session park [--letter REF] [--no-promises | --promise TEXT... [--handed-on REF] | --handed-on REF]
@@ -29,6 +33,7 @@ package code, well structured, in the right place - not copied.
     session completion bash|zsh   a shell completion script, on stdout
     session web pair | logout [ID... | --all] | rescan | serve [--host H] [--port N]
                              the kit web front door (PROPOSED)
+    session web declare [--dry-run]   write web.json for `sessionkit service` (installs nothing)
     session mail ...         (retired: says where each verb went)
 
 Two runtime dependencies, each imported lazily by the verb that needs it:
@@ -61,14 +66,16 @@ VERBS = (
     ("operator", "who seats ask, and who is privileged (one line of JSON)"),
     ("statusline", "install or check Claude Code's status line, or print its sample payload"),
     ("pane-state", "each seat's BUSY / FREE / UNKNOWN, on its tmux pane (show | watch | agent)"),
-    ("default-model", "pin the default every NEW claude starts on (show | list | enforce | watch | unit)"),
+    ("default-model", "pin the default every NEW claude starts on (show | list | enforce | watch | unit | agent)"),
     ("ledger", "every file a session read and command it ran, with the tokens of each"),
+    ("commands", "the Bash commands a seat's sessions ran, cut down to the programs"),
     ("account", "the Claude account this Mac is on, and the switch (list | status | use)"),
     ("reap", "every seat idle past a limit, CLOSE or KEEP and why (--yes closes)"),
     ("park", "say this seat has settled, and what the checks found (--check reads it back)"),
+    ("respawn", "restart a seat in its own pane with its recorded start line (--go acts)"),
     ("path", "where tools keeps each leaf of its state (state, sessions, ...), for peers"),
     ("completion", "a completion script for bash or zsh, on stdout"),
-    ("web", "the kit's web front door (serve | pair | logout | rescan); PROPOSED"),
+    ("web", "the kit's web front door (serve | pair | logout | rescan | declare); PROPOSED"),
 )
 
 
@@ -79,13 +86,20 @@ def usage() -> str:
 
 
 def _list_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="session list",
-                                description="The live sessions and their tmux panes.")
+    from sessiontools import window as _w
+    p = argparse.ArgumentParser(
+        prog="session list", description="The live sessions and their tmux panes.",
+        epilog="--json adds, per row, from the transcript (null with --no-context): "
+               "context_used, context_peak, context_window, context_pct, context_model, "
+               "last_request_at and cache_age_s. " + _w.CACHE_CLOCK_HELP)
     p.add_argument("--json", action="store_true", help="machine-readable")
     p.add_argument("--no-recap", action="store_true", help="accepted; recaps are not ported yet")
     p.add_argument("--no-context", action="store_true",
                    help="skip CONTEXT (a transcript read per seat): '-' cells, null keys")
     p.add_argument("--pane", metavar="NAME", help="print the pane id of the session matching NAME")
+    p.add_argument("--past", metavar="SEAT",
+                   help="SEAT's recorded sessions on this host instead, oldest first: "
+                        "id, start, last write, turns")
     p.add_argument("--fresh", action="store_true",
                    help="compute now, not from the shared snapshot (still refreshes it); "
                         "or set SESSION_LIST_FRESH=1")
@@ -95,6 +109,14 @@ def _list_parser() -> argparse.ArgumentParser:
 def _list(argv: list[str]) -> int:
     from sessiontools import listing, snapshot
     a = _list_parser().parse_args(argv)
+    if a.past is not None:
+        from sessiontools import past
+        rows = past.sessions(a.past)
+        if not rows:
+            print(f"session list: no session is recorded as seat {a.past!r}", file=sys.stderr)
+            return 1
+        print(past.render_json(rows) if a.json else past.render_table(rows))
+        return 0
     # One computation, many readers: a young snapshot serves, and
     # callers that arrive together share one computation. --pane needs no
     # CONTEXT, so any young snapshot serves it.
@@ -114,7 +136,10 @@ def _get_parser() -> argparse.ArgumentParser:
     """`session get`'s parser; PROP completes from `get.PROPS`, the table
     `get` checks it against."""
     from sessiontools import get as _g
-    p = argparse.ArgumentParser(prog="session get", description="Read one property of a live seat.")
+    from sessiontools import window as _w
+    p = argparse.ArgumentParser(prog="session get", description="Read one property of a live seat.",
+                                epilog="Bare `session get` lists the props. "
+                                       + _w.CACHE_CLOCK_HELP)
     offer(p.add_argument("prop", nargs="?"), _g.PROPS)
     p.add_argument("seat", nargs="?")
     p.add_argument("--json", action="store_true")
@@ -314,8 +339,14 @@ def _context(argv: list[str]) -> int:
         print(f"Context: ? - the last reading is a <synthetic> zero; the peak was "
               f"{fmt(u.peak)} (--peak)")
     elif size is None:
-        print(f"Context: {fmt(used)} / ? - {window.why_unknown(u.model, used)} "
-              f"(--max N asserts one){tag}")
+        guess = window.assumed_pct(window.Fullness(used=used, model=u.model))
+        if guess is not None:
+            print(f"Context: {fmt(used)} / {fmt(window.ASSUMED_WINDOW)}? ({guess}%?) - "
+                  f"{window.why_unknown(u.model, used)}, so 1M is assumed "
+                  f"(--max N asserts one){tag}")
+        else:
+            print(f"Context: {fmt(used)} / ? - {window.why_unknown(u.model, used)} "
+                  f"(--max N asserts one){tag}")
     else:
         print(f"Context: {fmt(used)} / {fmt(size)} ({pct}%) · {fmt(free)} free{tag}")
     return 0
@@ -323,13 +354,17 @@ def _context(argv: list[str]) -> int:
 
 def _context_band(used: int | None, sid: str) -> str | None:
     """`band` for `--parts --json` and the bare `--json`: None (JSON
-    null) with no settle threshold, so no settings are read then. With one,
-    the near cut comes from the settings cascade; a session with no settings
+    null) with no reading or no settle threshold (`settle.soft.at` through
+    the session's cascade, `band.threshold`), and no note then. With one,
+    the near cut comes from the same cascade; a session with no settings
     directory reads only the host and template layers, and stderr says so
     (otherwise "no such session" and "the default" look alike). `sessiontools.band` sits outside `context_parts`, so the
     bare path never imports the fold."""
     from sessiontools import band, settings
-    if used is None or band.threshold() is None:
+    if used is None:
+        return None
+    at = band.threshold(sid)
+    if at is None:
         return None
     try:
         _sid, note = settings.resolve_sid(sid)
@@ -338,7 +373,7 @@ def _context_band(used: int | None, sid: str) -> str | None:
     if note:
         print(f"session context: band: {note}; the near cut is "
               f"{band.near_pct(sid):g}% of the settle threshold", file=sys.stderr)
-    return band.band_for(used, sid)
+    return band.band(used, at, band.near_pct(sid))
 
 
 def _context_view(view: str, path, *, tools: bool, json_out: bool,
@@ -588,7 +623,7 @@ def _pane_state(argv: list[str]) -> int:
 
 
 def _default_model(argv: list[str]) -> int:
-    """`session default-model show|list|enforce|watch|unit`: the pin of settings.json's
+    """`session default-model show|list|enforce|watch|unit|agent`: the pin of settings.json's
     "model". Imported here and nowhere else."""
     from sessiontools import default_model_cli
     return default_model_cli.main(argv)
@@ -668,6 +703,13 @@ def _ledger(argv: list[str]) -> int:
     return 0
 
 
+def _commands(argv: list[str]) -> int:
+    """`session commands [TARGET]`: the Bash commands a seat's sessions ran,
+    cut down to the programs. Imported here and nowhere else."""
+    from sessiontools.commands import cli as commands_cli
+    return commands_cli.main(argv)
+
+
 def _write_out(text: str) -> None:
     """Write TEXT to stdout. A reader that stops early (`| head`) is not an
     error: no traceback, and not exit 1, which means "no transcript". The
@@ -714,6 +756,14 @@ def _reap(argv: list[str]) -> int:
     tests/test_cli.py pins it)."""
     from sessiontools import reap
     return reap.main(argv)
+
+
+def _respawn(argv: list[str]) -> int:
+    """`session respawn`: restart a seat in its own pane from its launch
+    record. Imported here and nowhere else, like reap: it reads the record
+    through `session start`'s modules."""
+    from sessiontools import respawn
+    return respawn.main(argv)
 
 
 def _park(argv: list[str]) -> int:
@@ -832,8 +882,9 @@ def _path(argv: list[str]) -> int:
 
 
 def _web(argv: list[str]) -> int:
-    """`session web pair|logout|rescan`: the kit web front door (PROPOSED,
-    kit-web-shell). Imported here and nowhere else; stdlib only."""
+    """`session web pair|logout|rescan|passkeys|serve|declare`: the kit web
+    front door (PROPOSED, kit-web-shell); `declare` writes web.json and
+    installs nothing. Imported here and nowhere else; stdlib only."""
     from sessiontools.web import cli as web_cli
     return web_cli.main(argv)
 
@@ -843,7 +894,9 @@ HANDLERS = {"list": _list, "get": _get, "context": _context, "start": _start, "a
             "settings": _settings, "sound": _sound, "operator": _operator,
             "statusline": _statusline, "pane-state": _pane_state,
             "default-model": _default_model, "ledger": _ledger,
+            "commands": _commands,
             "account": _account, "reap": _reap, "park": _park,
+            "respawn": _respawn,
             "path": _path, "completion": _completion, "web": _web}
 
 #: Each verb's parser, as a `sessiontools.verbs` reference: a builder, or a
@@ -862,11 +915,13 @@ PARSERS = {"list": "sessiontools.cli:_list_parser",
            "operator": "sessiontools.cli:_operator_parser",
            "statusline": "sessiontools.statusline:GROUP",
            "pane-state": "sessiontools.pane_state:GROUP",
-           "default-model": "sessiontools.default_model_cli:build_parser",
+           "default-model": "sessiontools.default_model_cli:GROUP",
            "ledger": "sessiontools.cli:_ledger_parser",
+           "commands": "sessiontools.commands.cli:build_parser",
            "account": "sessiontools.account.cli:parser",
            "reap": "sessiontools.reap:build_parser",
            "park": "sessiontools.park:build_parser",
+           "respawn": "sessiontools.respawn:build_parser",
            "path": "sessiontools.paths:GROUP",
            "completion": "sessiontools.cli:_completion_parser",
            "web": "sessiontools.web.cli:build_parser"}

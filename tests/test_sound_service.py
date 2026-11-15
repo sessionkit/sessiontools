@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 from wheel_support import build_wheel_offline
 
-from sessiontools import cli, sound
+from sessiontools import cli, service_file, settings, sound
 from sessiontools.sound import service
 
 REPO = Path(__file__).resolve().parent.parent
@@ -304,6 +304,7 @@ def nothing_changed(fence):
     assert not service.plist_path().exists()
     assert set(verbs(fence["calls"])) <= {"print"}
     assert not fence["loaded"]
+    assert not settings.services_dir().exists()            # no service file, no folder
 
 
 def test_on_refuses_when_the_port_is_held_naming_the_holder(fence, capsys):
@@ -511,6 +512,186 @@ def test_off_when_not_loaded_runs_no_bootout(fence, capsys):
     rc, out, _ = run(["off"], capsys)
     assert rc == 0 and "was not loaded" in out
     assert set(verbs(fence["calls"])) <= {"print"}
+
+
+# --- the service file (ST-289) ------------------------------------------------------
+
+SERVICE_KEYS = ["service", "name", "label", "enabled", "install", "uninstall", "description",
+                "port", "protocol", "bind", "note"]
+CHANGING = {"bootout", "bootstrap"}
+
+
+def service_json() -> Path:
+    return settings.services_dir() / "sound-engine.json"
+
+
+def plist_port() -> int:
+    args = plistlib.loads(service.plist_path().read_bytes())["ProgramArguments"]
+    return int(args[args.index("--port") + 1])
+
+
+def test_the_service_record_carries_every_designed_key(monkeypatch):
+    monkeypatch.delenv(sound.PORT_ENV, raising=False)
+    r = service.service_record(True)
+    assert list(r) == SERVICE_KEYS
+    assert r == {"service": 1, "name": "sound-engine",
+                 "label": "dev.sessionkit.tools.sound-engine", "enabled": True,
+                 "install": "session sound engine on", "uninstall": "session sound engine off",
+                 "description": "the busy sound's resident audio engine",
+                 "port": 44100, "protocol": "udp", "bind": "127.0.0.1",
+                 "note": "runs only in a logged-in GUI session (LimitLoadToSessionType Aqua)"}
+    assert service.service_record(False)["enabled"] is False
+    assert service_file.check(r) == []
+
+
+def test_the_service_facts_derive_from_the_job(monkeypatch):
+    """name from the label (prefix stripped), install from PROG (the parser's
+    prog too), port from sound.port (the plist's --port), bind from
+    sound.HOST, the note from the plist's own session type."""
+    monkeypatch.setenv(sound.PORT_ENV, "45001")
+    r = service.service_record(True)
+    assert r["name"] == service.LABEL.removeprefix("dev.sessionkit.tools.") == service.SERVICE
+    assert r["install"] == f"{service.PROG} on" and r["uninstall"] == f"{service.PROG} off"
+    assert service.build_parser().prog == service.PROG == "session sound engine"
+    args = service.plist()["ProgramArguments"]
+    assert r["port"] == int(args[args.index("--port") + 1]) == sound.port() == 45001
+    assert r["bind"] == sound.HOST and r["protocol"] == service.PROTOCOL == "udp"
+    assert service.plist()["LimitLoadToSessionType"] == service.SESSION_TYPE == "Aqua"
+
+
+def test_on_then_off_leaves_one_file_enabled_true_then_false(fence, capsys):
+    rc, out, err = run(["on"], capsys)
+    assert rc == 0, out + err
+    assert f"service {service_json()} (enabled: true)" in out
+    assert sorted(settings.services_dir().iterdir()) == [service_json()]
+    on = json.loads(service_json().read_text())
+    assert list(on) == SERVICE_KEYS and on["enabled"] is True
+    assert service_json().read_text() == service_file.render(service.service_record(True))
+    rc, out, err = run(["off"], capsys)
+    assert rc == 0, out + err
+    assert f"service {service_json()} (enabled: false)" in out
+    assert sorted(settings.services_dir().iterdir()) == [service_json()]     # kept
+    off = json.loads(service_json().read_text())
+    assert off == {**on, "enabled": False}
+
+
+def test_off_purge_keeps_the_service_file(fence, capsys):
+    assert run(["on"], capsys)[0] == 0
+    rc, out, err = run(["off", "--purge"], capsys)
+    assert rc == 0, out + err
+    assert list(service.bin_dir().iterdir()) == []                      # the binaries went
+    assert json.loads(service_json().read_text()) == service.service_record(False)
+
+
+def test_moving_the_port_moves_the_plist_and_the_file(fence, capsys):
+    """fence sets SESSIONTOOLS_SOUND_PORT to a free port: both follow it."""
+    assert fence["port"] != sound.PORT
+    rc, out, err = run(["on", "--dry-run"], capsys)
+    assert rc == 0, out + err
+    assert f'"port": {fence["port"]},' in out
+    assert f"<string>{fence['port']}</string>" in out                   # the plist's --port
+    assert not settings.services_dir().exists() and not service.plist_path().exists()
+    assert run(["on"], capsys)[0] == 0
+    assert plist_port() == json.loads(service_json().read_text())["port"] == fence["port"]
+
+
+def test_the_service_file_is_written_beside_the_plist_before_the_load(fence, capsys):
+    """design 2.1: the file goes with the plist, before bootout/bootstrap."""
+    seen = {}
+    fence["state"]["on_bootstrap"] = lambda data: seen.update(file=service_json().exists())
+    assert run(["on"], capsys)[0] == 0
+    assert seen == {"file": True}
+
+
+def test_the_service_file_never_lands_under_settings(fence, capsys):
+    assert run(["on"], capsys)[0] == 0
+    assert not settings.package_dir(settings.PACKAGES["session"]).exists()
+    assert settings.services_dir().parent == settings.kit_root() / "tools"
+
+
+def test_off_with_no_file_writes_one_disabled(fence, capsys):
+    assert not service_json().exists()
+    rc, out, _ = run(["off"], capsys)
+    assert rc == 0 and "was not loaded" in out
+    assert json.loads(service_json().read_text())["enabled"] is False
+
+
+def test_a_failed_on_bootstrap_leaves_the_file_enabled(fence, capsys):
+    fence["state"]["bootstrap_fail"] = 2
+    assert run(["on"], capsys)[0] == 1
+    assert json.loads(service_json().read_text())["enabled"] is True
+
+
+@pytest.mark.parametrize("verb", ["on", "off"])
+def test_a_dry_run_prints_the_file_and_writes_none(fence, capsys, verb):
+    rc, out, err = run([verb, "--dry-run"], capsys)
+    assert rc == 0, out + err
+    rec = service.service_record(verb == "on")
+    block = f"service would write {service_json()}:\n{service_file.render(rec)}"
+    assert block in out + "\n"
+    assert not settings.services_dir().exists()
+    assert not set(verbs(fence["calls"])) & CHANGING
+
+
+def test_off_dry_run_says_nothing_was_removed_or_written(fence, capsys):
+    rc, out, _ = run(["off", "--dry-run", "--purge"], capsys)
+    assert rc == 0
+    assert out.rstrip().splitlines()[-1] == ("dry run: nothing was removed or written, and no "
+                                             "launchctl verb that changes anything ran")
+
+
+def test_a_refused_on_writes_no_service_file(fence, capsys, monkeypatch):
+    monkeypatch.setattr(service, "swiftc", lambda: None)
+    rc, _, err = run(["on"], capsys)
+    assert rc == 2 and err.startswith(f"{service.PROG} on: refused: no swiftc")
+    nothing_changed(fence)
+
+
+def unwritable_services():
+    """A file where the services folder goes: every write fails, for real."""
+    settings.services_dir().parent.mkdir(parents=True, exist_ok=True)
+    settings.services_dir().write_text("not a folder\n")
+
+
+def test_a_failed_service_write_on_still_loads_the_engine_and_exits_1(fence, capsys):
+    unwritable_services()
+    rc, out, err = run(["on"], capsys)
+    assert rc == 1, out + err
+    line = next(x for x in out.splitlines() if x.startswith("service could not write "))
+    assert line.startswith(f"service could not write {service_json()}: ")
+    assert line.endswith("; the previous file is unchanged")
+    assert service.LABEL in fence["loaded"]                             # the act is done
+    assert [c[0] for c in fence["calls"] if c[0] in CHANGING] == ["bootout", "bootstrap"]
+    assert fence["pings"] == [fence["port"]] and f"on     {service.LABEL}" in out
+    assert service.plist_path().exists()
+
+
+def test_a_failed_service_write_on_off_still_boots_out_and_exits_1(fence, capsys):
+    assert run(["on"], capsys)[0] == 0
+    before = service_json().read_bytes()
+    os.chmod(settings.services_dir(), 0o500)
+    try:
+        rc, out, _ = run(["off", "--purge"], capsys)
+    finally:
+        os.chmod(settings.services_dir(), 0o755)
+    assert rc == 1
+    assert "service could not write " in out and "the previous file is unchanged" in out
+    assert service.LABEL not in fence["loaded"] and not service.plist_path().exists()
+    assert list(service.bin_dir().iterdir()) == []                      # purge still ran
+    assert service_json().read_bytes() == before                         # enabled true, whole
+
+
+def test_the_help_and_the_page_name_the_file_and_quote_the_failure_line():
+    line = service_file.COULD_NOT_WRITE.format(path="PATH", reason="REASON")
+    page = (REPO / "docs" / "sound-engine-agent.md").read_text()
+    for text in (service.EPILOG, page):
+        assert "~/.sessionkit/tools/services/sound-engine.json" in text
+        assert line in text
+    assert "or the service file" in service.EPILOG and "--purge too" in service.EPILOG
+    assert "127.0.0.1:44100/udp" in service.EPILOG
+    rec = service.service_record(True)
+    shown = json.loads(page.split("```json\n", 1)[1].split("```", 1)[0])
+    assert list(shown) == list(rec) and shown == {**rec, "port": sound.PORT}
 
 
 # --- status -------------------------------------------------------------------------

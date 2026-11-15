@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -69,7 +70,8 @@ class Clock:
 # --- the shape round-trips ---------------------------------------------------------
 
 def test_a_row_round_trips_through_the_wire():
-    for row in (a_row(), a_row(fullness=FULL)):
+    clocked = replace(FULL, last_request_at="2030-06-09T02:45:11.553Z")    # ST-326
+    for row in (a_row(), a_row(fullness=FULL), a_row(fullness=clocked)):
         back = snapshot.row_from_wire(json.loads(json.dumps(snapshot.row_to_wire(row))))
         assert back == row
 
@@ -540,3 +542,13 @@ def test_the_live_verbs_never_open_the_snapshot(fleet, monkeypatch, capsys):  # 
         assert cli.main(argv) == 0, argv
     capsys.readouterr()
     holders.survey("bob", table=lambda: procs.table())
+
+
+def test_a_snapshot_from_before_the_cache_clock_is_refused_not_misread():
+    """ST-326 added `last_request_at` to Fullness. A row written without it
+    differs in its fields, so it is corrupt to this reader: the caller
+    computes afresh, and never serves a row with no clock as a known one."""
+    wire = json.loads(json.dumps(snapshot.row_to_wire(a_row(fullness=FULL))))
+    del wire["fullness"]["last_request_at"]
+    with pytest.raises(ValueError, match="fullness fields differ"):
+        snapshot.row_from_wire(wire)

@@ -7,7 +7,7 @@ BUMP ?= patch
 # #!/bin/sh, #!/bin/bash, #!/usr/bin/env sh|bash (the old pattern had no bin/,
 # so it matched none of them and shellcheck linted nothing)
 SHELLSCRIPTS := $(shell { git ls-files -z | xargs -0 awk 'FNR==1 && /^\#!\/(usr\/)?bin\/(env +)?(ba)?sh([ \t]|$$)/ {print FILENAME}'; git ls-files '*.sh'; } | sort -u)
-.PHONY: push publish help install test lint lock-check format check build release
+.PHONY: push publish help install test lint lock-check format check build pypi-dist release
 
 help:  ## this list
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -40,6 +40,34 @@ check: lint test  ## lint, then test
 build:  ## wheel + sdist into dist/
 	@uv build
 
+# PyPI shows README.md, where the repo's RELATIVE links 404 (ST-312). pypi-dist
+# builds from the release TAG, never the checkout: `git archive` into a scratch
+# stage, pin the stage's README links to the tag (the KIT's one
+# scripts/pypi_readme.py, SK-140; never a copy here), `uv build` there into
+# dist/, then check BOTH the wheel and the sdist for any relative link left.
+# The links point at the PUBLIC repo's tag and the dist is built from the LOCAL
+# one, so they must be the same commit: it refuses unless the kit's
+# `pypi_readme.py tag-check` (SK-289; ST-323) finds the tag on PUBLIC_REMOTE at
+# the commit it names here, and that refusal names both shas. A kit older than
+# SK-289 has no tag-check, so it refuses too. KIT_DIR is where the
+# sessionkit checkout lives (default: the sibling ../sessionkit); every
+# variable is overridable, e.g. `make pypi-dist KIT_DIR=/path/to/sessionkit`.
+# The family repos share this shape, so each points at the kit's one script.
+KIT_DIR ?= ../sessionkit
+PYPI_README ?= python3 $(KIT_DIR)/scripts/pypi_readme.py
+PUBLIC_REMOTE ?= https://github.com/sessionkit/sessiontools.git
+pypi-dist:  ## wheel + sdist from tag v<version>, README links pinned to it (the kit's pypi_readme.py); the tag must be the same commit on PUBLIC_REMOTE
+	@[ -f "$(KIT_DIR)/scripts/pypi_readme.py" ] || { echo "pypi-dist: the kit's README rewriter is not at $(KIT_DIR)/scripts/pypi_readme.py; check out sessionkit beside this repo, or run 'make pypi-dist KIT_DIR=/path/to/sessionkit'" >&2; exit 1; }
+	@set -euo pipefail; v="v$$(uv version --short)"; \
+	$(PYPI_README) tag-check --tag "$$v" --remote "$(PUBLIC_REMOTE)" \
+	  || { echo "pypi-dist: refused: tag $$v here must be the same commit on $(PUBLIC_REMOTE) (the kit's tag-check, SK-289); nothing built" >&2; exit 1; }; \
+	stage="$$(mktemp -d)"; trap 'rm -rf "$${stage:?}"' EXIT; \
+	git archive "$$v" | tar -x -C "$$stage"; \
+	$(PYPI_README) rewrite --repo sessionkit/sessiontools --ref "$$v" --root "$$stage" "$$stage/README.md"; \
+	(cd "$$stage" && uv build --out-dir "$(CURDIR)/dist"); \
+	dist="dist/$$(echo 'sessiontools' | tr '-' '_')-$${v#v}"; \
+	$(PYPI_README) check "$$dist"-*.whl "$$dist".tar.gz
+
 # release.py is stdlib-only, so python3 runs it: a plain `uv run` would re-lock
 # the project before the script starts.
 release:  ## bump (BUMP=patch|minor|major) or set (VERSION=X.Y.Z), then mirror, changelog, commit, tag
@@ -61,7 +89,7 @@ push:  ## push the branch, then the ONE release tag vX.Y.Z by name (pyproject's 
 # `pass show` (one touch), and what `ps` shows is `uv publish dist/...`.
 # The process list never includes the password. PYPI_TOKEN_PASS_PATH names the pass entry, e.g.
 # pypi/token; set it in your shell profile.
-publish: build  ## upload THIS version's wheel + sdist to PyPI; token via $$PYPI_TOKEN_PASS_PATH (pass) or $$UV_PUBLISH_TOKEN, never on a command line
+publish: pypi-dist  ## upload THIS version's wheel + sdist to PyPI; token via $$PYPI_TOKEN_PASS_PATH (pass) or $$UV_PUBLISH_TOKEN, never on a command line
 	@dist="dist/$$(echo 'sessiontools' | tr '-' '_')-$$(uv version --short)"; \
 	if [ -n "$$UV_PUBLISH_TOKEN" ]; then uv publish "$$dist"*; \
 	elif [ -n "$$PYPI_TOKEN_PASS_PATH" ]; then UV_PUBLISH_TOKEN="$$(pass show "$$PYPI_TOKEN_PASS_PATH" | head -n1)" uv publish "$$dist"*; \

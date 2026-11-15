@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -34,7 +35,7 @@ from start_support import (
 
 import sessiontools.start as st
 from sessiontools import procs
-from sessiontools.start import EXIT_HELD, default_seat, holders
+from sessiontools.start import EXIT_HELD, holders
 from sessiontools.start import args as a
 from sessiontools.start.errors import LaunchError
 from sessiontools.start.placement import TmuxPlacement
@@ -681,10 +682,15 @@ def test_a_live_claim_holds_the_agent_with_no_sidecar(tmp_path, sidecars, strang
     _claim_for(env, stranger, pane="%7")
     result, record, sessions = run(tmp_path, sidecars, "scout", extra=env)
     assert result.returncode == EXIT_HELD, result.stderr
-    assert result.stderr.splitlines() == [
-        (f"session start: scout is already held by a session (id not known yet) "
-         f"(pid {stranger}, tmux %7), live 0s -- refusing a second holder; pass "
-         "--allow-second-holder to start one anyway")]
+    # the claim's age is wall-clock (live 0s, 1s, ...): match it by pattern,
+    # everything else in the refusal stays exact
+    expected = (f"session start: scout is already held by a session (id not known yet) "
+                f"(pid {stranger}, tmux %7), live @@AGE@@ -- refusing a second holder; pass "
+                "--allow-second-holder to start one anyway")
+    lines = result.stderr.splitlines()
+    assert len(lines) == 1, lines
+    pattern = re.escape(expected).replace(re.escape("@@AGE@@"), r"\d+s")
+    assert re.fullmatch(pattern, lines[0]), lines[0]
     assert not vendor_ran(record) and not minted_anything(sessions)
 
 
@@ -852,32 +858,19 @@ def test_a_name_that_cannot_carry_a_claim_warns_once_and_launches(tmp_path, side
     assert not (tmp_path / "state").exists()
 
 
-# ---------- ST-260: the --in-tmux claim follows the pane, as the seat's does --------
+# ---------- ST-285: a placement reads the door and takes NO claim -------------------
 
-def test_a_named_agents_claim_moves_to_the_pane(tmp_path, stranger):
-    env = _state_env(tmp_path)
-    table = procs.table()
-    fields = default_seat.claim_fields(None, os.getpid(), table, env, via="front door")
-    holders.write_claim("scout", fields, env)
-    launch = SimpleNamespace(agent=SimpleNamespace(name="scout"), environ=env)
-    start = st.SeatStart(launch, None, None, fields)
-    said: list[str] = []
-    placed = TmuxPlacement("eng", "scout", "@7", False, "%12", stranger)
-    st._repoint(start, SimpleNamespace(identity=None), placed, warn=said.append)
-    claim = holders.read_claim("scout", env)
-    assert said == []
-    assert claim["pid"] == stranger and claim["pane"] == "%12"
-    assert claim["via"] == "tmux placement" and claim["agent"] == "scout"
-
-
-def test_a_named_agents_failed_repoint_names_the_agent(tmp_path):
-    env = _state_env(tmp_path)
-    launch = SimpleNamespace(agent=SimpleNamespace(name="scout"), environ=env)
-    start = st.SeatStart(launch, None, None, {"pid": os.getpid(), "procStart": "x"})
-    said: list[str] = []
-    placed = TmuxPlacement("eng", "scout", "@7", False, "%12", None)
-    st._repoint(start, SimpleNamespace(identity=None), placed, warn=said.append)
-    assert said == [("placed, but scout's claim could not move to the new pane (tmux printed "
-                     "no pane pid or id for the new window); scout reads free until that "
-                     "session writes its sidecar")]
-    assert "default seat" not in said[0]
+def test_a_placement_takes_no_claim_and_the_pane_claims(tmp_path, monkeypatch):
+    """The outer launcher of `--in-tmux` reads the door and writes nothing
+    under holders/: a claim naming it would refuse its own pane (ruled, 3).
+    The pane's own `session start` is the one that claims."""
+    env = _state_env(tmp_path, AGENTS_DIR=make_agents_root(tmp_path), TMUX="/x,1,2")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    placed: list = []
+    monkeypatch.setattr(st, "place_pane", lambda *a, **k: placed.append((a, k)) or
+                        TmuxPlacement("", "scout", "@7", False, "%12", 4242))
+    assert st.main(["--in-tmux", "scout"]) == 0
+    assert placed, "nothing was placed"
+    assert not (tmp_path / "state" / "holders").exists() or not any(
+        (tmp_path / "state" / "holders").glob("*.json")), "the outer launcher claimed"

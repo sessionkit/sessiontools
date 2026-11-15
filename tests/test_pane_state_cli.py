@@ -191,3 +191,25 @@ def test_no_format_sessiontools_ships_holds_a_command_substitution():
             offenders.append(str(path.relative_to(ROOT)))
     assert offenders == []
     assert os.path.isdir(ROOT / "src" / "sessiontools")             # the scan saw the package
+
+
+@pytest.mark.parametrize("argv", [["pane-state", "show", "--help"], ["pane-state", "--help"]])
+def test_help_says_busy_is_not_cache_warm(argv, capsys):
+    """ST-326 R7: a seat in a backgrounded wait reads BUSY yet is cache-idle,
+    so no gate keys on pane-state for cache warmth."""
+    with pytest.raises(SystemExit) as e:
+        cli.main(argv)
+    assert e.value.code == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "backgrounded wait" in out and "BUSY" in out
+    assert "no gate should key on pane-state for cache warmth" in out.replace(
+        "No gate", "no gate")
+    assert "cache_age_s" in out
+
+
+def test_the_doc_says_busy_is_not_cache_warm():
+    from pathlib import Path
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "pane-state-signal.md").read_text()
+    text = " ".join(doc.split())
+    assert "BUSY is not cache-warm" in text
+    assert "backgrounded wait" in text and "no gate should key on pane-state" in text

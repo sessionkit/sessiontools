@@ -73,12 +73,59 @@ the code; `status --json` prints it as `label`, and `--help` names it.
   there under the old label (`legacy` in `--json`).
 - `on --dry-run` and `off --dry-run` say what they would do, the retire
   included, and change nothing.
-- Exit 0 done, 1 tried and failed (bootstrap refused, no answer), 2
-  refused before anything changed (no `swiftc`, a failed build, the port
-  held, not macOS) or a usage error.
+- Exit 0 done, 1 tried and failed (bootstrap refused, no answer, or the
+  service file not written), 2 refused before anything changed (no
+  `swiftc`, a failed build, the port held, not macOS) or a usage error.
 - The log is `~/.sessionkit/tools/log/sound-engine.log`.
 - Before 0.3.2 the log was `~/Library/Logs/sessiontools/sound-engine.log`.
   That file is left in place, and `status` names it while it is there.
+
+### The service file
+
+`on` and `off` also write `~/.sessionkit/tools/services/sound-engine.json`.
+It is the file `sessionkit service list` reads to find this job. The
+folder sits beside `settings/`, never inside it, so `session settings`
+never reads it.
+
+- **`on`** writes it right after the plist, with `"enabled": true`.
+- **`off`** rewrites it with `"enabled": false` and keeps the file.
+  `--purge` removes the binaries and keeps the file too. An `off` with no
+  file writes one.
+- **A refused `on`** writes no file. **`--dry-run`** prints the file
+  under `service would write PATH:` and writes nothing.
+- **Each write is whole and atomic.** A temp file in the same folder is
+  renamed over the old one, so a reader never sees half a file. Keys
+  added by hand are not kept.
+- **`port`** is the port the plist hands the engine (`--port`), so the
+  two always agree. `protocol` is `udp` and `bind` is `127.0.0.1`.
+
+The file carries these keys:
+
+```json
+{
+  "service": 1,
+  "name": "sound-engine",
+  "label": "dev.sessionkit.tools.sound-engine",
+  "enabled": true,
+  "install": "session sound engine on",
+  "uninstall": "session sound engine off",
+  "description": "the busy sound's resident audio engine",
+  "port": 44100,
+  "protocol": "udp",
+  "bind": "127.0.0.1",
+  "note": "runs only in a logged-in GUI session (LimitLoadToSessionType Aqua)"
+}
+```
+
+**If the write fails,** the engine is still loaded by `on` (or booted out
+by `off`), as you asked. The verb prints this line, then exits 1:
+
+```text
+service could not write PATH: REASON; the previous file is unchanged
+```
+
+Run the same verb again once the folder is writable. Every step is
+safe to repeat.
 
 ## Paths it will not touch
 

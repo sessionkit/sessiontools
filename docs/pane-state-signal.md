@@ -50,6 +50,12 @@ from tmux's own memory, with no process spawned per redraw.
   direct children. They never count, either way.
 - A taskmaster `tm task wait` reads BUSY. That is the default, not a
   settled answer: whether such a wait counts as work is still open.
+- **BUSY is not cache-warm.** A seat in a backgrounded wait (a
+  `tm task wait`, a long test) reads BUSY, yet it sends no API request.
+  For the prompt cache it is idle, and the cache goes cold after its TTL
+  (1 h, measured on ms2). So no gate should key on pane-state for cache
+  warmth. The cache's own clock is `cache_age_s` in `session list --json`
+  ([`session list`](session.md#session-list)).
 
 ## The settings
 
@@ -146,6 +152,47 @@ How the job runs:
   publishes.
 - Exit codes: 0 done, 1 tried and failed, 2 refused before anything
   changed or a usage error.
+
+### The service file
+
+`on` and `off` also write `~/.sessionkit/tools/services/pane-state.json`.
+It is the file `sessionkit service list` reads to find this job. The
+folder sits beside `settings/`, never inside it, so `session settings`
+never reads it.
+
+- **`on`** writes it right after the plist, with `"enabled": true`.
+- **`off`** rewrites it with `"enabled": false` and keeps the file. An
+  `off` with no file writes one.
+- **A refused `on`** writes no file. **`--dry-run`** prints the file
+  under `service would write PATH:` and writes nothing.
+- **Each write is whole and atomic.** A temp file in the same folder is
+  renamed over the old one, so a reader never sees half a file. Keys
+  added by hand are not kept.
+
+The file carries these keys:
+
+```json
+{
+  "service": 1,
+  "name": "pane-state",
+  "label": "dev.sessionkit.tools.pane-state",
+  "enabled": true,
+  "install": "session pane-state agent on",
+  "uninstall": "session pane-state agent off",
+  "description": "each seat's BUSY / FREE / UNKNOWN, on its tmux pane",
+  "note": "runs only in a logged-in GUI session (LimitLoadToSessionType Aqua)"
+}
+```
+
+**If the write fails,** the job is still loaded by `on` (or booted out
+by `off`), as you asked. The verb prints this line, then exits 1:
+
+```text
+service could not write PATH: REASON; the previous file is unchanged
+```
+
+Run the same verb again once the folder is writable. Every step is
+safe to repeat.
 
 ## What it costs
 

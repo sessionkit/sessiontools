@@ -61,7 +61,12 @@ if ! printf '%s' "$input" | jq -e 'type == "object"' >/dev/null 2>&1; then
   exit 0
 fi
 
-AGENT=$(echo "$input" | jq -r '.agent.name // empty')
+# A seat started by `session start` reaches the vendor through a one-agent
+# carrier plugin named session-agent-<name>, and the vendor scopes a plugin
+# agent as <plugin>:<name>. Strip that one scope so the seat reads by its
+# plain name; any other plugin's scope is left as it is.
+AGENT=$(echo "$input" | jq -r '(.agent.name // empty)
+  | if type == "string" then sub("^session-agent-[^:]*:"; "") else . end')
 MODEL=$(echo "$input" | jq -r '.model.display_name // "Claude"')
 CWD=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // empty')
 MAX=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')

@@ -565,7 +565,9 @@ def test_help_gives_both_install_steps_and_run_one_pinner(capsys):
     assert "Library/Logs" not in out                 # the old dir, gone from the help (ST-263)
     assert f"systemctl --user enable --now {dmw.SYSTEMD_PATH_UNIT}" in out
     assert "Run one pinner" in " ".join(out.split())
-    assert "nothing here installs or loads one" in " ".join(out.split())
+    flat = " ".join(out.split())
+    assert "`agent on` installs and loads the launchd agent" in flat
+    assert "opt-in: nothing turns it on for you" in flat
 
 
 def test_the_awk_line_in_help_splits_the_systemd_stream(home, claude, tmp_path, capsys,

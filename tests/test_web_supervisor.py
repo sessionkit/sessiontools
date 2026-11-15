@@ -6,8 +6,10 @@ check that no child or grandchild is left behind."""
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import socket
 import sys
 import time
 from collections.abc import Iterator
@@ -20,6 +22,11 @@ from sessiontools.web.rooms import Room
 from sessiontools.web.unixhttp import UnixHTTPConnection
 
 FAST = {"backoff_first": 0.05, "backoff_max": 0.2, "grace": 0.5, "poll": 0.02}
+#: How long a room that is "up" may take to give its first answer. "up" means
+#: only that its socket file exists; under load (ST-322: ~25 on 16 cores) the
+#: room can take longer than one request's 5 s to answer, so a test that asks
+#: waits for the answer itself, up to this bound.
+ANSWER_WITHIN = 30.0
 
 
 @pytest.fixture
@@ -63,13 +70,88 @@ def _start(started: list, place: dict, room: Room, **kw) -> sup.Supervisor:
     return s
 
 
-def _ask(s: sup.Supervisor) -> dict:
-    c = UnixHTTPConnection(s.socket("talk"), timeout=5)
+def _ask(s: sup.Supervisor, timeout: float = 5) -> dict:
+    c = UnixHTTPConnection(s.socket("talk"), timeout=timeout)
     try:
         c.request("GET", "/")
         return json.loads(c.getresponse().read())
     finally:
         c.close()
+
+
+def _answer(s: sup.Supervisor, within: float = ANSWER_WITHIN) -> dict:
+    """The room's first answer, waited for: the readiness a test that asks
+    must wait on is an answer, not state "up" (the socket file exists, ST-322).
+    Each try gets what is left of WITHIN, so a slow room is waited out in one
+    request and a refused or missing socket is tried again, never slept on."""
+    end = time.monotonic() + within
+    got: list[dict] = []
+    errors: list[Exception] = []
+
+    def answered() -> bool:
+        try:
+            got.append(_ask(s, timeout=max(end - time.monotonic(), 0.1)))
+        except (OSError, http.client.HTTPException) as e:
+            errors.append(e)
+            return False
+        return True
+
+    assert wait_for(answered, timeout=within), \
+        f"talk did not answer within {within} s: {errors[-1] if errors else None!r}"
+    return got[0]
+
+
+# --- the helper's wait (ST-322) ------------------------------------------------------
+
+class _Sockets:
+    """A stand-in supervisor for `_answer`: `socket()` gives each of PATHS in
+    turn, then the last for good, and counts the asks."""
+
+    def __init__(self, *paths):
+        self.paths, self.asks = list(paths), 0
+
+    def socket(self, name: str):
+        self.asks += 1
+        return self.paths.pop(0) if len(self.paths) > 1 else self.paths[0]
+
+
+def test_answer_tries_again_until_the_room_answers(place, started):
+    """A missing socket (the room not bound yet) is tried again, not failed:
+    the third ask finds the room and its answer is returned."""
+    s = _start(started, place, _room(place, "serve"))
+    assert wait_for(lambda: s.state("talk") == "up")
+    missing = place["run"] / "missing.sock"
+    stand_in = _Sockets(missing, missing, s.socket("talk"))
+    assert _answer(stand_in)["room"] == "talk"
+    assert stand_in.asks == 3
+
+
+def test_answer_fails_by_its_own_bound_naming_the_last_error(place):
+    """A room that never answers fails the test once WITHIN has passed, not
+    after one request's 5 s, and the message names why the last try failed."""
+    began = time.monotonic()
+    with pytest.raises(AssertionError, match=r"did not answer within 0.3 s: (FileNotFoundError|ConnectionRefusedError)"):
+        _answer(_Sockets(place["run"] / "never.sock"), within=0.3)
+    assert time.monotonic() - began < 3
+
+
+def test_answer_gives_a_silent_room_the_rest_of_its_bound_in_one_request(place):
+    """A socket that accepts but never answers (a room too slow to serve) is
+    waited on in ONE request bounded by WITHIN, not re-asked every 5 s."""
+    place["run"].mkdir(parents=True, exist_ok=True)
+    path = place["run"] / "silent.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(str(path))
+        listener.listen(8)
+        stand_in = _Sockets(path)
+        began = time.monotonic()
+        with pytest.raises(AssertionError, match=r"did not answer within 0.5 s: (TimeoutError|timeout)"):
+            _answer(stand_in, within=0.5)
+        assert 0.4 < time.monotonic() - began < 3
+        assert stand_in.asks <= 2  # the first try took the whole bound; at most wait_for's last look follows
+    finally:
+        listener.close()
 
 
 # --- present -------------------------------------------------------------------------
@@ -79,7 +161,7 @@ def test_a_present_room_is_started_in_its_own_group_and_answers(place, started):
     assert wait_for(lambda: s.state("talk") == "up")
     pid = s.info("talk")["pid"]
     assert os.getpgid(pid) == pid != os.getpgid(0)  # a group of its own
-    assert _ask(s)["room"] == "talk"
+    assert _answer(s)["room"] == "talk"
     assert s.socket("talk") == place["run"] / "talk.sock"
     s.stop()
     assert s.state("talk") == "stopped"
@@ -112,7 +194,7 @@ def test_a_room_that_crashes_once_comes_back_up(place, started):
     s = _start(started, place, _room(place, "crash-once", marker))
     assert wait_for(lambda: s.state("talk") == "up")
     assert s.info("talk")["starts"] == 2 and s.info("talk")["last_exit"] == 1
-    assert _ask(s)["room"] == "talk"
+    assert _answer(s)["room"] == "talk"
 
 
 def test_a_room_that_cannot_be_started_is_restarting_and_the_others_run(place, started):

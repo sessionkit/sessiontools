@@ -49,9 +49,25 @@ archives.
   tag, the `ready/` and `approved/` tags among them. If `vX.Y.Z` is not
   tagged here, it refuses and pushes nothing. `make release` prints the
   same line.
-- `make publish` uploads this version to PyPI. The token comes from
-  `$PYPI_TOKEN_PASS_PATH` (a `pass` entry) or `$UV_PUBLISH_TOKEN`, never
-  a command line.
+- `make pypi-dist` builds the wheel and sdist PyPI gets. The README's
+  relative links 404 on PyPI, so it builds from the tag `vX.Y.Z`, never
+  the checkout: it unpacks the tag into a scratch stage, pins the stage
+  README's links to that tag on GitHub, runs `uv build` there into
+  `dist/`, then checks both dists for any relative link left. The links
+  name the public tag and the dist is built from the local one, so the
+  two must be the same commit. Before it builds, it runs the kit's
+  `pypi_readme.py tag-check`, which refuses unless `vX.Y.Z` is on
+  `PUBLIC_REMOTE` (the public repo by default) at the commit it names
+  here. A missing public tag is refused: run `make push` first. So is a
+  local tag moved since it was pushed, and the refusal names both shas.
+  The rewriter and the check are the kit's one `scripts/pypi_readme.py`,
+  found under `KIT_DIR` (default `../sessionkit`, a sibling checkout); a
+  kit too old to have `tag-check` must be updated first. If the script
+  is not there, the target refuses and builds nothing:
+  `make pypi-dist KIT_DIR=/path/to/sessionkit`.
+- `make publish` runs `make pypi-dist`, then uploads this version to
+  PyPI. The token comes from `$PYPI_TOKEN_PASS_PATH` (a `pass` entry) or
+  `$UV_PUBLISH_TOKEN`, never a command line.
 - `make scan` checks HEAD's tree against the private word list before a
   publish (`$SESSIONKIT_SCAN`).
 

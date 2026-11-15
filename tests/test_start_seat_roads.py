@@ -10,7 +10,8 @@
   yet (N1, ruled (B)); on a held seat ONE line prints, the holder's (N3);
   the held read is read-only (N4). A check that cannot run launches as
   named with UNSURE (Q17), beside the gate's line if that failed too (B2).
-- The tmux path: the claim moves from the launcher to the new pane.
+- The tmux path: the placing launcher takes no claim; the pane's own
+  `session start` claims for itself.
 - A '-' resume of a session born as the seat prints RESUMED, naming the
   live holder when there is one (B8).
 
@@ -449,7 +450,7 @@ def test_a_live_named_refusal_exits_3_through_main(tmp_path, macos, work, monkey
     assert f"session start: {SEAT} {REFUSE}" in capsys.readouterr().err
 
 
-# ---------- the tmux path: the claim moves to the pane ---------------------------------
+# ---------- the tmux path: the pane claims for itself ---------------------------------
 
 def test_bare_in_tmux_from_the_holders_own_pane_is_held(tmp_path, macos, work):
     """A tmux placement never replaces its own pane: a holder in the
@@ -469,43 +470,16 @@ def test_bare_in_tmux_from_the_holders_own_pane_is_held(tmp_path, macos, work):
         child.wait()
 
 
-def _placed(pid: int | None, pane: str = "%12") -> TmuxPlacement:
-    return TmuxPlacement("eng", SEAT, "@7", False, pane, pid)
-
-
-class _Plan:
-    def __init__(self, identity):
-        self.identity = identity
-
-
-def test_the_claim_moves_to_the_pane(tmp_path, macos, work):
-    env = seat_env(tmp_path, TMUX_PANE="%1")
-    seat = st.bare_start(parse_args(["--in-tmux"]), True, environ=env, warn=lambda _l: None)
-    assert seat.claim["pid"] == os.getpid() and seat.claim["pane"] == "%1"
-    child = live_child()
-    try:
-        said: list[str] = []
-        st._repoint(seat, _Plan(seat.minted), _placed(child.pid), warn=said.append)
-        claim = claim_of(env)
-        assert said == []
-        assert claim["pid"] == child.pid and claim["pane"] == "%12"
-        assert claim["procStart"] == proc_start(child.pid)
-        assert claim["sessionId"] == seat.minted.session_id and claim["via"] == "tmux placement"
-        assert claim["agent"] == SEAT and claim["v"] == 1
-    finally:
-        child.kill()
-        child.wait()
-
-
-def test_a_pane_minted_claim_has_no_id_and_held_says_so(tmp_path, macos, work):
-    """A keyed pane mint: the launcher never knows the id, so the claim has
-    `sessionId` null, and HELD says `id minted in the pane`."""
+def test_a_legacy_tmux_claim_with_no_id_says_held_in_the_pane(tmp_path, macos, work):
+    """A claim an older launcher re-pointed at a keyed pane carries
+    `sessionId` null and `via: tmux placement`; HELD still says `id minted
+    in the pane` for it."""
     env = seat_env(tmp_path)
-    write_seat_claim(env, sid=None)
-    launcher = claim_of(env)
     child = live_child()
     try:
-        assert default_seat.repoint(SEAT, launcher, child.pid, "%12", None, env) is None
+        holders.write_claim(SEAT, {"sessionId": None, "pid": child.pid,
+                                   "procStart": proc_start(child.pid), "pane": "%12",
+                                   "via": default_seat.VIA_TMUX}, env)
         from test_start_singleton import bare
         _launch, _minted, _line, [line] = bare(env)
         assert "held by a session (id minted in the pane)" in line
@@ -515,35 +489,40 @@ def test_a_pane_minted_claim_has_no_id_and_held_says_so(tmp_path, macos, work):
         child.wait()
 
 
-@pytest.mark.parametrize("case, why", [
-    ("not ours", "the claim no longer names this launcher"),
-    ("dead pane", "is not running"),
-    ("no pane", "tmux printed no pane pid or id"),
-])
-def test_a_failed_repoint_says_so(tmp_path, macos, work, case, why):
-    """B4: the re-point fails after the window opened: it says so on
-    stderr, and the launch is not unwound."""
-    env = seat_env(tmp_path)
-    write_seat_claim(env)
-    launcher = dict(claim_of(env))
-    if case == "not ours":
-        launcher["procStart"] = "Sun Jun  9 17:00:00 2030"
-    pid = None if case == "no pane" else dead_pid() if case == "dead pane" else os.getpid()
-    result = default_seat.repoint(SEAT, launcher, pid, "%12", None, env)
-    assert result is not None and why in result
-    assert claim_of(env)["pid"] == os.getpid()           # unchanged
-    line = default_seat.repoint_failed_line(SEAT, result)
-    assert line.startswith(f"placed, but the default seat {SEAT}'s claim could not move")
+def _no_window(monkeypatch) -> list:
+    """`place_pane` recorded, never run: no tmux is asked anything."""
+    placed: list = []
+    monkeypatch.setattr(st, "place_pane", lambda *a, **k: placed.append((a, k)) or
+                        TmuxPlacement("", SEAT, "@7", False, "%12", 4242))
+    return placed
 
 
-def test_a_plain_tmux_start_moves_no_claim(tmp_path, macos, work):
-    env = seat_env(tmp_path)
+def test_a_seat_placement_takes_no_claim(tmp_path, macos, work, monkeypatch):
+    """ST-285, ruled (3): the outer launcher of a placement claims nothing,
+    bare or named. The pane's own in-place launch takes the seat."""
+    env = seat_env(tmp_path, TMUX="/x,1,2")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    placed = _no_window(monkeypatch)
+    assert st.main(["--in-tmux"]) == 0
+    assert st.main(["--in-tmux", SEAT]) == 0
+    assert len(placed) == 2
+    assert not os.path.exists(holders.claim_paths(SEAT, env)[1]), "the outer launcher claimed"
+
+
+def test_a_held_named_seat_placement_is_refused_at_the_caller(tmp_path, macos, work,
+                                                                monkeypatch, capsys):
+    """A hand launch of the seat word that meets a holder is refused before
+    any window opens (exit 3), by a READ of the seat's check."""
+    env = seat_env(tmp_path, TMUX="/x,1,2")
     write_seat_claim(env)
-    said: list[str] = []
-    seat = st.bare_start(parse_args(["--in-tmux"]), True, environ=env, warn=said.append)
-    assert seat.claim is None
-    st._repoint(seat, _Plan(seat.minted), _placed(os.getpid()), warn=said.append)
-    assert claim_of(env)["sessionId"] == SID
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    placed = _no_window(monkeypatch)
+    assert st.main(["--in-tmux", SEAT]) == EXIT_HELD
+    assert f"{SEAT} {REFUSE}" in capsys.readouterr().err
+    assert placed == []
+    assert claim_of(env)["sessionId"] == SID              # untouched
 
 
 # ---------- real launches: one holder ---------------------------------------------------
@@ -625,22 +604,21 @@ def test_an_unboxed_named_launch_racing_a_bare_start_gives_one_holder(tmp_path):
 
 @on_macos
 def test_tmux_named_start_claims_the_pane(tmp_path):
-    """On the conftest's private server: the claim ends naming the pane's
-    pid and id, not the launcher's (which has exited). The PATH wall keeps
-    its own `message` (a test's stub would be refused), so the gate fails
-    here, and the NAMED road takes the claim all the same (N1 (B))."""
-    from test_start_placement import PANE_STUB, pane_ran, tmux_launch_e2e
+    """On the conftest's private server: the pane's own in-place launch
+    claims the seat, naming the pane's process (the launcher that placed it
+    claimed nothing, ST-285). The PATH wall keeps its own `message` (a
+    test's stub would be refused), so the gate fails here, and the NAMED
+    road takes the claim all the same (N1 (B))."""
+    from test_start_placement import PANE_STUB, pane_ran, tmux_launch_e2e, window_id_of
     state = tmp_path / "state"
     result, record, _work = tmux_launch_e2e(
         tmp_path, "--tmux-target", "eng", SEAT, stub_body=PANE_STUB,
         extra_env={"SESSION_STATE_DIR": str(state),
                    "SESSION_SIDECAR_DIR": str(tmp_path / "sidecars")})
     assert result.returncode == 0, result.stderr
-    assert pane_ran(record), result.stderr
-    assert f"this session is {SEAT} and holds the default seat" in result.stderr
-    assert "could not move" not in result.stderr
+    assert pane_ran(record, window_id_of(result.stdout)), result.stderr
     claim = json.loads((state / "holders" / f"{SEAT}.json").read_text())
-    assert claim["pid"] == int((record / "pid").read_text())
-    assert claim["pane"].startswith("%") and claim["via"] == "tmux placement"
+    assert claim["pid"] == int((record / "pid").read_text())     # the vendor, in the pane
+    assert claim["pane"].startswith("%") and claim["via"] == default_seat.VIA_NAMED
     assert claim["sessionId"] == (record / "session-id-env").read_text()
     assert holders.claim_is_live(claim, procs.table())

@@ -217,15 +217,14 @@ def _new_code() -> dict[str, str]:
         # do-003: the singleton's wiring and the shared per-agent helpers.
         **{f"start.{f.__name__}": inspect.getsource(f)
            for f in (start.bare_start, start._claim, start._finish, start._plain,
-                     # do-004: the named road, the tmux re-point, RESUMED.
+                     # do-004: the named road, RESUMED.
                      start.named_seat_start, start._respect, start._named_dry_run,
-                     start._record_id, start._resumed, start._repoint,
+                     start._record_id, start._resumed,
                      # do-006: the home-folder offer on the seat's roads.
                      start._offer, start._no_offer,
                      default_seat.named_gate_line, default_seat.named_unsure_line,
                      default_seat.door_for, default_seat.resumed_line,
-                     default_seat.born_as_seat, default_seat.repoint,
-                     default_seat.repoint_failed_line)},
+                     default_seat.born_as_seat)},
         **{f"holders.{f.__name__}": inspect.getsource(f)
            for f in (holders.replacing, holders.claim_paths, holders.locked,
                      holders.read_claim, holders.claim_is_live, holders.live_claim,

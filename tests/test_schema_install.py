@@ -1,6 +1,7 @@
-"""The schema install before the birth: the launch script runs a tool's own
-install command (`pager settings install`) before the birth reads the
-installed schemas, so the first session on a fresh HOME reads its
+"""The schema install before the birth: the launch script installs
+sessiontools' own schemas (the `session` schema, ST-78 do-002) and runs a
+tool's own install command (`pager settings install`) before the birth reads
+the installed schemas, so the first session on a fresh HOME reads its
 variables. Each scenario runs the RENDERED lines under bash with a stub
 `pager` on a PATH that holds nothing else of that name."""
 
@@ -19,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 from settings_support import host
 
-from sessiontools import settings
+from sessiontools import settings, settle_settings
 from sessiontools.start import plan as pl
 
 SID = "11111111-2222-3333-4444-555555555555"
@@ -99,6 +100,19 @@ def events(home: Path) -> list[str]:
     return [x["event"] for x in log_lines(home)]
 
 
+def commands(home: Path) -> list[dict]:
+    """The log's entries for the command (`pager settings install`), not
+    sessiontools' own schema install."""
+    return [x for x in log_lines(home) if x["event"] == "schema-install"]
+
+
+OWN = settings.OWN_SCHEMA_EVENT
+
+
+def own_schema(home: Path) -> Path:
+    return host(home, "session") / ".session.schema.json"
+
+
 def launch(home: Path, bin_dir: Path, **env) -> subprocess.CompletedProcess:
     """The install and birth lines exactly as `session start` renders them,
     then a marker standing in for the vendor: the launch carried on."""
@@ -117,7 +131,8 @@ def test_a_fresh_homes_first_session_reads_its_variables_and_says_nothing(home, 
     env_file = sdir(home) / "settings" / "mail.d" / "50-env.json"
     assert json.loads(env_file.read_text()) == {"subscriptions": {"lead+example": True}}
     assert "birth-no-schema" not in events(home)
-    install = log_lines(home)[0]
+    assert events(home)[0] == OWN       # sessiontools' own first, then the command
+    (install,) = commands(home)
     assert install["event"] == "schema-install" and install["exit"] == 0
     assert install["command"] == "pager settings install"
     assert install["path"] == str(bin_dir / "pager")
@@ -127,18 +142,20 @@ def test_a_fresh_homes_first_session_reads_its_variables_and_says_nothing(home, 
 
 # --- SC3: no pager, an old pager, quiet --------------------------------------------
 
-def test_no_pager_on_path_skips_the_install_and_the_birth_is_as_before(home, bin_dir):
+def test_no_pager_on_path_skips_its_command_and_still_installs_sessiontools_own(home, bin_dir):
     done = launch(home, bin_dir, SESSIONMAIL_SUBSCRIBE="lead+example")
     assert done.stdout == "LAUNCHED\n" and done.stderr == ""
-    assert events(home) == ["birth-no-schema"]
+    assert events(home) == [OWN]        # no mail schema, and no settle variable set
+    assert own_schema(home).is_file()
+    assert not (sdir(home) / "settings").exists()
 
 
 def test_a_pager_without_the_verb_is_logged_and_never_reaches_the_terminal(home, bin_dir):
     stub(bin_dir, NO_VERB)
     done = launch(home, bin_dir, SESSIONMAIL_SUBSCRIBE="lead+example")
     assert done.stdout == "LAUNCHED\n" and done.stderr == ""
-    assert events(home) == ["schema-install", "birth-no-schema"]
-    install = log_lines(home)[0]
+    assert events(home) == [OWN, "schema-install"]
+    (install,) = commands(home)
     assert install["exit"] == 2
     assert "Error: No such command 'install'." in install["err"]
     assert not (sdir(home) / "settings").exists()
@@ -151,7 +168,7 @@ def test_files_already_current_say_nothing(home, bin_dir):
     w.write_text(json.dumps(MAIL_SCHEMA))
     done = launch(home, bin_dir, SESSIONMAIL_SUBSCRIBE="lead+example")
     assert done.stdout == "LAUNCHED\n" and done.stderr == ""
-    assert events(home) == ["schema-install", "env-at-birth"]
+    assert events(home) == [OWN, "schema-install", "env-at-birth"]
 
 
 def test_a_file_not_written_is_one_line_naming_the_log_and_the_launch_carries_on(home, bin_dir):
@@ -162,7 +179,7 @@ def test_a_file_not_written_is_one_line_naming_the_log_and_the_launch_carries_on
     line = (f"{settings.SCHEMA_INSTALL_PROG}: pager settings install exit 2, could not write "
             f"{host(home, 'mail')}/mail.schema.json; recorded in {log}")
     assert done.stderr.splitlines() == [line]
-    assert events(home) == ["schema-install", "birth-no-schema"]
+    assert events(home) == [OWN, "schema-install"]
 
 
 #: The timeouts a hang is given in turn, doubling. The first run whose stub
@@ -197,7 +214,7 @@ def test_a_command_that_hangs_is_killed_with_what_it_started(home, bin_dir):
             ["--dir", str(sdir(home)), "--", "pager", "settings", "install"],
             environ={"HOME": str(home), "PATH": str(bin_dir)}, timeout=timeout) == 0
         assert time.monotonic() - started < timeout + 10    # killed, not run out
-        entries = log_lines(home)
+        entries = commands(home)
         assert len(entries) == attempt
         assert entries[-1]["exit"] is None and entries[-1]["timeout"] == timeout
         child = recorded_pid(pid_file)
@@ -226,10 +243,19 @@ def test_bad_arguments_run_nothing_and_exit_0(home, capsys):
     assert log_lines(home) == []
 
 
+def test_a_bare_dir_installs_sessiontools_own_and_runs_no_command(home, bin_dir, capsys):
+    stub(bin_dir, INSTALLS)
+    assert settings.schema_install_main(["--dir", str(sdir(home))],
+                                        environ={"HOME": str(home), "PATH": str(bin_dir)}) == 0
+    assert events(home) == [OWN]
+    assert not host(home, "mail").exists()
+    assert capsys.readouterr() == ("", "")
+
+
 def test_a_command_not_on_path_is_logged_not_raised(home, bin_dir, capsys):
     assert settings.schema_install_main(["--dir", str(sdir(home)), "--", "pager", "x"],
                                         environ={"HOME": str(home), "PATH": str(bin_dir)}) == 0
-    (install,) = log_lines(home)
+    (install,) = commands(home)
     assert install["error"] == "pager: not found on PATH"
     assert capsys.readouterr() == ("", "")
 
@@ -238,7 +264,7 @@ def test_a_command_that_cannot_start_is_logged_not_raised(home, bin_dir, capsys)
     stub(bin_dir, "#!/nonexistent/interpreter\n")
     assert settings.schema_install_main(["--dir", str(sdir(home)), "--", "pager", "x"],
                                         environ={"HOME": str(home), "PATH": str(bin_dir)}) == 0
-    (install,) = log_lines(home)
+    (install,) = commands(home)
     assert install["error"].startswith(("FileNotFoundError", "OSError", "PermissionError"))
     assert capsys.readouterr() == ("", "")
 
@@ -250,7 +276,70 @@ def test_the_logged_output_is_capped_and_says_so(home, bin_dir):
                   f'i=$((i+1)); done\necho short >&2\n')
     settings.schema_install_main(["--dir", str(sdir(home)), "--", "pager"],
                                  environ={"HOME": str(home), "PATH": str(bin_dir)})
-    (install,) = log_lines(home)
+    (install,) = commands(home)
     assert len(install["out"]) == keep and install["out"][0] == "x" * chars
     assert install["err"] == ["short"]
     assert install["truncated"] == ["out"]
+
+
+# --- ST-78 do-002: sessiontools' own schema, the `session` one (design note S2) ----
+
+def test_the_own_schema_is_the_rendered_one_with_the_settle_variables(home, bin_dir):
+    launch(home, bin_dir)
+    assert json.loads(own_schema(home).read_text()) == settle_settings.schema()
+    env = {"HOME": str(home)}
+    assert settings.find_schema("session", env)[0] == own_schema(home)
+    named = {k.variable: ".".join(k.path) for k in settings.env_keys("session", env)}
+    assert named == {"SESSION_SETTLE_AT": "settle.soft.at", "SESSION_SETTLE_SAY": "settle.soft.say"}
+
+
+@pytest.mark.parametrize("at", ["250k", "250000"])
+def test_settle_at_at_birth_lands_in_the_session_layer_as_settle_soft_at(home, bin_dir, at):
+    """A fresh HOME, no pager: the launch installs the session schema, then the
+    birth copies SESSION_SETTLE_AT, as written, into session.d/50-env.json."""
+    done = launch(home, bin_dir, SESSION_SETTLE_AT=at, SESSION_SETTLE_SAY="past {at}")
+    assert done.stdout == "LAUNCHED\n" and done.stderr == ""
+    env_file = sdir(home) / "settings" / "session.d" / "50-env.json"
+    assert json.loads(env_file.read_text()) == {
+        "settle": {"soft": {"at": at, "say": "past {at}"}}}
+    assert [(x["variable"], x["key"]) for x in log_lines(home) if x["event"] == "env-at-birth"] \
+        == [("SESSION_SETTLE_AT", "settle.soft.at"), ("SESSION_SETTLE_SAY", "settle.soft.say")]
+    got = settle_settings.read(SID, {"HOME": str(home)})
+    assert got == settle_settings.Settle(settle_settings.Soft(250_000, None, "past {at}"), None)
+
+
+def test_a_second_launch_leaves_a_current_schema_untouched(home, bin_dir):
+    launch(home, bin_dir)
+    before = own_schema(home).stat()
+    launch(home, bin_dir)
+    after = own_schema(home).stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert [x["state"] for x in log_lines(home) if x["event"] == OWN] == ["installed", "current"]
+    assert stat_mode(own_schema(home)) == 0o644
+
+
+def test_a_stale_schema_is_replaced(home, bin_dir):
+    own_schema(home).parent.mkdir(parents=True)
+    own_schema(home).write_text('{"title": "old"}')
+    launch(home, bin_dir)
+    assert json.loads(own_schema(home).read_text()) == settle_settings.schema()
+    assert [p.name for p in own_schema(home).parent.iterdir()] == [".session.schema.json"]
+
+
+def test_an_own_schema_not_written_is_one_line_and_the_launch_carries_on(home, bin_dir):
+    blocker = home / ".sessionkit" / "tools"
+    blocker.parent.mkdir(parents=True)
+    blocker.write_text("not a folder")
+    done = launch(home, bin_dir, SESSION_SETTLE_AT="250k")
+    assert done.stdout == "LAUNCHED\n"
+    (line,) = done.stderr.splitlines()
+    assert line.startswith(f"{settings.SCHEMA_INSTALL_PROG}: session schema not written to "
+                           f"{own_schema(home)} (")
+    assert line.endswith(f"recorded in {sdir(home) / 'log' / settings.SETTINGS_LOG}")
+    (own,) = [x for x in log_lines(home) if x["event"] == OWN]
+    assert own["state"] == "failed"
+    assert not (sdir(home) / "settings" / "session.d").exists()   # no schema: no copy
+
+
+def stat_mode(path: Path) -> int:
+    return path.stat().st_mode & 0o777

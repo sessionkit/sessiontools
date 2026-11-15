@@ -20,9 +20,10 @@ are the first message.
   anything happens. Run it from a terminal, or add `--in-tmux`, which
   gives the session a tmux window of its own. `--dry-run`, and a typed
   `-p`/`--print`, `-h`/`--help` or `-v`/`--version`, need no terminal.
-- Exit codes: 0 ok, 1 launch failed, 2 usage or a refusal, 3 the agent
-  is already held (see [the front door][door], and [the default
-  seat][seat] for `session start claude`).
+- Exit codes: 0 ok, 1 launch failed (a [required context
+  generator][required] that failed among them), 2 usage or a refusal, 3
+  the agent is already held (see [the front door][door], and [the
+  default seat][seat] for `session start claude`).
 
 ## Where agent files live
 
@@ -38,13 +39,24 @@ are the first message.
 - Every session's directory is `<sid>/` in the `sessions` leaf
   (`session path sessions SID`), whatever its agent; `$SESSIONS_DIR`
   overrides.
+- A named agent reaches Claude Code as a one-agent plugin and as an
+  `--add-dir` copy at `.claude/agents/NAME.md`, which reads by the plain
+  name. That copy leaves out `hooks`, `mcpServers` and `permissionMode`:
+  the plugin copy never honoured them, so the seat behaves as it did before.
+- With Claude Code's `project` setting source off
+  (`--setting-sources ""`), a named agent keeps the scoped
+  `session-agent-NAME:NAME` name, and only the shipped status line's
+  strip shows it plain.
 
 ## Flags
 
 - `--dry-run`: show what would run; launch nothing.
 - `--idle`: boot self-directed; run no context generators. With an
   agent file, the first message is one line telling the agent to boot
-  from its file. With no agent file, nothing is injected.
+  from its file. With no agent file, no context is injected. The user's
+  CLAUDE.md is still carried when the sources leave it out: it is
+  Claude Code's own file, not launcher context (see [the user's
+  CLAUDE.md][user-memory]).
 - `--converse`: tell the agent this session can speak. It is a
   capability, not an order to speak first.
 - `--keyed [--key-label NAME]`: mint a fresh Ed25519 session key and
@@ -79,6 +91,59 @@ are the first message.
   exists, and the agent's window is made its current one. The line it
   prints ends with how to reach it: `attach: tmux attach -t agents`.
   `--dry-run` says which session it would use and touches no tmux.
+- **The window runs the line you typed.** It runs `session start` again,
+  with `--in-tmux`, `--tmux-target`, `--switch` and `--no-switch` taken
+  off, in the folder you typed it in. `tmux display -p
+  '#{pane_start_command}'` shows it, and `tmux respawn-pane -k` starts a
+  fresh session from it. Nothing is written to a launch script.
+- **Message words stay out of `ps`.** Words typed after the agent name go
+  to a 0600 file, `<state dir>/launches/<token>/first-message.md`, and the
+  window's line names that file instead. A respawn reads it again; if it
+  is gone, the respawn refuses and says so. These files are not cleaned up
+  yet.
+- **The session id comes from the window.** The command that places it
+  mints nothing, so its line says `session id minted in the pane`. The
+  window's own launch records the line you typed (`session get
+  launch_command`). The line reaches the record through the launch
+  script's environment, never its command line, so it is not in `ps`
+  either, and the session does not inherit it.
+- **A placed window resolves in tmux's environment**, not yours. Its
+  variables are the tmux server's global environment, with the target
+  session's own on top. So `AGENTS_DIR=/x session start --in-tmux pip`
+  finds `pip` in tmux's `AGENTS_DIR`, not in `/x`. When you have set
+  `AGENTS_DIR`, `SESSION_STATE_DIR` or `SESSIONS_DIR` to something tmux's
+  environment does not hold, the placing command prints one warning line
+  per variable, naming it. The launch still goes ahead.
+- To give the window your value, set it in tmux first:
+
+  ```bash
+  tmux set-environment -g AGENTS_DIR /x
+  ```
+- **A window that fails stays open** with its error and tmux's `Pane is
+  dead (status N)`: a launch refused in the window (exit 3), or a shell
+  that cannot find `session` (status 127). A window whose session exits
+  cleanly closes. The window's PATH is the PATH of the command that
+  placed it (tmux 3.8), so `session` must be on that PATH.
+
+## The terminal title
+
+- Just before the vendor starts, the launch sets the terminal's title to
+  a short name: the seat (`--seat`), else the agent's name, else the
+  vendor's (`claude` for a plain session). A terminal that titles its tab
+  from the running command's arguments would otherwise show the whole
+  launch line until the vendor sets a title of its own.
+- It is one title escape (OSC 0) on stdout, written only when stdout is
+  a terminal. Control characters are taken out of the name first.
+- `CLAUDE_CODE_DISABLE_TERMINAL_TITLE`, set to anything but empty, turns
+  it off, as it turns off Claude Code's own title.
+- Nothing of the launch runs after the vendor exits, so it does not put
+  the old title back itself. Claude Code clears the title as it exits,
+  which removes this one too. A vendor that is killed before it can
+  clear the title leaves this one until the shell or the next program
+  sets its own.
+- Under tmux it sets the pane's title. The window's name is set as
+  described above.
+- `--dry-run` shows the title line in the launch script it prints.
 
 ## The front door: one holder
 
@@ -98,8 +163,11 @@ are the first message.
   (`holders/<agent>.lock` in the state dir) and writes
   `holders/<agent>.json` before it execs, the same claim the default
   seat writes. Two launches of one agent started together give one
-  holder; the second is refused, exit 3. With `--in-tmux` the claim
-  moves to the new pane's process once the window is up. A dry run, a
+  holder; the second is refused, exit 3. With `--in-tmux` the command
+  that places the window only checks for a holder; the launch inside the
+  window takes the claim. Two placements started together can both get
+  past the check: the second window's launch is then refused, and the
+  window stays open showing why. A dry run, a
   spawner's `-n` launch and a launch beside a holder with
   `--allow-second-holder` take no claim.
 - **Fail open, loudly:** when the process table or the claim cannot be
@@ -146,12 +214,10 @@ it means for you, shadowing included, is in
   replaces it (`respawn-pane -k`), unless the holder is the launcher or
   one of its ancestors (a start nested inside the seat is held). A start
   with `--in-tmux` never replaces anything.
-- **tmux:** with `--in-tmux` the claim first names the launcher, then
-  moves to the new pane's process once the window is up. If that move
-  fails, one line says so, and the seat reads free until the new
-  session is running. A keyed seat mints its id in the pane, so its
-  claim has no id until then: the held line says `id minted in the
-  pane`.
+- **tmux:** with `--in-tmux` the command that places the window takes
+  no claim. The launch inside the window takes the seat, as a start
+  typed there would. A claim left by an older launcher with no id says
+  `id minted in the pane` in the held line.
 - **The definition goes inline.** Claude Code keeps the name `claude` for
   its own built-in agent, so the seat is passed as
   `--agents '{"claude": {"description": ..., "prompt": ""}}' --agent
@@ -223,7 +289,7 @@ environment:
   files:                # sourced in order, later wins; ./ is the session's dir
     - ~/.voicemode.env
     - ./.voicemode.env
-  secrets:              # NAME: backend:ref, resolved at launch (`pass` today)
+  secrets:              # NAME: backend:ref, resolved at launch (`pass`, `passage`)
     GITHUB_TOKEN: pass:github/token
   inherit:              # names taken from the launcher's own environment
     - CLAUDE_CODE_OAUTH_TOKEN
@@ -236,6 +302,11 @@ environment:
   file the launch script sources and removes before the vendor runs.
   Neither is ever on argv, in the script, or in the tmux server. Both
   are reported by name, never by value, and masked in the launch record.
+- `pass:REF` is the first line of `pass show REF` (gpg). `passage:REF`
+  is the first line of `passage show REF` (age; the store is
+  `$PASSAGE_DIR`, else `~/.passage/store`). Each says on stderr, before
+  it waits, that it may ask for a PIN or a touch. A `passage:` entry with
+  no `.age` file fails before anything decrypts, so a typo costs no touch.
 - A secret that fails to resolve aborts the launch. An `inherit:` name
   the launcher does not hold does not: the banner says
   `inherit: NAME not set in the launcher's environment -- not carried`
@@ -311,9 +382,19 @@ them in the `claude-code` settings tool:
   `launch/` directory and passes it as `--settings`. The dry run's
   command lists it with the layer and file of each value; the launch
   record names the file.
-- Only `model`, `effortLevel`, `statusLine` and `tui` are passed on. Any other
-  key gets one stderr line, `claude-code: KEY (from FILE) not rendered in
-  v1`, and is dropped.
+- Only `model`, `effortLevel`, `statusLine`, `autoCompactWindow`,
+  `idleCompaction` and `tui` are passed on. Any other key gets one stderr
+  line, `claude-code: KEY (from FILE) not rendered in v1`, and is dropped.
+- `autoCompactWindow` (100000 to 1000000 tokens) and `idleCompaction`
+  (`true` or `false`) are passed on only when a layer sets them; unset,
+  Claude Code's own default stands. A value Claude Code would refuse or
+  drop gets one stderr line naming the file and what the key needs.
+  `"auto"` is one of those: Claude Code takes it only per model, under
+  `modelSettings`, so leave the key unset instead. The settle alert reads
+  the window back from this same file (`sessiontools.compact_point`) to
+  count down to compaction. It also reads `autoCompactEnabled` there and
+  in Claude Code's own settings files: off anywhere Claude honours it
+  means no point, and the alert prints `?`.
 - A `--model` or `--effort` typed on the command line still wins:
   claude ranks its own flags above `--settings`.
 - The file also carries `"tui": "default"` when nothing names `tui`
@@ -439,7 +520,8 @@ start:
 - When stderr has a last line, the header adds it after the code
   (`exited 3 -- LINE.`).
 - Any other code, a timeout, or a broken built-in keeps the
-  `CONTEXT GENERATOR FAILED` block.
+  `CONTEXT GENERATOR FAILED` block. For an entry marked
+  [`required: true`][required], it refuses the seat instead.
 - `informational-exit:` is a list of integers from 1 to 255. Anything
   else is refused, exit 2.
 
@@ -454,6 +536,213 @@ resume, a session id minted in the tmux pane, or a `launch-info` that
 failed. The export comes before the declared environment, so an agent
 file that sets the variable under `variables:` wins. A dry run shows the
 line in the script it prints.
+
+## The user's CLAUDE.md
+
+Every seat reads the user's own `CLAUDE.md`. Claude Code loads it only
+through its `user` setting source, and that one switch loads the user
+`settings.json` too (hooks, plugins, permissions, env). So when a fresh
+launch's `--setting-sources` leaves `user` out, `session start` reads the
+file itself and puts it first in the system-prompt file it already
+writes. The user settings stay out.
+
+- **The file:** `$CLAUDE_CONFIG_DIR/CLAUDE.md` when that variable is set,
+  else `$HOME/.claude/CLAUDE.md`. Both are read from the environment
+  Claude Code will get: the launcher's own, with the agent file's
+  `environment: variables:` laid over it. A value that only an
+  `environment: files:` or `secrets:` entry sets is not known before the
+  launch, so that case uses the launcher's own value.
+- **Your `--setting-sources` is never changed.** Nothing adds `user` to
+  it, and the launcher opens no `settings.json` to carry the memory.
+- **Where it goes:** the 0600 system-prompt file
+  (`--append-system-prompt-file`), first, then the default seat's file
+  body, then the `system-prompt:` generators' output.
+- **The block's header** uses Claude Code's own label for the file and
+  says why it was carried:
+
+```text
+<!-- source: user memory: /Users/x/.claude/CLAUDE.md -->
+Contents of /Users/x/.claude/CLAUDE.md (user's private global instructions for all projects; carried by session start because this launch's --setting-sources leaves out `user`):
+```
+
+- **The dry run** names it in the system prompt's provenance:
+  `computed: user memory (/Users/x/.claude/CLAUDE.md), then the default
+  seat's file body, then injected context (system prompt)`. Each part
+  appears only when it is there.
+
+### When it is carried
+
+| launch | carried? | why |
+| --- | --- | --- |
+| fresh, `--setting-sources ''` | yes | Claude Code drops it |
+| fresh, `--setting-sources project,local` (`tm kick`, `tm task work`) | yes | Claude Code drops it |
+| fresh, `--setting-sources user`, `user,project` or `=user` | no | Claude Code loads it: never twice |
+| fresh, no `--setting-sources` | no | Claude Code loads all three sources |
+| fresh, two `--setting-sources`, the last without `user` | yes | Claude Code keeps the last |
+| `--idle` | yes | it is Claude Code's file, not launcher context |
+| `--bare`, `--safe-mode`, `--restricted` | no | no customisations were asked for |
+| no file, unreadable, not UTF-8, or empty | no | a quiet no-op: the argv is unchanged |
+| resume (`--resume`, keyed or not) | no | a resume keeps the prompt it was born with |
+| respawn (`session respawn`) | yes | it replays a fresh `session start` |
+| a vendor other than claude | no | only the claude row has a `user_memory` field |
+
+- The sources are read from the argv Claude Code will see: the agent
+  file's vendor section, then the command line. The last flag wins, as
+  it does in Claude Code.
+
+### It yields your own system-prompt file
+
+Claude Code keeps only one `--append-system-prompt-file`. When nothing
+else on the launch writes that file (`--idle`, or no `system-prompt:`
+generators, and no default seat body) and your agent file or command
+line passes its own, the user memory is not carried. The launch runs as
+it did before, and stderr (and the dry run's plan) says one line:
+
+```text
+user memory not carried: your own --append-system-prompt-file owns the system-prompt door (put /Users/x/.claude/CLAUDE.md's text in it if you want it)
+```
+
+- When the launcher writes the file anyway (generators, or the default
+  seat's body), your own file is still refused, exit 2, as before.
+- An inline `--append-system-prompt` is a different door: the memory
+  rides beside it and never yields to it.
+
+### What it does not do
+
+- **No `@` imports.** Claude Code expands `@path` imports only on its own
+  `user` route. The block names the imports it finds (an `@` starting a
+  word, outside code spans) in one line under the header, and reads none
+  of them.
+- **No `~/.claude/rules/`.** Only the one `CLAUDE.md` is carried.
+- **The launch record is not a load.** The launch script's record call
+  lists `~/.claude/settings.json` and `~/.claude/CLAUDE.md` among the
+  vendor's startup files. That is an audit of what Claude Code may read;
+  it hands neither file to the seat.
+
+## Context generators: a required entry
+
+A `start: context:` entry marked `required: true` must work, or the
+seat does not start. If it fails, `session start` prints why, writes it
+down, and exits 1. The vendor never starts.
+
+```yaml
+start:
+  context:
+    system-prompt:
+      - launch-info
+      - run: memory wake
+        required: true                 # no wake, no seat
+      - run: pager status
+        informational-exit: [3]        # both keys can be used together
+        required: true
+```
+
+- **Why:** an unmarked generator that fails leaves a `CONTEXT GENERATOR
+  FAILED` block and the launch goes ahead. That is right for a nice-to-have
+  briefing. For a wake it is wrong: the seat starts without knowing it
+  missed its wake. A truncated letter, or a `(failed rc=1)` that nobody
+  saw for a week, looks the same as a good wake.
+- **Where:** the key sits in the entry's own mapping, beside `run:`. It
+  is not a `# required` comment, because YAML drops comments. It is not a
+  separate list, because a separate list drifts away from the entries it
+  names. Both `system-prompt:` and `initial:` accept it, and it means the
+  same in each.
+- **Opt-in:** an entry with no `required:`, or `required: false`, behaves
+  exactly as it did before. An agent file with no marking launches
+  exactly as before.
+
+### What counts as a failure
+
+- A non-zero exit that the entry does not list under
+  `informational-exit:`. A listed code is the generator's answer, not a
+  failure, so it does not refuse the seat.
+- A timeout (the cap is 60 s). Whatever the generator wrote before it
+  was stopped is kept and shown, marked `partial: timed out`. An
+  unmarked timeout still shows no output, as before. A timeout kills the
+  generator and everything it started, marked or not: each generator
+  runs in its own process group, and the whole group is killed.
+- A built-in that raises. `launch-info` can be marked, but in practice it
+  does not fail.
+
+### The value
+
+| written | means |
+|---|---|
+| `true`, `yes`, `on` | required |
+| `false`, `no`, `off` | not required |
+| key absent | not required |
+| `1`, `"true"`, `yes-please`, a list, or nothing after the colon | refused, exit 2 |
+
+- `yes` and `on` are YAML booleans. Every other switch in an agent file
+  reads them the same way.
+- A misspelt key (`requred:`) is refused, exit 2, like every unknown
+  key. A marking that cannot be read is never treated as "not required".
+
+### The first required failure stops the run
+
+- Generators run in order. After a required entry fails, nothing else
+  runs: not the rest of its own list, and not `initial:` when the
+  failure was in `system-prompt:`.
+- Why: a wake acts as well as reads (it runs mail-scripts and marks mail
+  read), so later generators should not act for a seat that is about to
+  be refused. You also do not wait up to 60 s for each of them.
+- So one launch reports one required failure. If a second required entry
+  is also broken, the next attempt shows it.
+
+### What you see
+
+The refusal goes to stderr. A live launch and a dry run print the same
+block:
+
+```text
+session start: REFUSED: required context generator `memory wake` exited 1 -- mail tree not found
+  list:    system-prompt, entry 2 of 3 (nothing after it ran)
+  output:  (16 bytes)
+    wake: 3 letters
+  stderr:  (20 bytes)
+    mail tree not found
+  record:  ~/.session/sessions/<id>/launch/refused
+  the vendor was not started.
+```
+
+- The first line names the command and gives the exit code, or
+  `timed out after 60s`.
+- Before it, each earlier unmarked generator that failed gets its usual
+  `context generator failed` line.
+- `output:` and `stderr:` are printed in full, never cut. An empty
+  stream reads `(none)`.
+- Exit 1, "launch failed". Not 2: a generator that fails is the
+  environment failing at launch time (a mail tree, a network), not a
+  mistake in the agent file.
+- Nothing is printed on stdout.
+
+### The record: `launch/refused`
+
+- A live launch writes `<session dir>/launch/refused`: 0600, written
+  once, in the same folder and behind the same git check as the launch
+  record (`launch/env`, `launch/command`). It opens with `key: value`
+  lines: `refused`, `at`, `door`, `entry`, `run`, `reason` and
+  `start`, then `launch_command` and `cwd` when the launch knows them.
+  A blank line follows, then the block printed on stderr, without its
+  `record:` line.
+- It writes no `env` or `command` file. No vendor ran, and with a
+  `command` file `session respawn` would take a seat that never started
+  for one it can bring back.
+- A dry run writes nothing. Its record line ends `(dry run: not
+  written)`.
+- If the file cannot be written, the record line says why. The seat is
+  still refused and the exit is still 1.
+
+### Where it does not apply
+
+- **`--idle` and a resume** run no generators, so a required entry can
+  never refuse them.
+- **`--in-tmux`:** the command that places the window exits 0 with
+  "placed". The launch inside the window is the one that refuses it. That
+  window stays open with the refusal and `Pane is dead (status 1, ...)`. The
+  placing command's exit code cannot carry a verdict reached later, in
+  another process. `--in-tmux --dry-run` plans in the caller, so it
+  refuses and exits 1 directly.
 
 ## Starting in your home folder
 
@@ -549,6 +838,8 @@ plan = prepare(parse_args(["--dry-run", "AGENT"]))
 
 [cache]: list-snapshot-cache.md
 [door]: #the-front-door-one-holder
+[required]: #context-generators-a-required-entry
 [seat]: #the-default-seat-one-per-host
 [seat-user]: session.md#the-default-seat
 [upgrading]: settings.md#upgrading-from-010
+[user-memory]: #the-users-claudemd

@@ -115,6 +115,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="carry an initial message longer than BYTES in a 0600 file and "
              "pass a pointer instead, keeping it out of world-readable `ps` "
              "(0 = always; front matter: start: first-message-file-over:)")
+    # The pane's re-entry path: a tmux placement moves the
+    # bare first-message words into a 0600 file and the pane's line names it
+    # here, so no word sits in `ps` or `pane_start_command`. Internal, so
+    # hidden from --help; still an option string, so the position trap
+    # covers it. Its refusals, each exit 2, are `pane.read_message_file`'s
+    # and `plan.resolve`'s.
+    parser.add_argument(
+        "--first-message-file", metavar="PATH", default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--allow-second-holder", action="store_true",
         help="launch even though a live session already holds this agent: "
@@ -174,6 +182,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # An empty argv is a launch, not an error: a bare `session start` takes
     # the default seat, or starts plain with one line (`start.bare_start`).
     args = parser.parse_args(argv)
+    # The line as ENTERED: the launch record's `launch_command`,
+    # carried on the namespace because every road to the plan carries it.
+    args.entered_argv = list(argv)
     owned = launcher_option_strings(parser) - {"-h", "--help"}
     for token in args.rest:
         if not token.startswith("-"):

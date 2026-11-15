@@ -318,3 +318,89 @@ def test_a_yaml_yes_is_a_bool_and_is_refused_as_an_exit_code():
         "      - run: pager status\n        informational-exit: [yes]\n---\n")
     with pytest.raises(AuthoringError):
         af.parse_start(front_matter["start"])
+
+
+# ---------- a context entry may be REQUIRED (ST-307) ---------------------------
+
+def test_a_required_entry_parses_to_a_required_context_entry():
+    parsed = af.parse_context({"system-prompt": [{"run": "memory wake", "required": True}]})
+    assert parsed.system_prompt == [ContextEntry("memory wake", frozenset(), True)]
+    assert parsed.system_prompt[0].required is True
+
+
+def test_required_and_informational_exit_can_be_written_together():
+    parsed = af.parse_context({"system-prompt": [
+        {"run": "pager status", "informational-exit": [3], "required": True}]})
+    assert parsed.system_prompt == [ContextEntry("pager status", frozenset({3}), True)]
+
+
+@pytest.mark.parametrize("entry", [{"run": "memory wake", "required": False},
+                                   {"run": "memory wake", "informational-exit": [],
+                                    "required": False}])
+def test_required_false_with_no_code_is_the_bare_command_string(entry):
+    """The opt-in proof at parse level: not required parses as it always did."""
+    assert af.parse_context({"system-prompt": [entry]}).system_prompt == ["memory wake"]
+
+
+def test_required_false_with_codes_equals_todays_declared_entry():
+    parsed = af.parse_context({"initial": [
+        {"run": "pager status", "informational-exit": [3], "required": False}]})
+    assert parsed.initial == [ContextEntry("pager status", frozenset({3}))]
+    assert parsed.initial[0].required is False
+
+
+@pytest.mark.parametrize("word", ["true", "yes", "on", "True", "YES"])
+def test_a_yaml_true_word_marks_the_entry_required(word):
+    """yes/on are YAML 1.1 booleans, read as true before our code sees them:
+    accepted on purpose, as for every other switch in an agent file."""
+    front_matter, _ = af.parse_agent_markdown(
+        "---\nstart:\n  context:\n    system-prompt:\n"
+        f"      - run: memory wake\n        required: {word}\n---\n")
+    assert af.parse_start(front_matter["start"]).context.system_prompt == [
+        ContextEntry("memory wake", frozenset(), True)]
+
+
+@pytest.mark.parametrize("word", ["false", "no", "off"])
+def test_a_yaml_false_word_leaves_the_entry_not_required(word):
+    front_matter, _ = af.parse_agent_markdown(
+        "---\nstart:\n  context:\n    system-prompt:\n"
+        f"      - run: memory wake\n        required: {word}\n---\n")
+    assert af.parse_start(front_matter["start"]).context.system_prompt == ["memory wake"]
+
+
+@pytest.mark.parametrize("value", [1, 0, "true", "yes-please", ["x"], None, 1.0, {}])
+def test_a_required_value_that_is_not_a_bool_is_refused_naming_the_entry(value):
+    with pytest.raises(AuthoringError) as excinfo:
+        af.parse_context({"system-prompt": [{"run": "memory wake", "required": value}]})
+    message = str(excinfo.value)
+    assert "start: context: system-prompt:" in message
+    assert "required:" in message and "memory wake" in message
+    assert f"must be true or false, got {value!r}" in message
+
+
+@pytest.mark.parametrize(("text", "says"), [
+    ("        required:\n", "None"),
+    ("        required: yes-please\n", "'yes-please'"),
+    ("        required: 1\n", "1"),
+])
+def test_a_bad_required_marking_in_yaml_is_refused(text, says):
+    """`required:` with no value is a half-written marking, never quietly
+    "not required" (unlike `_parse_bool`, which reads None as absent)."""
+    front_matter, _ = af.parse_agent_markdown(
+        "---\nstart:\n  context:\n    system-prompt:\n"
+        "      - run: memory wake\n" + text + "---\n")
+    with pytest.raises(AuthoringError) as excinfo:
+        af.parse_start(front_matter["start"])
+    assert f"got {says}" in str(excinfo.value)
+
+
+def test_a_misspelt_required_is_refused_as_an_unknown_key():
+    with pytest.raises(AuthoringError) as excinfo:
+        af.parse_context({"system-prompt": [{"run": "memory wake", "requred": True}]})
+    message = str(excinfo.value)
+    assert "'requred'" in message and "required" in message
+
+
+def test_required_is_accepted_under_initial_with_the_same_meaning():
+    parsed = af.parse_context({"initial": [{"run": "memory wake", "required": True}]})
+    assert parsed.initial == [ContextEntry("memory wake", frozenset(), True)]

@@ -5,18 +5,35 @@ its hooks; the `session` command works without it.
 
 - **The `session` skill** (`skills/session/SKILL.md`): teaches an agent
   the verbs, so it runs `session context` instead of guessing.
-- **The settle alert** (`hooks/settle-hook`, PostToolBatch): one line
-  once a session passes the context threshold it set. Silent unless
-  set. See [the settle alert][settle].
+- **The settle alert** (`hooks/settle-hook`, PostToolBatch): the one
+  context warning, a soft line and a hard line set by the `session`
+  tool's `settle.*` settings, read live. Silent unless set, and only in
+  a session `session start` launched. See [the settle alert][settle].
+- **The compaction guard** (`hooks/settle-hook precompact`, PreCompact):
+  skips an auto compaction below the compaction point the launch set,
+  while settle is on. See [the settle alert][settle].
 - **The clock line** (`hooks/clock-hook`, PostToolBatch): the time and
-  the context as used/max on every tool batch, and a warn line at a
-  mark. Off unless `SESSIONTOOLS_HOOK_CLOCK=on`. See [the clock
-  line][clock].
+  the context as used/max on every tool batch, and no warn line. Off
+  unless `SESSIONTOOLS_HOOK_CLOCK=on`. See [the clock line][clock].
+- **The Markdown lint** (`hooks/md-lint`, PostToolUse): after a Write
+  or Edit of a `.md` file, names each table line of 76 or more columns
+  and each `shape` in prose. It never blocks. On, only in a session
+  `session start` launched; `SESSIONTOOLS_HOOK_MD_LINT=off` turns it
+  off. See [the Markdown lint][md-lint].
+- **The hidden-failure note** (`hooks/hidden-failure`, PreToolUse and
+  PostToolUse, Bash): one line when a gate piped into `head` or `tail`
+  exits 0 with failure text, and before a gate piped into `head`. Agent
+  seats only; `SESSIONTOOLS_HOOK_HIDDEN_FAILURE=off` turns it off. See
+  [the hidden-failure note][hidden-failure].
 - **The busy sound** (`hooks/busy-sound`): a sound while a tool batch
   runs long. Silent unless set. See [the busy sound][busy].
 - **The stop sound** (`hooks/busy-sound`, Stop): a sound once when the
   seat's turn ends, queued behind any line the mouth is still speaking.
   Silent unless set. See [the busy sound][busy].
+- **The sed guard** (`hooks/sed-guard`, PreToolUse, matcher `Bash`):
+  refuses `sed -i ''`, BSD sed's form, when the sed the call runs is
+  GNU sed, and names the GNU form. On;
+  `SESSIONTOOLS_HOOK_SED=off` turns it off. See [the sed guard][sed-guard].
 - **The turn-ended mark** (`hooks/busy-sound`): lets
   `session list` say `idle with children`. Off unless
   `SESSIONTOOLS_HOOK_TURN=on`. See [the Python library][library].
@@ -69,13 +86,16 @@ claude plugin marketplace remove sessiontools
 - 0.0.3 and older: no hooks.
 - 0.0.4: the settle alert.
 - 0.1.0: the busy sound.
-- Unreleased: the turn-ended mark, the clock line and the session-info
-  hooks.
+- Unreleased: the turn-ended mark, the clock line, the session-info
+  hooks, the sed guard, the Markdown lint and the hidden-failure note.
 - `claude plugin list` shows the version you run.
 
 [settle]: settle-alert-hook.md
 [clock]: clock-line-hook.md
+[md-lint]: md-lint-hook.md
+[hidden-failure]: hidden-failure-hook.md
 [busy]: busy-sound-hook.md
+[sed-guard]: sed-guard-hook.md
 [library]: python-library-api.md
 [session-info]: session-info-hook.md
 [identity]: identity-block.md

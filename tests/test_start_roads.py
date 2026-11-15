@@ -57,8 +57,8 @@ def never_exec(monkeypatch):
     monkeypatch.setattr(os, "execve", lambda *a: pytest.fail("a refused launch exec'd"))
     monkeypatch.setattr(os, "execvpe", lambda *a: pytest.fail("a refused launch exec'd"))
     placed = lambda *a, **k: pytest.fail("a refused launch was placed in tmux")
-    monkeypatch.setattr(start, "place_in_tmux", placed)
-    monkeypatch.setattr(placement, "place_in_tmux", placed)
+    monkeypatch.setattr(start, "place_pane", placed)
+    monkeypatch.setattr(placement, "place_pane", placed)
 
 
 def assert_the_ports_refusal(err: str) -> None:

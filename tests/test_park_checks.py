@@ -531,10 +531,14 @@ def mail(tmp_path, monkeypatch):
                 (self.dir / sub).mkdir(parents=True, exist_ok=True)
 
         def deliver(self, mid: str | None, sub: str = "new", info: str = "",
-                    supersedes: str | None = None) -> Path:
+                    supersedes: str | None = None,
+                    from_: str | list[str] | None = "a@b") -> Path:
+            """FROM_ is one From: line, a list of them, or None for none."""
             self.make()
             self.n += 1
-            head = f"From: a@b\nSubject: secret subject {self.n}\n"
+            froms = [from_] if isinstance(from_, str) else from_ or []
+            head = "".join(f"From: {f}\n" for f in froms)
+            head += f"Subject: secret subject {self.n}\n"
             if mid:
                 head += f"Message-ID: <{mid}>\n"
             if supersedes:
@@ -628,6 +632,107 @@ def test_a_draft_and_a_superseded_message_do_not_count(mail):
     mail.deliver("new@h", supersedes="old@h")
     mail.mark(f"2030-06-09T17:00:00+00:00 new@h read worker {SID}")
     assert mail.check().word == park.PASS
+
+
+def test_a_supersede_from_an_unrelated_sender_does_not_hide_the_original(mail):
+    """Mail from x@y naming a@b's unread message in Supersedes: is not a
+    supersede: the original is still unread, and park says so."""
+    mail.deliver("old@h")
+    mail.deliver("forged@h", supersedes="old@h", from_="x@y")
+    mail.mark(f"2030-06-09T17:00:00+00:00 forged@h read worker {SID}")
+    got = mail.check()
+    assert got.word == park.FAIL, got.why
+    assert got.why == "1 unread: <old@h>; 1 refused supersede: <forged@h>"
+
+
+def test_a_refused_supersede_with_nothing_unread_is_unknown_naming_it(mail):
+    """The target was read anyway: nothing is unread, but the refused
+    carrier is still named, as UNKNOWN, never a quiet PASS."""
+    mail.deliver("old@h")
+    mail.deliver("forged@h", supersedes="old@h", from_="x@y")
+    mail.mark(f"2030-06-09T17:00:00+00:00 old@h read worker {SID}",
+              f"2030-06-09T17:00:00+00:00 forged@h read worker {SID}")
+    assert mail.check() == park.Check("mail", park.UNKNOWN, "1 refused supersede: <forged@h>")
+
+
+@pytest.mark.parametrize("old_from, new_from", [
+    ("a@b", "a@b"),
+    ("Alice <a@b>", "a@b"),
+    ("a@b", '"Someone Else" <A@B>'),
+    ("A@B (Alice)", "Alice <a@b>"),
+])
+def test_a_same_sender_supersede_hides_whatever_the_display_name_or_case(mail, old_from, new_from):
+    mail.deliver("old@h", from_=old_from)
+    mail.deliver("new@h", supersedes="old@h", from_=new_from)
+    mail.mark(f"2030-06-09T17:00:00+00:00 new@h read worker {SID}")
+    assert mail.check() == park.Check("mail", park.PASS, "session box: 0 unread")
+
+
+@pytest.mark.parametrize("carrier_from", [
+    None,                    # no From: at all
+    "",                      # a From: naming nobody
+    "a@b, x@y",              # two addresses in one From:
+    ["a@b", "a@b"],          # two From: lines, even the same address twice
+], ids=["no-from", "empty-from", "two-in-one", "two-lines"])
+def test_a_carrier_without_exactly_one_from_is_refused(mail, carrier_from):
+    mail.deliver("old@h")
+    mail.deliver("new@h", supersedes="old@h", from_=carrier_from)
+    mail.mark(f"2030-06-09T17:00:00+00:00 new@h read worker {SID}")
+    assert mail.check().why == "1 unread: <old@h>; 1 refused supersede: <new@h>"
+
+
+def test_a_target_with_no_from_cannot_be_superseded(mail):
+    mail.deliver("old@h", from_=None)
+    mail.deliver("new@h", supersedes="old@h")
+    mail.mark(f"2030-06-09T17:00:00+00:00 new@h read worker {SID}")
+    assert mail.check().why == "1 unread: <old@h>; 1 refused supersede: <new@h>"
+
+
+def test_a_planted_copy_of_the_target_under_the_forger_cannot_vouch(mail):
+    """x@y plants a second file with the target's id and its own From, then
+    supersedes the id: the real copy from a@b still differs, so it is
+    refused and the target stays unread."""
+    mail.deliver("old@h")
+    mail.deliver("old@h", sub="cur", info=":2,S", from_="x@y")
+    mail.deliver("forged@h", supersedes="old@h", from_="x@y")
+    mail.mark(f"2030-06-09T17:00:00+00:00 forged@h read worker {SID}")
+    got = mail.check()
+    assert got.word == park.FAIL
+    assert got.why == "2 unread: <old@h>, <old@h>; 1 refused supersede: <forged@h>"
+
+
+def test_a_forged_from_copied_from_the_target_passes(mail):
+    """PINNED, as SM-973 pins it: the sender rule stops the wrong sender, not
+    a forger. Anyone who can write a file into the box can copy the
+    target's From, and nothing here checks it; only a verified signature
+    would. If this starts failing, the rule changed: say so in the CHANGELOG."""
+    mail.deliver("old@h")
+    mail.deliver("forged@h", supersedes="old@h", from_="a@b")   # x@y, lying
+    mail.mark(f"2030-06-09T17:00:00+00:00 forged@h read worker {SID}")
+    assert mail.check().word == park.PASS
+
+
+def test_a_supersede_naming_mail_not_in_the_box_hides_and_refuses_nothing(mail):
+    mail.deliver("new@h", supersedes="elsewhere@h", from_="x@y")
+    mail.mark(f"2030-06-09T17:00:00+00:00 new@h read worker {SID}")
+    assert mail.check() == park.Check("mail", park.PASS, "session box: 0 unread")
+
+
+def test_a_refused_carrier_with_no_id_is_named_by_its_file(mail):
+    mail.deliver("old@h")
+    p = mail.deliver(None, supersedes="old@h", from_="x@y")
+    assert mail.check().why == f"2 unread: <old@h>, {p.name}; 1 refused supersede: {p.name}"
+
+
+def test_refused_supersedes_are_counted_and_capped(mail):
+    for i in range(4):
+        mail.deliver(f"old{i}@h")
+        mail.deliver(f"forged{i}@h", supersedes=f"old{i}@h", from_="x@y")
+    mail.mark(*(f"2030-06-09T17:00:00+00:00 {k}{i}@h read worker {SID}"
+                for i in range(4) for k in ("old", "forged")))
+    assert mail.check() == park.Check(
+        "mail", park.UNKNOWN,
+        "4 refused supersedes: <forged0@h>, <forged1@h>, <forged2@h> +1 more")
 
 
 def test_a_message_with_no_id_is_unread_and_named_by_its_file(mail):

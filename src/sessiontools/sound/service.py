@@ -19,9 +19,16 @@ ON and OFF are the plist's presence plus its load. A plist in
 LaunchAgents loads again at the next login, so writing it is part of the
 deploy, and only `on` writes it. **On a real host, `on` IS the deploy.**
 
-Exit codes: 0 done; 1 tried and failed (bootstrap refused, no pong);
-2 refused before anything changed (no swiftc, the build failed, the port is
-held, not macOS) or a usage error.
+THE SERVICE FILE. `on` writes ~/.sessionkit/tools/services/sound-engine.json
+(enabled true) right after the plist, and `off` rewrites it (enabled
+false) after the bootout and the retire; the file is kept, and `--purge`
+keeps it too. `service_file` is the writer. A failed write does not stop
+the launchd act: the verb finishes it, prints `service could not write
+...`, and exits 1. A refusal writes no file.
+
+Exit codes: 0 done; 1 tried and failed (bootstrap refused, no pong, the
+service file not written); 2 refused before anything changed (no swiftc,
+the build failed, the port is held, not macOS) or a usage error.
 
 THE RETIRE (the label rename). Before the rename the job was LEGACY_LABEL. `on` and `off`
 retire it: a loaded old job is booted out and its plist removed, through
@@ -55,7 +62,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from sessiontools import settings, sound
+from sessiontools import service_file, settings, sound
 
 #: The launchd label: the one constant. The plist's name, the launchctl
 #: target, the plist's Label and the help text all derive from it.
@@ -78,6 +85,16 @@ THROTTLE = 30
 PING_TIMEOUT = 2.0
 RESEND = 0.25
 GONE_WAIT = 10.0
+#: The verb, as the parser, the refusal line and the service file spell it.
+PROG = "session sound engine"
+#: The plist's LimitLoadToSessionType: the job loads only in a logged-in GUI
+#: session. The service file's `note` is written from it, so the two agree.
+SESSION_TYPE = "Aqua"
+#: The engine's transport: UDP on sound.HOST (the service file's protocol).
+PROTOCOL = "udp"
+#: The service file's name (the label's tail) and its one-line description.
+SERVICE = service_file.name_of(LABEL)
+DESCRIPTION = "the busy sound's resident audio engine"
 
 
 class Refused(Exception):
@@ -313,10 +330,23 @@ def plist(env: Mapping[str, str] | None = None) -> dict:
         "KeepAlive": True,
         "ThrottleInterval": THROTTLE,
         "ProcessType": "Interactive",
-        "LimitLoadToSessionType": "Aqua",
+        "LimitLoadToSessionType": SESSION_TYPE,
         "StandardOutPath": log,
         "StandardErrorPath": log,
     }
+
+
+def service_record(enabled: bool, env: Mapping[str, str] | None = None) -> dict:
+    """sound-engine.json, as `on` (ENABLED) and `off` write it (the
+    services design 1.2).
+    The port is sound.port(ENV), the value the plist's `--port` is given, so
+    the file and the plist never disagree; the note follows SESSION_TYPE."""
+    note = ("runs only in a logged-in GUI session (LimitLoadToSessionType Aqua)"
+            if SESSION_TYPE == "Aqua" else None)
+    return service_file.record(label=LABEL, enabled=enabled, install=f"{PROG} on",
+                               uninstall=f"{PROG} off", description=DESCRIPTION,
+                               port=sound.port(env), protocol=PROTOCOL, bind=sound.HOST,
+                               note=note)
 
 
 def _write_plist(path: Path, data: dict) -> None:
@@ -476,6 +506,7 @@ def cmd_on(dry_run: bool) -> int:
              *_retire_lines(old, dry_run=True),
              f"plist  would write {path}:",
              plistlib.dumps(data).decode().rstrip(),
+             *service_file.declare(service_record(True), dry_run=True)[0],
              f"launchd would: bootout {_target()}, then bootstrap {_domain()} {path}",
              "dry run: nothing was written, and no launchctl verb that changes anything ran")
         return 0
@@ -490,6 +521,8 @@ def cmd_on(dry_run: bool) -> int:
     log_path().parent.mkdir(parents=True, exist_ok=True)
     _write_plist(path, data)
     _say(f"plist  {path}")
+    lines, declared = service_file.declare(service_record(True), dry_run=False)
+    _say(*lines)                                 # a failed write: the act goes on, exit 1
     _launchctl("bootout", _target())
     if not _wait_gone():
         _say(f"launchd: {_target()} still loaded {GONE_WAIT:.0f} s after bootout")
@@ -506,7 +539,7 @@ def cmd_on(dry_run: bool) -> int:
     _say(f"on     {LABEL}", _pong_line(p))
     if not p.get("running"):
         _say(f"note   the output device is not running yet (see {log_path()})")
-    return 0
+    return 0 if declared else 1
 
 
 def cmd_off(dry_run: bool, purge: bool) -> int:
@@ -518,8 +551,10 @@ def cmd_off(dry_run: bool, purge: bool) -> int:
         _say(f"launchd would: bootout {_target()} ({'loaded' if loaded() else 'not loaded'})",
              f"plist  would remove {path} ({'present' if path.exists() else 'absent'})",
              *_retire_lines(old, dry_run=True),
+             *service_file.declare(service_record(False), dry_run=True)[0],
              *([f"purge  would remove {b}" for b in bins if b.exists()] if purge else []),
-             "dry run: nothing was removed, and no launchctl verb that changes anything ran")
+             "dry run: nothing was removed or written, and no launchctl verb that changes "
+             "anything ran")
         return 0
     was = loaded()
     if was:
@@ -529,12 +564,14 @@ def cmd_off(dry_run: bool, purge: bool) -> int:
     _say(f"off    {LABEL} ({'booted out' if was else 'was not loaded'}); plist removed: {path}")
     _say(*_retire_lines(old, dry_run=False))
     retire(old, wait=False)
+    lines, declared = service_file.declare(service_record(False), dry_run=False)
+    _say(*lines)                                 # kept, also under --purge
     if purge:
         for b in bins:
             with contextlib.suppress(FileNotFoundError):
                 b.unlink()
         _say(f"purge  removed the binaries in {dest}")
-    return 0
+    return 0 if declared else 1
 
 
 def status() -> dict:
@@ -574,14 +611,22 @@ EPILOG = f"""\
 into gui/<uid>. `off` boots it out and removes the plist; the binaries stay
 unless --purge. Both retire a job left under the old label
 (status names one that is still there).
-Label {LABEL}; port 127.0.0.1:{sound.PORT}/udp.
-Exit 0 done, 1 tried and failed (bootstrap, no pong), 2 refused before
-anything changed (no swiftc, build failed, port held) or usage."""
+Label {LABEL}; port {sound.HOST}:{sound.PORT}/{PROTOCOL}.
+Both write {service_file.shown(SERVICE)} (enabled true
+on `on`, false on `off`; the file is kept, --purge too), the file
+`sessionkit service list` reads; --dry-run prints it and writes nothing.
+If that write fails, the job is still loaded (or booted out) as asked, and
+the verb prints
+  {service_file.COULD_NOT_WRITE.format(path="PATH", reason="REASON")}
+then exits 1: run it again.
+Exit 0 done, 1 tried and failed (bootstrap, no pong, or the service file),
+2 refused before anything changed (no swiftc, build failed, port held) or
+usage."""
 
 
 def build_parser() -> argparse.ArgumentParser:
     """`session sound engine`'s parser: build, on, off, status."""
-    p = argparse.ArgumentParser(prog="session sound engine", epilog=EPILOG,
+    p = argparse.ArgumentParser(prog=PROG, epilog=EPILOG,
                                 formatter_class=argparse.RawDescriptionHelpFormatter,
                                 description="Build, switch on, switch off, or report the sound "
                                             "engine (one resident AVAudioEngine process, a "
@@ -613,5 +658,5 @@ def main(argv: list[str]) -> int:
             return cmd_off(a.dry_run, a.purge)
         return cmd_status(a.json)
     except Refused as e:
-        print(f"session sound engine {a.verb}: refused: {e}", file=sys.stderr)
+        print(f"{PROG} {a.verb}: refused: {e}", file=sys.stderr)
         return 2

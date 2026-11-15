@@ -95,8 +95,17 @@ def _walk(path, parser):
 @pytest.mark.parametrize("path,parser", [pp for src in _sources() for pp in _walk(*src)],
                          ids=lambda v: " ".join(v) if isinstance(v, tuple) else "")
 def test_every_parser_long_flag_is_offered_at_its_path(root, path, parser):
-    longs = {o for a in parser._actions for o in a.option_strings if o.startswith("--")}
+    longs = {o for a in parser._actions for o in a.option_strings
+             if o.startswith("--") and a.help is not argparse.SUPPRESS}
     assert longs <= flags(at(root, *path))
+
+
+def test_a_flag_hidden_from_help_is_never_offered(root):
+    """`session start --first-message-file` is the pane's re-entry path
+    (ST-285): hidden from --help, so completion never offers it."""
+    offered = flags(at(root, "start"))
+    assert "--first-message-file" not in offered
+    assert "--first-message-file-over" in offered
 
 
 @pytest.mark.parametrize("path,parser", [pp for src in _sources() for pp in _walk(*src)],

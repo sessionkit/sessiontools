@@ -7,9 +7,14 @@ output rides the vendor's system-prompt door (standing configuration);
 The launcher only runs a list and labels what came back: every block says
 `<!-- source: CMD -->`, and a failed generator leaves a LOUD note (a
 silently missing briefing reads exactly like an empty one), while the
-launch proceeds. One built-in, `launch-info`, is produced in-process: the
-facts only the launcher knows. Idle is a short circuit, not a filter: no
-generator runs at all.
+launch proceeds. The one exception is an entry the agent file marked
+`required: true` (ST-307): when it fails (an undeclared non-zero exit, a
+timeout, a built-in that raises), the run stops there, nothing after it
+runs, and `build_injected_context` raises `ContextRefused`, which refuses
+the seat - exit 1, no vendor. A required timeout keeps its partial stdout.
+One built-in, `launch-info`, is produced in-process: the facts only the
+launcher knows. Idle is a short circuit, not a filter: no generator runs
+at all, so nothing can refuse it.
 
 Each shelled-out generator is announced on stderr before it runs - one
 agent's wake takes ~55 s, and a dry run that prints nothing for a minute looks
@@ -18,7 +23,11 @@ hung. The 60 s per-generator cap is the old contract, kept.
 THE DOORS, planned here and written by `run.execute`:
 
     system prompt   ALWAYS a 0600 file (--append-system-prompt-file): it
-                    runs to tens of kilobytes, and argv is world-readable
+                    runs to tens of kilobytes, and argv is world-readable.
+                    In order: the user's CLAUDE.md when the launch's
+                    --setting-sources leaves out `user` (`user_memory`,
+                    ST-302), the default seat's file body, then the
+                    `system-prompt:` generators' output
     first message   inline up to `first-message-file-over` bytes, else a
                     0600 file and a one-line pointer in argv
     agent plugin    a 0700 one-agent plugin dir holding a COPY of the agent
@@ -38,9 +47,11 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -48,7 +59,7 @@ from collections.abc import Callable
 from typing import NamedTuple
 
 from sessiontools.operator import short_host
-from sessiontools.start.errors import PROG, AuthoringError
+from sessiontools.start.errors import PROG, AuthoringError, ContextRefused
 from sessiontools.start.vendor import VENDORS
 
 BUILTIN_LAUNCH_INFO = "launch-info"
@@ -56,6 +67,12 @@ BUILTIN_LAUNCH_INFO = "launch-info"
 # A bound on any one generator. The old launcher's own predecessor had
 # none, and a hung `git` in a context script hung the launch silently.
 CONTEXT_TIMEOUT_S = 60
+
+# After a timeout kills a generator's process group, how long to read its
+# pipes to EOF. Every writer in the group is dead, so EOF is immediate; the
+# bound is for a member that left the group (its own setsid) still holding
+# a pipe, which must not hang the launch.
+DRAIN_AFTER_KILL_S = 1
 
 CONTEXT_MARKER = "<!-- source: %s -->"
 
@@ -90,13 +107,15 @@ BARE_CONVERSE_SIGNAL = (
 
 class ContextEntry(NamedTuple):
     """A `start: context:` entry the agent file wrote as a MAPPING: the
-    command, and the exit codes this agent file declares informational for
-    it. The launcher never guesses which codes are benign; it honours only
-    the codes written here. A plain string entry is the same
-    command with no declared codes."""
+    command, the exit codes this agent file declares informational for it,
+    and whether it is REQUIRED. The launcher never guesses which codes are
+    benign; it honours only the codes written here. A required entry that
+    fails refuses the seat. A plain string entry is the same command with no
+    declared codes, not required."""
 
     run: str
     informational_exit: frozenset = frozenset()
+    required: bool = False
 
 
 # The informational header's fixed tail. True whether or not stdout follows:
@@ -111,12 +130,18 @@ class ContextResult(NamedTuple):
     `output` is kept even on failure (half a briefing, said to be half);
     `error` is None on success, else a short reason, never the output.
     `note` is set only for a non-zero exit the agent file declared
-    informational: it did not fail (`ok`), but the exit is still shown."""
+    informational: it did not fail (`ok`), but the exit is still shown.
+    `required` is copied from the entry; `stderr` is the generator's whole
+    stderr (partial on a timeout) - `error` keeps only its last line, and a
+    refusal is the moment someone needs all of it. `render_context` reads
+    neither, so they change no rendered byte."""
 
     source: str
     output: str
     error: str | None
     note: str | None = None
+    required: bool = False
+    stderr: str = ""
 
     @property
     def ok(self) -> bool:
@@ -190,39 +215,134 @@ def run_context_entry(entry: str | ContextEntry, env: dict | None = None,
     built-in lookup, the announcement and the `source` label all see the
     command, never the tuple."""
     if isinstance(entry, ContextEntry):
-        entry, informational = entry.run, entry.informational_exit
+        entry, informational, required = (entry.run, entry.informational_exit,
+                                          entry.required)
     else:
-        informational = frozenset()
+        informational, required = frozenset(), False
     table = {} if builtins is None else builtins
     name = entry.strip()
     if name in table:
         try:
-            return ContextResult(entry, table[name]() or "", None)
+            return ContextResult(entry, table[name]() or "", None, required=required)
         except Exception as exc:  # noqa: BLE001 - a built-in never takes a launch down
-            return ContextResult(entry, "", f"{type(exc).__name__}: {exc}")
+            return ContextResult(entry, "", f"{type(exc).__name__}: {exc}",
+                                 required=required)
     if announce is not None:
         announce(entry)
     try:
-        result = subprocess.run(entry, shell=True, capture_output=True, text=True,
-                                timeout=timeout, cwd=cwd, env=env, check=False)
-    except subprocess.TimeoutExpired:
-        return ContextResult(entry, "", f"timed out after {timeout}s")
+        result = _run_in_own_group(entry, timeout, cwd, env)
+    except subprocess.TimeoutExpired as exc:
+        # Only a REQUIRED entry keeps its partial stdout: a non-required
+        # timeout renders exactly as it always has, with no output.
+        output = _decode_partial(exc.stdout) if required else ""
+        return ContextResult(entry, output, f"timed out after {timeout}s",
+                             required=required, stderr=_decode_partial(exc.stderr))
+    stderr = result.stderr or ""
     if result.returncode != 0:
-        detail = result.stderr.strip().splitlines()
+        detail = stderr.strip().splitlines()
         reason = f"exited {result.returncode}"
         if detail:
             reason += f" -- {detail[-1]}"
         if result.returncode in informational:
             note = f"{reason}. {INFORMATIONAL_EXIT_NOTE % result.returncode}"
-            return ContextResult(entry, result.stdout, None, note)
-        return ContextResult(entry, result.stdout, reason)
-    return ContextResult(entry, result.stdout, None)
+            return ContextResult(entry, result.stdout, None, note,
+                                 required=required, stderr=stderr)
+        return ContextResult(entry, result.stdout, reason, required=required,
+                             stderr=stderr)
+    return ContextResult(entry, result.stdout, None, required=required, stderr=stderr)
+
+
+def _run_in_own_group(entry: str, timeout: int, cwd: str | None,
+                      env: dict | None) -> subprocess.CompletedProcess:
+    """`subprocess.run(entry, shell=True, capture_output=True, text=True)`,
+    except the command runs in its OWN session, so its process group is
+    the shell and everything it forks; a timeout (or an interrupt) kills
+    that whole GROUP. `subprocess.run` kills the direct child only, and a
+    grandchild it forked ran on, reparented to init (ST-317). A new session
+    rather than just a new group: a generator then has no controlling
+    terminal, so it can never be stopped by a job-control signal waiting
+    for one. Never a pattern kill - the group is this command's alone.
+
+    Its stdin is /dev/null, never inherited. With an inherited pty slave
+    on stdin, the new session left the parent's own later stdout write
+    failing with EIO (exit 120, ST-317 fix-002; cause inferred from the
+    remedy, which was measured). A generator reads no input anyway.
+
+    A timeout raises `TimeoutExpired` carrying the output read so far,
+    drained to EOF once the group is dead (str, or bytes when a pipe
+    outlived the drain bound)."""
+    process = subprocess.Popen(entry, shell=True, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, cwd=cwd, env=env,
+                               start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _kill_group(process)
+        exc.stdout, exc.stderr = _drain(process)
+        raise
+    except BaseException:
+        _kill_group(process)
+        process.wait()
+        raise
+    return subprocess.CompletedProcess(entry, process.returncode, stdout, stderr)
+
+
+def _kill_group(process: subprocess.Popen) -> None:
+    """SIGKILL the command's process group. Its pgid is the shell's pid
+    (`start_new_session`), and the shell is not yet reaped, so the id cannot
+    have been reused. A group already empty is not an error."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:  # ESRCH: nobody left; EPERM: only zombies (macOS)
+        pass
+
+
+def _drain(process: subprocess.Popen) -> tuple[str | bytes, str | bytes]:
+    """Everything the killed group wrote. A second `communicate` keeps what
+    the first one read, so the result is the whole of it."""
+    try:
+        return process.communicate(timeout=DRAIN_AFTER_KILL_S)
+    except subprocess.TimeoutExpired as again:
+        # A process outside the group still holds a pipe: keep what was
+        # read, reap the shell, and stop reading.
+        process.wait()
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        return again.stdout, again.stderr
+
+
+def _decode_partial(data: bytes | str | None) -> str:
+    """What a timed-out generator had written before it was killed.
+    `TimeoutExpired` carries BYTES or None even under `text=True`
+    (measured, Python 3.13), so it is decoded here; None is "". A drain
+    that reached EOF hands back str, which passes through."""
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    return data.decode("utf-8", errors="replace")
+
+
+def stopped_on_required(results: list[ContextResult]) -> bool:
+    """Whether a run stopped at a required entry that failed: it is then the
+    LAST result, and nothing after it ran."""
+    return bool(results) and results[-1].required and not results[-1].ok
 
 
 def run_context_entries(entries: list, **kwargs: object) -> list[ContextResult]:
     """IN ORDER, one after another: a later generator may read a file an
-    earlier one wrote."""
-    return [run_context_entry(entry, **kwargs) for entry in entries]
+    earlier one wrote. A REQUIRED entry that fails stops the run: it is the
+    last result, and no later entry runs (a wake acts as well as reads, and
+    a seat about to be refused should not have the rest act for it).
+    `stopped_on_required` tells the caller."""
+    results = []
+    for entry in entries:
+        results.append(run_context_entry(entry, **kwargs))
+        if stopped_on_required(results):
+            break
+    return results
 
 
 def render_context(results: list[ContextResult]) -> str:
@@ -247,6 +367,17 @@ def render_context(results: list[ContextResult]) -> str:
     return "\n\n".join(blocks) + "\n" if blocks else ""
 
 
+def _refuse_if_stopped(results: list[ContextResult], before: list[ContextResult],
+                       door: str, count: int) -> None:
+    """Raise `ContextRefused` when `results` stopped at a required failure.
+    `before` is what ran earlier in other lists; its failures, and this
+    list's own before the stop, ride along as `earlier`."""
+    if not stopped_on_required(results):
+        return
+    earlier = [result for result in before + results[:-1] if not result.ok]
+    raise ContextRefused(results[-1], door, (len(results), count), earlier)
+
+
 def converse_signal(agent_file: bool) -> str:
     """The voice line a converse launch injects: CONVERSE_SIGNAL when an
     agent file is in play, BARE_CONVERSE_SIGNAL when none is."""
@@ -268,7 +399,12 @@ def build_injected_context(start: object, idle: bool = False, converse: bool = F
     `agent_file` says an agent file is in play. Only then does an idle
     launch open with IDLE_BOOT_TRIGGER; a bare idle launch carries just the
     converse signal and the user's words, or no first message at all. It
-    also picks the converse signal, idle or not: see converse_signal."""
+    also picks the converse signal, idle or not: see converse_signal.
+
+    A required entry that fails stops the run - the rest of its own list,
+    and the whole `initial:` list after a `system-prompt:` failure - and
+    raises `ContextRefused` (exit 1): no injected context is built, and the
+    seat is refused. Idle runs no generator, so it can never refuse."""
     if idle:
         parts = [IDLE_BOOT_TRIGGER] if agent_file else []
         if converse:
@@ -279,7 +415,11 @@ def build_injected_context(start: object, idle: bool = False, converse: bool = F
     runner = {"builtins": builtins, "env": env, "cwd": cwd, "timeout": timeout,
               "announce": announce}
     system_results = run_context_entries(start.context.system_prompt, **runner)
+    _refuse_if_stopped(system_results, [], "system-prompt",
+                       len(start.context.system_prompt))
     initial_results = run_context_entries(start.context.initial, **runner)
+    _refuse_if_stopped(initial_results, system_results, "initial",
+                       len(start.context.initial))
     parts = []
     briefing = render_context(initial_results).strip("\n")
     if briefing:
@@ -328,7 +468,8 @@ class PlannedFile(NamedTuple):
 
 
 class PlannedPlugin(NamedTuple):
-    """The 0700 one-agent plugin dir a live launch writes before its exec."""
+    """The 0700 one-agent carrier dir (plugin and add-dir in one) a live
+    launch writes before its exec."""
 
     path: str
     agent_name: str
@@ -415,8 +556,10 @@ def initial_message_argv(text: str, directory: str | None = None,
 
 def agent_plugin_argv(vendor: str, agent: object, directory: str | None = None,
                       dry_run: bool = False) -> tuple[list[str], PlannedPlugin | None]:
-    """([flag, dir], dir to write) carrying the agent's definition, or
-    ([], None) when the vendor has no such mechanism or there is no agent.
+    """([plugin flag, dir, add-dir flag, dir], dir to write) carrying the
+    agent's definition, or ([], None) when the vendor has no such mechanism
+    or there is no agent. A vendor with no add-dir flag gets the plugin
+    half alone: ([plugin flag, dir], dir to write).
 
     `--agent NAME` is a NAME LOOKUP the vendor performs across its settings
     sources, so a launch from a neutral cwd died with "--agent 'alice' not
@@ -425,12 +568,31 @@ def agent_plugin_argv(vendor: str, agent: object, directory: str | None = None,
     `--agents '<json>'` (argv is world-readable): a plugin dir, path-based.
     The one exception is the default seat, whose word the vendor reserves
     for its own built-in agent: its definition holds only shipped public
-    text, and `default_seat.definition_argv` carries it inline instead."""
-    flag = VENDORS[vendor].get("agent_plugin_dir_arg")
+    text, and `default_seat.definition_argv` carries it inline instead.
+
+    ONE dir, handed over TWICE, because each half alone falls short:
+
+    - the plugin half always resolves, but the vendor scopes every plugin
+      agent `<plugin>:<name>`, so the session reports its agent as
+      `session-agent-NAME:NAME` (status line, hooks' `agent_type`);
+    - the add-dir half holds `.claude/agents/NAME.md`, which outranks a
+      plugin agent and carries no scope, so the agent reads by its PLAIN
+      name - but only while the vendor's `project` setting source is on.
+      With it off, the plugin half still resolves the agent, scoped.
+
+    The add-dir names the carrier dir ONLY, never the wider directory the
+    other launch files sit in: an add-dir also grants the session file
+    access to everything under it."""
+    table = VENDORS[vendor]
+    flag = table.get("agent_plugin_dir_arg")
     if flag is None or agent is None or not getattr(agent, "file", None):
         return [], None
     path = planned_path(directory, PLUGIN_PREFIX, "", DRY_RUN_PLUGIN_NAME, dry_run)
-    return [flag, path], None if dry_run else PlannedPlugin(path, agent.name, agent.file)
+    argv = [flag, path]
+    add_dir = table.get("agent_add_dir_arg")
+    if add_dir is not None:
+        argv += [add_dir, path]
+    return argv, None if dry_run else PlannedPlugin(path, agent.name, agent.file)
 
 
 # ---------- writing (run.execute's half) -------------------------------------
@@ -448,16 +610,101 @@ def write_private_file(path: str, text: str) -> str:
     return path
 
 
+#: Front-matter keys the add-dir copy of an agent file leaves out: an
+#: add-dir agent honours them and a plugin agent never did.
+ADD_DIR_DROPPED_KEYS = ("hooks", "mcpServers", "permissionMode")
+
+#: The front-matter fence, shared with `agentfile.parse_agent_markdown`.
+FRONT_MATTER_DELIM = re.compile(r"^---[ \t]*$")
+
+
+def _top_level_key(line: str) -> str | None:
+    """The key a top-level mapping line opens (`key:`, `"key":`), else None."""
+    match = re.match(r"""^(?:"([^"]*)"|'([^']*)'|([^\s#'"\-][^:\s]*))[ \t]*:(?:[ \t]|$)""",
+                     line)
+    if match is None:
+        return None
+    return next(group for group in match.groups() if group is not None)
+
+
+def _continues_value(line: str) -> bool:
+    """Whether a front-matter line belongs to the value above it: indented,
+    or a block-sequence item written at column 0 (`- x`)."""
+    return line[:1] in (" ", "\t") or line == "-" or line.startswith(("- ", "-\t"))
+
+
+def drop_front_matter_keys(data: bytes, keys: tuple[str, ...]) -> bytes:
+    """`data` with each top-level front-matter key in `keys` removed, value
+    and all; every other byte as it was.
+
+    A line filter, never a YAML load and dump, so the other keys, their
+    order, comments, blank lines, the body, line endings and a missing final
+    newline survive untouched. A key's value is the lines after it that are
+    indented or are column-0 sequence items; a blank or column-0 comment line
+    goes with it only when the value carries on after it. No front matter,
+    an unterminated one, or one holding none of `keys`: `data` itself."""
+    lines = data.split(b"\n")
+
+    def text(index: int) -> str:
+        return lines[index].decode("utf-8", "surrogateescape").removesuffix("\r")
+
+    if not FRONT_MATTER_DELIM.match(text(0)):
+        return data
+    close = next((index for index in range(1, len(lines))
+                  if FRONT_MATTER_DELIM.match(text(index)) or text(index).rstrip() == "..."),
+                 None)
+    if close is None:
+        return data
+    kept = lines[:1]
+    index = 1
+    while index < close:
+        if _top_level_key(text(index)) not in keys:
+            kept.append(lines[index])
+            index += 1
+            continue
+        end = index + 1
+        probe = end
+        while probe < close:
+            line = text(probe)
+            if _continues_value(line):
+                probe += 1
+                end = probe
+            elif not line.strip() or line.startswith("#"):
+                probe += 1
+            else:
+                break
+        index = end
+    if len(kept) == close:
+        return data
+    return b"\n".join(kept + lines[close:])
+
+
 def write_agent_plugin_dir(path: str, agent_name: str, agent_file: str) -> str:
-    """A one-agent Claude plugin at `path` (0700) with a COPY of the agent
-    file. Measured from /private/tmp with
-    `--setting-sources project,local`: a real file in agents/ resolves; the
-    same file as a SYMLINK does not; no plugin dir does not."""
+    """A one-agent Claude carrier at `path` (0700), holding two real COPIES
+    of the agent file, one per half (see `agent_plugin_argv`):
+
+        agents/NAME.md          the plugin half: always resolves, scoped
+                                `session-agent-NAME:NAME`
+        .claude/agents/NAME.md  the add-dir half: resolves PLAIN while the
+                                vendor's `project` setting source is on
+
+    Both are copies, never symlinks: measured from a neutral cwd with
+    `--setting-sources project,local`, a real file in the plugin's agents/
+    resolves and the same file as a SYMLINK does not (the add-dir half
+    would follow one, the plugin half would not).
+
+    The plugin copy is byte-for-byte. The add-dir copy leaves out the
+    front-matter keys in `ADD_DIR_DROPPED_KEYS` (see
+    `drop_front_matter_keys`): an add-dir agent honours them, a plugin agent
+    never did, and the plugin route is how every seat ran before the add-dir
+    half existed. Dropping them keeps the seat's hooks, MCP servers and
+    permission mode exactly as they were; only the name changes."""
     os.mkdir(path, 0o700)
     try:
         os.chmod(path, 0o700)
         os.makedirs(os.path.join(path, ".claude-plugin"))
         os.makedirs(os.path.join(path, "agents"))
+        os.makedirs(os.path.join(path, ".claude", "agents"))
         with open(os.path.join(path, ".claude-plugin", "plugin.json"), "w",
                   encoding="utf-8") as handle:
             json.dump({"name": f"session-agent-{agent_name}",
@@ -467,6 +714,11 @@ def write_agent_plugin_dir(path: str, agent_name: str, agent_file: str) -> str:
                       handle)
             handle.write("\n")
         shutil.copyfile(agent_file, os.path.join(path, "agents", f"{agent_name}.md"))
+        with open(agent_file, "rb") as handle:
+            carried = drop_front_matter_keys(handle.read(), ADD_DIR_DROPPED_KEYS)
+        with open(os.path.join(path, ".claude", "agents", f"{agent_name}.md"),
+                  "wb") as handle:
+            handle.write(carried)
     except BaseException:
         shutil.rmtree(path, ignore_errors=True)
         raise

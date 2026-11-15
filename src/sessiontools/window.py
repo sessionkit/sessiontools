@@ -14,15 +14,28 @@ unchanged; the long reasoning behind each rule lives in that repo's history
     f = window.of(session_id, cwd)   # a Fullness: used, peak, window, pct, model
     window.cell(f)                   # '37%', '?' or '-'
 
+THE CACHE CLOCK. `last_request_at` is the `timestamp` of the LAST counted
+usage row that carries a REAL model id: when the seat last spoke to the
+API. A `<synthetic>` row (or one with no model) still sets `used` but is
+not an API request, so it never moves the clock: letting it would
+understate the cache's age (ST-326's ruling, Sun 2026-11-15). `cache_age_s` is now minus that, in whole seconds, floored at 0. It is
+the idle clock the prompt cache keeps; the sidecar's `updatedAt` is not
+(SM-1047). The timestamp is the response's END, while the cache TTL runs
+from the REQUEST, so the cache is older than `cache_age_s` says: a caller
+keeps a margin. The prompt cache measured on ms2 is 1 h. NOTHING ACTS ON
+THIS CLOCK: it is a reading only (ST-326), and reap does not read it.
+
 THE NUMBER. Tokens in the window now = the LAST usage row's input_tokens +
 cache_creation_input_tokens + cache_read_input_tokens - the sum the
 statusline shows. `peak` is the largest such sum this session.
 
 NONE IS "NOT KNOWN", NEVER ZERO. No transcript, an unreadable one, or one
-with zero usage rows gives five Nones. A window is never guessed: an
+with zero usage rows gives every field None. A window is never guessed: an
 unmapped model, an unusable `$CONTEXT_MAX`, or `used` above the window gives
-`window` and `pct` None, rendered `?`. A wrong percentage is worse than a
-question mark.
+`window` and `pct` None. The CELL then shows an unmapped model against
+ASSUMED_WINDOW, marked `NN%?`, so a new model still shows usage; anything
+else renders `?`. A wrong percentage is worse than a question mark, so a
+guess always carries one.
 
 The transcript is Claude Code's: `<projects>/<encoded cwd>/<session>.jsonl`,
 `$CLAUDE_PROJECTS_DIR` overriding `~/.claude/projects`.
@@ -34,8 +47,10 @@ import json
 import math
 import os
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 #: Claude Code's `message.model` for messages it made itself. Not a model:
@@ -55,8 +70,10 @@ SYNTHETIC_MODEL = "<synthetic>"
 WINDOWS: dict[str, int] = {
     "claude-fable-5": 1_000_000,
     "claude-fable-5-1": 1_000_000,
+    "claude-fable-5-2": 1_000_000,  # catalog, cached 2026-11-03 (claude-api skill)
     "claude-mythos-5": 1_000_000,
     "claude-mythos-5-1": 1_000_000,
+    "claude-mythos-5-2": 1_000_000,  # catalog, cached 2026-11-03 (claude-api skill)
     "claude-opus-5": 1_000_000,
     "claude-opus-5-5": 1_000_000,
     "claude-opus-4-8": 1_000_000,
@@ -69,7 +86,25 @@ WINDOWS: dict[str, int] = {
     "claude-haiku-4-5": 200_000,    # the one 200K model in the catalog
 }
 
+#: The window a CELL assumes for a model the map does not know yet, so a new
+#: model (the next Fable) still shows its usage on day one. Display only:
+#: the cell marks it `NN%?`, and `Fullness.window`/`pct` (the JSON) stay None.
+#: Every current model but claude-haiku-4-5 is 1M (the maintainer's ruling:
+#: "if it gets a model it doesn't know, it should still show the context ...
+#: maybe it assumes one million and puts a question mark").
+ASSUMED_WINDOW = 1_000_000
+
 _DATE_SUFFIX = re.compile(r"-20\d{6}$")   # claude-haiku-4-5-20251001
+
+#: The cache clock's caveat, word for word in `session list --help` and
+#: `session get --help` (and docs/session.md).
+CACHE_CLOCK_HELP = (
+    "last_request_at is the last real-model usage row's timestamp (ISO-8601 UTC, ending Z) "
+    "and cache_age_s the whole seconds since it (never negative); neither is known "
+    "without a usage row carrying a timestamp. That timestamp is the response's "
+    "END, but the prompt cache's TTL "
+    "(1 h, measured on ms2) runs from the REQUEST, so the cache is older than "
+    "cache_age_s says: keep a margin. A reading only: nothing acts on it.")
 
 PROJECTS_DIR_ENV = "CLAUDE_PROJECTS_DIR"
 CONTEXT_MAX_ENV = "CONTEXT_MAX"
@@ -89,25 +124,72 @@ class Usage:
     peak: int = 0
     model: str | None = None       # the last REAL model id, never <synthetic>
     usage_rows: int = 0
+    #: The `timestamp` of the LAST counted usage row with a REAL model id
+    #: (never `<synthetic>`), as `iso_utc` writes it; None when there is no
+    #: such row, or that row's timestamp is missing or unparseable (never an
+    #: earlier row's: that would be a guess).
+    last_request_at: str | None = None
 
 
 @dataclass(frozen=True)
 class Fullness:
-    """The five fields `session list --json` carries. None = not known."""
+    """What `session list --json` carries from the transcript. None = not
+    known.
+
+    `cache_age_s` is not stored: it is computed against NOW each time it is
+    read, so a Fullness served from the list snapshot never carries a stale
+    age."""
 
     used: int | None = None
     peak: int | None = None
     window: int | None = None
     pct: int | None = None
     model: str | None = None
+    last_request_at: str | None = None   # ISO-8601 UTC, ending `Z`
 
-    def fields(self) -> dict[str, int | str | None]:
+    def cache_age_s(self, now: float | None = None) -> int | None:
+        """Whole seconds from `last_request_at` to NOW (epoch seconds; None:
+        the clock now), floored at 0; None when `last_request_at` is."""
+        return cache_age_s(self.last_request_at, now)
+
+    def fields(self, now: float | None = None) -> dict[str, int | str | None]:
+        """The `session list --json` keys. NOW (epoch seconds; None: the
+        clock now) is what `cache_age_s` is measured against."""
         return {"context_used": self.used, "context_peak": self.peak,
                 "context_window": self.window, "context_pct": self.pct,
-                "context_model": self.model}
+                "context_model": self.model,
+                "last_request_at": self.last_request_at,
+                "cache_age_s": self.cache_age_s(now)}
 
 
 UNKNOWN = Fullness()
+
+
+def iso_utc(raw: object) -> str | None:
+    """A transcript `timestamp` as ISO-8601 UTC with a `Z`, milliseconds
+    kept (`2030-06-09T02:45:11.553Z`); None for anything that is not a
+    string carrying a date, a time AND an offset. A naive time is None, not
+    a guess at its zone."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        at = datetime.fromisoformat(raw.strip())
+        if at.tzinfo is None or at.utcoffset() is None:
+            return None
+        return at.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    except (ValueError, OverflowError):      # year 1 at +01:00 has no UTC
+        return None
+
+
+def cache_age_s(last_request_at: str | None, now: float | None = None) -> int | None:
+    """Whole seconds from LAST_REQUEST_AT (as `iso_utc` writes it) to NOW
+    (epoch seconds; None: the clock now), floored at 0: a timestamp ahead of
+    the clock is age 0, never negative. None when it is None or unreadable."""
+    at = iso_utc(last_request_at)
+    if at is None:
+        return None
+    now = time.time() if now is None else now
+    return max(0, math.floor(now - datetime.fromisoformat(at).timestamp()))
 
 
 def projects_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -245,7 +327,9 @@ def _usage_sum(u: dict) -> object:
 
 def scan(path: Path) -> Usage:
     """Fold a transcript: the last usage row's sum is `used`, the largest is
-    `peak`, the last real model id is `model`.
+    `peak`, the last real model id is `model`, and the timestamp of the last
+    usage row with a REAL model id is `last_request_at` (a `<synthetic>`
+    row counts toward used/peak/rows but never moves the clock).
 
     A line the fold cannot read is SKIPPED, whatever the reason: a
     half-written tail, undecodable bytes, JSON that is not an object, a
@@ -253,10 +337,13 @@ def scan(path: Path) -> Usage:
     numbers, a count that is NaN or infinite (json accepts both). One bad
     line never costs a live seat its number. A falsy `usage`
     (`{}`) is skipped WITHOUT counting a row: `usage_rows` is what separates
-    "no data" from "~0 tokens".
+    "no data" from "~0 tokens". A bad `timestamp` never skips its row: the
+    row still sets `used`, and `last_request_at` is None until a later row
+    carries a good one.
     """
     used = peak = rows = 0
     model: str | None = None
+    last: str | None = None
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             if '"usage"' not in line and '"model"' not in line:
@@ -269,7 +356,8 @@ def scan(path: Path) -> Usage:
             if not isinstance(msg, dict):
                 continue
             m = msg.get("model")
-            if isinstance(m, str) and m.strip() and m.strip() != SYNTHETIC_MODEL:
+            real = isinstance(m, str) and bool(m.strip()) and m.strip() != SYNTHETIC_MODEL
+            if real:
                 model = m.strip()
             u = msg.get("usage")
             if not u or not isinstance(u, dict):
@@ -283,7 +371,9 @@ def scan(path: Path) -> Usage:
             used = int(s)
             rows += 1
             peak = max(peak, used)
-    return Usage(used=used, peak=peak, model=model, usage_rows=rows)
+            if real:                # a <synthetic> row is no API request
+                last = iso_utc(obj.get("timestamp"))
+    return Usage(used=used, peak=peak, model=model, usage_rows=rows, last_request_at=last)
 
 
 def normalize_model(model: str) -> str:
@@ -345,7 +435,8 @@ def of(session_id: str, cwd: str | None,
             return UNKNOWN
         window = resolve_window(u.model, u.used, env)
         return Fullness(used=u.used, peak=u.peak, window=window,
-                       pct=(u.used * 100 // window) if window else None, model=u.model)
+                       pct=(u.used * 100 // window) if window else None, model=u.model,
+                       last_request_at=u.last_request_at)
     # Broad on purpose: the failures a transcript produces are not one family
     # (OSError, a directory where a file was, ...), and the listing is what
     # people run when things are already wrong.
@@ -354,14 +445,28 @@ def of(session_id: str, cwd: str | None,
 
 
 def cell(f: Fullness) -> str:
-    """The CONTEXT cell: `NN%`, `?` or `-`. PERCENT ONLY - a raw count reads
-    small until you know the window. `-` is nothing measurable; `?` is a
-    reading whose fullness cannot be honestly claimed: no window, or the
-    `<synthetic>` zero tail (used 0 on a seat that reached peak)."""
+    """The CONTEXT cell: `NN%`, `NN%?`, `?` or `-`. PERCENT ONLY - a raw
+    count reads small until you know the window. `-` is nothing measurable;
+    `NN%?` is a model the map does not know, against ASSUMED_WINDOW; `?` is
+    a reading whose fullness cannot be honestly claimed: the `<synthetic>`
+    zero tail (used 0 on a seat that reached peak), a known model over its
+    mapped window, or an unknown one over the assumed window."""
     if f.used is None:
         return "-"
     if f.used == 0 and f.peak:
         return "?"
     if f.pct is None:
-        return "?"
+        assumed = assumed_pct(f)
+        return "?" if assumed is None else f"{assumed}%?"
     return f"{f.pct}%"
+
+
+def assumed_pct(f: Fullness) -> int | None:
+    """The percent against ASSUMED_WINDOW, for a model the map does not
+    know; None for a mapped model (its None has a real reason) or a
+    reading over the assumed window."""
+    if f.used is None or not f.model or normalize_model(f.model) in WINDOWS:
+        return None
+    if f.used > ASSUMED_WINDOW:
+        return None
+    return f.used * 100 // ASSUMED_WINDOW

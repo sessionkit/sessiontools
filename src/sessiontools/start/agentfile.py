@@ -22,13 +22,16 @@ silently-ignored key is a session that looks fine and is configured wrong.
 from __future__ import annotations
 
 import os
-import re
 from typing import NamedTuple
 
 import yaml
 
 from sessiontools.start.agents import Agent, agent_subject
-from sessiontools.start.context import DEFAULT_FIRST_MESSAGE_FILE_OVER, ContextEntry
+from sessiontools.start.context import (
+    DEFAULT_FIRST_MESSAGE_FILE_OVER,
+    FRONT_MATTER_DELIM,
+    ContextEntry,
+)
 from sessiontools.start.environment import (
     EMPTY_ENVIRONMENT,
     Environment,
@@ -45,9 +48,6 @@ from sessiontools.start.vendor import VENDORS, render_vendor_args
 START_SECTION = "start"
 ENVIRONMENT_SECTION = "environment"
 LAUNCHER_SECTIONS = (START_SECTION, ENVIRONMENT_SECTION)
-
-FRONT_MATTER_DELIM = re.compile(r"^---[ \t]*$")
-
 
 class FrontMatter(NamedTuple):
     native: dict
@@ -105,7 +105,7 @@ def partition_front_matter(front_matter: dict) -> FrontMatter:
 CONTEXT_SECTION = "context"
 CONTEXT_KEYS = ("system-prompt", "initial")
 # An entry written as a mapping instead of a command string.
-CONTEXT_ENTRY_KEYS = ("run", "informational-exit")
+CONTEXT_ENTRY_KEYS = ("run", "informational-exit", "required")
 START_KEYS = ("idle", "converse", "keyed", "vendor", CONTEXT_SECTION,
               "first-message-file-over", "directory")
 
@@ -119,7 +119,8 @@ class Context(NamedTuple):
     initial       -- stdout leads the session's first user message
 
     An entry is a command string, or a `ContextEntry` when the agent file
-    wrote `{run: CMD, informational-exit: [N, ...]}` with at least one code.
+    wrote `{run: CMD, informational-exit: [N, ...], required: true}` with at
+    least one code or `required: true`.
     """
 
     system_prompt: list
@@ -240,16 +241,18 @@ def _parse_context_list(raw: object, where: str) -> list:
 
 
 def _parse_context_entry(entry: object, where: str) -> str | ContextEntry:
-    """A command string, or `{run: CMD, informational-exit: [N, ...]}`. A
-    mapping that declares no code is its `run` string, exactly. Every
-    misspelling is refused: a declaration that silently fell back to FAILED
-    would be the quiet misconfiguration this schema exists to end."""
+    """A command string, or `{run: CMD, informational-exit: [N, ...],
+    required: BOOL}`. A mapping that declares no code and is not required is
+    its `run` string, exactly, so a file with no marking parses as it always
+    did. Every misspelling is refused: a declaration that silently fell back
+    to FAILED, or to "not required", would be the quiet misconfiguration
+    this schema exists to end."""
     if isinstance(entry, str) and entry.strip():
         return entry
     if not isinstance(entry, dict):
         raise AuthoringError(f"`{where}` entries must be non-empty command "
                              f"strings or {{run: ..., informational-exit: "
-                             f"[...]}} mappings, got {entry!r}")
+                             f"[...], required: ...}} mappings, got {entry!r}")
     unknown = [key for key in entry if key not in CONTEXT_ENTRY_KEYS]
     if unknown:
         raise unknown_keys(where, unknown, CONTEXT_ENTRY_KEYS)
@@ -267,9 +270,18 @@ def _parse_context_entry(entry: object, where: str) -> str | ContextEntry:
         if type(code) is not int or not 1 <= code <= 255:
             raise AuthoringError(f"`{where}` entry `informational-exit:` codes "
                                  f"must be integers from 1 to 255, got {code!r}")
-    if not codes:
+    required = False
+    if "required" in entry:
+        # Not `_parse_bool`: it reads None as "absent", and an entry's
+        # `required:` with no value is a half-written marking - refused, never
+        # quietly "not required". YAML has already read yes/on as True.
+        required = entry["required"]
+        if type(required) is not bool:
+            raise AuthoringError(f"`{where}` entry `required:` for `{command}` "
+                                 f"must be true or false, got {required!r}")
+    if not codes and not required:
         return command
-    return ContextEntry(command, frozenset(codes))
+    return ContextEntry(command, frozenset(codes), required)
 
 
 def switch_enabled(cli_flag: bool, front_matter_value: bool) -> bool:

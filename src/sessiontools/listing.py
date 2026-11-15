@@ -13,6 +13,12 @@ sidebar reads. It costs a transcript read per seat, so it is filled only by
 `with_context()`, which `session list` calls unless `--no-context`; `get`,
 `send` and `--pane` never pay for it.
 
+The same read gives two more JSON keys, `last_request_at` and `cache_age_s`
+(`sessiontools.window`'s cache clock), null when not known. No table
+column: JSON only. `cache_age_s` is measured against the render's NOW, so a
+row served from the snapshot never carries a stale age. Nothing here acts
+on either key.
+
 SEAT is the seat a session holds, or `-`: the column after NAME and a `seat`
 JSON key (a word, else null) on every row. Every live claim under
 `holders/` names one: the default seat's (`claude`), and a named agent's
@@ -173,7 +179,7 @@ class Row:
             "idle_s": self.idle_s(now),
         }
         row.update(dict.fromkeys(NOT_PORTED_KEYS))
-        row.update((self.fullness or _window.UNKNOWN).fields())
+        row.update((self.fullness or _window.UNKNOWN).fields(now))
         return row
 
 

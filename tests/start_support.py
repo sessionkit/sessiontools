@@ -196,10 +196,12 @@ def without_known_paths(text: str, tmp_path: Path) -> str:
 def launch_e2e(tmp_path: Path, *verb_args: str,
                front_matter: str = "claude:\n  effort: high\n",
                extra_env: dict | None = None, stub_body: str = VENDOR_STUB,
-               terminal: bool = True):
+               terminal: bool = True, drop_env: tuple[str, ...] = ()):
     """Run the verb as a real subprocess against a stub `claude` on PATH, at
     a pseudo-terminal unless `terminal` is False (stdin and stdout then the
-    pipes). Returns (result, record_dir, work_dir)."""
+    pipes). `drop_env` names variables taken out of the child's environment
+    after the rest is set (SESSIONS_DIR, to let the leaf rule pick the
+    sessions root). Returns (result, record_dir, work_dir)."""
     record = tmp_path / "record"
     record.mkdir()
     bin_dir = tmp_path / "bin"
@@ -214,6 +216,8 @@ def launch_e2e(tmp_path: Path, *verb_args: str,
                     PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     if extra_env:
         env.update(extra_env)
+    for name in drop_env:
+        env.pop(name, None)
     command = at_a_terminal(*verb_args) if terminal else session_cmd(*verb_args)
     result = subprocess.run(command, capture_output=True, text=True,
                             timeout=TIMEOUT_S, cwd=str(work), env=env, check=False)

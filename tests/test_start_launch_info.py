@@ -6,13 +6,10 @@ unsets an inherited marker, on the script's first line, beside the identity.
 
 from __future__ import annotations
 
-import os
-
-from start_support import VENDOR_STUB, launch_e2e, make_agents_root, plan_for
+from start_support import VENDOR_STUB, launch_e2e, plan_for
 
 from sessiontools import session_info
 from sessiontools.start import plan as pl
-from sessiontools.start.args import parse_args
 from sessiontools.start.context import (
     BUILTIN_LAUNCH_INFO,
     ContextResult,
@@ -24,7 +21,7 @@ from sessiontools.start.environment import (
     render_identity_unset,
     without_session_identity,
 )
-from sessiontools.start.identity import PaneMint, SessionIdentity
+from sessiontools.start.identity import SessionIdentity
 from sessiontools.start.run import render_dry_run_report
 
 LAUNCH_INFO = "start:\n  context:\n    system-prompt:\n      - launch-info\n"
@@ -119,21 +116,6 @@ def test_a_failing_launch_info_built_in_gives_no_export(tmp_path, monkeypatch):
     plan = plan_for(tmp_path, LAUNCH_INFO, flags=["--dry-run"])
     assert "CONTEXT GENERATOR FAILED: `launch-info`" in plan.injected.system_prompt
     assert exported(plan.script) == []
-
-
-def test_a_pane_minted_launch_gives_no_export(tmp_path):
-    """The id is minted in the pane, after launch-info rendered without it."""
-    root = make_agents_root(tmp_path, front_matter=LAUNCH_INFO)
-    (tmp_path / "work").mkdir()
-    launch = pl.resolve(parse_args(["--dry-run", "scout"]),
-                        environ={"AGENTS_DIR": root, "PATH": os.environ.get("PATH", ""),
-                                 "SESSIONS_DIR": str(tmp_path / "sessions")},
-                        work_dir=str(tmp_path / "work"))
-    plan = pl.assemble(launch, PaneMint("/k/session-key-init", "scout", "/r"))
-    assert [result.ok for result in plan.injected.results] == [True]
-    assert "**Session ID**" not in plan.injected.system_prompt
-    assert exported(plan.script) == []
-    assert render_identity_unset() in plan.script.splitlines()
 
 
 def test_the_resume_plan_gives_no_export(tmp_path):

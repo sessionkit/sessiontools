@@ -585,6 +585,11 @@ A display reads the signal from tmux's own memory, with no spawn:
                           status format unescaped
 A display shows FREE only on the exact word FREE: unset is UNKNOWN.
 
+BUSY is not cache-warm. A seat in a backgrounded wait (a `tm task wait`, a
+long test) reads BUSY, yet it sends no API request, so for the prompt cache
+it is idle and goes cold after the TTL. No gate should key on pane-state for
+cache warmth: read `session list --json`'s cache_age_s instead.
+
 On a real host a per-user launchd agent runs the publisher, one per host:
 `session pane-state agent on|off|status` (`agent --help` says more). See
 docs/pane-state-signal.md."""
@@ -613,7 +618,10 @@ def build_parser():
     sub = p.add_subparsers(dest="verb", metavar="show|watch|agent")
     sp = sub.add_parser("show", help="read every seat once; writes nothing",
                         description="Every seat with a sidecar: its pane, the reading, the "
-                                    "reason, and what the pane holds now. Writes nothing.")
+                                    "reason, and what the pane holds now. Writes nothing. "
+                                    "A seat in a backgrounded wait reads BUSY yet is "
+                                    "cache-idle: no gate should key on pane-state for cache "
+                                    "warmth (see cache_age_s in `session list --help`).")
     sp.add_argument("--json", action="store_true", help="machine-readable: one JSON array")
     wp = sub.add_parser("watch", help="the publisher: one per host, until SIGTERM",
                         description="Publish every seat's reading on its pane, on change only. "

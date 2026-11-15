@@ -182,9 +182,11 @@ def passage_backend(ref: str) -> str:
 
 Backend = Callable[[str], str]
 
-#: What `session start` resolves through. `passage` is NOT here: it is the
-#: account registry's only.
-BACKENDS: dict[str, Backend] = {"pass": pass_backend}
+#: What `session start` resolves through: `pass:` (gpg) and `passage:` (age).
+#: `passage` began as the account registry's only backend; a launch reads it
+#: too, so a secret moved to passage does not stop the seat that declares it.
+#: `environment.SECRET_BACKENDS` names the same set for the authoring error.
+BACKENDS: dict[str, Backend] = {"pass": pass_backend, "passage": passage_backend}
 
 
 def resolve_secrets(declared: list[DeclaredSecret],

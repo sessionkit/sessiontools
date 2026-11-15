@@ -14,6 +14,10 @@ door:
     agent_plugin_dir_arg    carries the agent's definition (NOT a door:
                             --plugin-dir is repeatable, and both live agents
                             declare their own)
+    agent_add_dir_arg       hands the same carrier dir over a second time, as
+                            a project-style directory, so the agent resolves
+                            by its PLAIN name (NOT a door: --add-dir is
+                            repeatable too); None = the plugin half only
     agents_door             defines agents INLINE (claude: --agents '<json>');
                             used only for the default seat, whose word the
                             vendor reserves for its own built-in agent, so
@@ -31,6 +35,12 @@ door:
                             one slot); the launcher computes it
                             from the `claude-code` settings tool
     env                     launcher-owned environment defaults; NOT a door
+    user_memory             where the vendor keeps the USER's own memory file
+                            and which of its flags load it (NOT a door: it
+                            opens none of its own; its block rides the
+                            system-prompt file door). Optional: a row
+                            without it carries no user memory
+                            (`start.user_memory`, ST-302)
 
 NAMING IS LOAD-BEARING: a field ending in `_door` or `_flag` IS a door, and
 the duplicate-door guard finds it by that suffix alone - a new door is
@@ -45,7 +55,6 @@ launcher never guesses a flag's arity, so it never drops or reorders.
 from __future__ import annotations
 
 import shlex
-from typing import NamedTuple
 
 from sessiontools.start.errors import AuthoringError
 
@@ -54,6 +63,7 @@ VENDORS: dict[str, dict] = {
         "cmd": "claude",
         "identity_door": "--agent",
         "agent_plugin_dir_arg": "--plugin-dir",
+        "agent_add_dir_arg": "--add-dir",
         "agents_door": "--agents",
         "system_prompt_door": "--append-system-prompt",
         "system_prompt_file_door": "--append-system-prompt-file",
@@ -64,6 +74,19 @@ VENDORS: dict[str, dict] = {
         # No prompt suggestions in any claude session this
         # launcher starts.
         "env": {"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "false"},
+        # The user's CLAUDE.md, carried when the launch's own setting
+        # sources leave `user` out (ST-302). Named with neither `_door`
+        # nor `_flag`: the duplicate-door guard must not take it for one.
+        "user_memory": {
+            "file": "CLAUDE.md",
+            # Set: $CLAUDE_CONFIG_DIR/CLAUDE.md; else $HOME/.claude/CLAUDE.md.
+            "config_dir_env": "CLAUDE_CONFIG_DIR",
+            "config_dir_default": ".claude",
+            "sources_flag": "--setting-sources",
+            "user_source": "user",
+            # Modes that switch every customisation off: honour them.
+            "off_flags": ("--bare", "--safe-mode", "--restricted"),
+        },
     },
 }
 
@@ -150,34 +173,8 @@ def split_rest(rest: list[str]) -> tuple[list[str], list[str]]:
     return list(rest), []
 
 
-class ShellVar(NamedTuple):
-    """An argv slot whose VALUE only the launch script's own shell knows:
-    rendered `"$NAME"`, never a quoted literal. One case today - a keyed
-    launch placed in tmux, whose session id is minted INSIDE the pane
-    (`identity.PaneMint`), so the launcher cannot spell it and the
-    trampoline expands it at boot. Reach for this only when the value does
-    not exist until the script runs."""
-
-    name: str
-
-
-class ShellExpr(NamedTuple):
-    """An argv slot MIXING literal text and a shell expansion, rendered
-    inside double quotes: `"seat+${CLAUDE_SESSION_ID:0:8}"` - a `{shortsid}`
-    filled in the pane. ShellVar is the whole-value case; this is the mixed
-    one. The literal parts arrive already escaped for a double-quoted bash
-    string (`identity.expand_shortsid`)."""
-
-    text: str
-
-
-def render_argv_token(token: str | ShellVar | ShellExpr) -> str:
-    """One argv slot as a shell would need it typed: shlex-quoted, except a
-    ShellVar or ShellExpr, which expand in the pane that runs the script."""
-    if isinstance(token, ShellVar):
-        return f'"${token.name}"'
-    if isinstance(token, ShellExpr):
-        return f'"{token.text}"'
+def render_argv_token(token: str) -> str:
+    """One argv slot as a shell would need it typed: shlex-quoted."""
     return shlex.quote(token)
 
 
@@ -188,12 +185,14 @@ def render_argv_token(token: str | ShellVar | ShellExpr) -> str:
 DOOR_ESCAPES = {
     "system_prompt_door":
         "to own the system prompt outright, set `start: idle: true` (or pass "
-        "--idle): the launcher then injects nothing and the door is yours",
+        "--idle): the launcher then runs no context generators and the door "
+        "is yours",
     "system_prompt_file_door":
         "to own the system prompt outright, set `start: idle: true` (or pass "
-        "--idle): the launcher then injects nothing and the door is yours -- "
-        "except for the default seat's own file, whose body rides this door "
-        "even then: put the text in that file's body instead",
+        "--idle): the launcher then runs no context generators, the user's "
+        "CLAUDE.md yields to your file, and the door is yours -- except for "
+        "the default seat's own file, whose body rides this door even then: "
+        "put the text in that file's body instead",
     "session_id_flag":
         "the launcher owns the session id -- it IS the session's identity, "
         "minted and persisted before launch -- so remove the declaration",

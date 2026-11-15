@@ -38,8 +38,14 @@ PROOF OF ON. After the bootstrap, `on` waits up to PROOF_WAIT for the lock
 line to name the job's pid. It never probes while it waits: a probe could
 take the lock in the instant the starting job reaches for it.
 
+THE SERVICE FILE. `on` writes ~/.sessionkit/tools/services/pane-state.json
+(enabled true) right after the plist, and `off` rewrites it (enabled
+false) after the bootout; the file is kept. `service_file` is the writer.
+A failed write does not stop the launchd act: the verb finishes it, prints
+`service could not write ...`, and exits 1. A refusal writes no file.
+
 Exit codes, as the sound engine's: 0 done; 1 tried and failed (bootstrap
-refused, the job never took the lock); 2 refused before anything changed
+refused, the job never took the lock, the service file not written); 2 refused before anything changed
 (not macOS, no `session`, no tmux, the lock held by another process) or a
 usage error.
 
@@ -73,7 +79,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from sessiontools import pane_state, settings
+from sessiontools import pane_state, service_file, settings
 
 #: The launchd label: the one constant. The plist's name, the launchctl
 #: target, the plist's Label and the help text all derive from it, so a
@@ -102,6 +108,12 @@ SYSTEM_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 #: (settings.sessions_root, through turn.mark_path).
 PASS_THROUGH = ("TMUX_TMPDIR", "SESSION_STATE_DIR", "SESSION_SIDECAR_DIR", "SESSIONS_DIR")
 PROG = "session pane-state agent"
+#: The plist's LimitLoadToSessionType: the job loads only in a logged-in GUI
+#: session. The service file's `note` is written from it, so the two agree.
+SESSION_TYPE = "Aqua"
+#: The service file's name (the label's tail) and its one-line description.
+SERVICE = service_file.name_of(LABEL)
+DESCRIPTION = "each seat's BUSY / FREE / UNKNOWN, on its tmux pane"
 
 
 class Refused(Exception):
@@ -175,10 +187,19 @@ def plist(program: Path, tmux: Path, env: Mapping[str, str] | None = None) -> di
         "RunAtLoad": True,
         "KeepAlive": True,
         "ThrottleInterval": THROTTLE,
-        "LimitLoadToSessionType": "Aqua",
+        "LimitLoadToSessionType": SESSION_TYPE,
         "StandardOutPath": log,
         "StandardErrorPath": log,
     }
+
+
+def service_record(enabled: bool) -> dict:
+    """pane-state.json, as `on` (ENABLED) and `off` write it (the services
+    design 1.2)."""
+    note = ("runs only in a logged-in GUI session (LimitLoadToSessionType Aqua)"
+            if SESSION_TYPE == "Aqua" else None)
+    return service_file.record(label=LABEL, enabled=enabled, install=f"{PROG} on",
+                               uninstall=f"{PROG} off", description=DESCRIPTION, note=note)
 
 
 def _write_plist(path: Path, data: dict) -> None:
@@ -405,6 +426,7 @@ def cmd_on(dry_run: bool) -> int:
              *_retire_lines(old, dry_run=True),
              f"plist  would write {path}:",
              plistlib.dumps(data).decode().rstrip(),
+             *service_file.declare(service_record(True), dry_run=True)[0],
              f"launchd would: bootout {_target()}, then bootstrap {_domain()} {path}",
              "dry run: nothing was written, and no launchctl verb that changes anything ran")
         return 0
@@ -415,6 +437,8 @@ def cmd_on(dry_run: bool) -> int:
     log_path().parent.mkdir(parents=True, exist_ok=True)
     _write_plist(path, data)
     _say(f"plist  {path}")
+    lines, declared = service_file.declare(service_record(True), dry_run=False)
+    _say(*lines)                                 # a failed write: the act goes on, exit 1
     _launchctl("bootout", _target())
     if not _wait_gone():
         _say(f"launchd: {_target()} still loaded {GONE_WAIT:.0f} s after bootout")
@@ -429,7 +453,7 @@ def cmd_on(dry_run: bool) -> int:
              f"{pane_state.lock_path()} within {PROOF_WAIT:.0f} s; see {log_path()}")
         return 1
     _say(f"on     {LABEL}: pid {pid} holds {pane_state.lock_path()}")
-    return 0
+    return 0 if declared else 1
 
 
 def cmd_off(dry_run: bool) -> int:
@@ -439,7 +463,9 @@ def cmd_off(dry_run: bool) -> int:
         _say(f"launchd would: bootout {_target()} ({'loaded' if loaded() else 'not loaded'})",
              f"plist  would remove {path} ({'present' if path.exists() else 'absent'})",
              *_retire_lines(old, dry_run=True),
-             "dry run: nothing was removed, and no launchctl verb that changes anything ran")
+             *service_file.declare(service_record(False), dry_run=True)[0],
+             "dry run: nothing was removed or written, and no launchctl verb that changes "
+             "anything ran")
         return 0
     was = loaded()
     if was:
@@ -449,7 +475,9 @@ def cmd_off(dry_run: bool) -> int:
     _say(f"off    {LABEL} ({'booted out' if was else 'was not loaded'}); plist removed: {path}")
     _say(*_retire_lines(old, dry_run=False))
     retire(old, wait=False)
-    return 0
+    lines, declared = service_file.declare(service_record(False), dry_run=False)
+    _say(*lines)
+    return 0 if declared else 1
 
 
 def status() -> dict:
@@ -491,9 +519,15 @@ into gui/<uid>. The job runs `session pane-state watch`, one per host, and
 (the publisher unsets every option it wrote) and removes the plist.
 Both retire a job left under the old label (status names one that is
 still there). Label {LABEL}.
-Exit 0 done, 1 tried and failed (bootstrap, the job never took the lock),
-2 refused before anything changed (not macOS, no session or tmux, the lock
-held by another publisher) or usage."""
+Both write {service_file.shown(SERVICE)} (enabled true
+on `on`, false on `off`; the file is kept), the file `sessionkit service
+list` reads; --dry-run prints it and writes nothing. If that write fails,
+the job is still loaded (or booted out) as asked, and the verb prints
+  {service_file.COULD_NOT_WRITE.format(path="PATH", reason="REASON")}
+then exits 1: run it again.
+Exit 0 done, 1 tried and failed (bootstrap, the job never took the lock,
+or the service file), 2 refused before anything changed (not macOS, no
+session or tmux, the lock held by another publisher) or usage."""
 
 
 def build_parser() -> argparse.ArgumentParser:

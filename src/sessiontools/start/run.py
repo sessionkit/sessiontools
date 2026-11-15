@@ -15,6 +15,7 @@ own `-n NAME` (tm: `-n <seat>+{shortsid}`); `--window-name` is gone.
 
 from __future__ import annotations
 
+import datetime
 import os
 import shlex
 import shutil
@@ -24,12 +25,21 @@ from typing import NamedTuple
 
 from sessiontools import tmux as _tmux
 from sessiontools.start.agents import Agent
-from sessiontools.start.context import PlannedFile, discard, materialize
+from sessiontools.start.context import ContextResult, PlannedFile, discard, materialize
 from sessiontools.start.environment import host_environ
-from sessiontools.start.errors import EXIT_USAGE, PROG, LaunchError
+from sessiontools.start.errors import EXIT_USAGE, PROG, ContextRefused, LaunchError
 from sessiontools.start.identity import SessionIdentity
-from sessiontools.start.plan import LaunchPlan
-from sessiontools.start.record import RECORD_DIR, ensure_record_dir, record_path
+from sessiontools.start.plan import LaunchPlan, default_window_name
+from sessiontools.start.record import (
+    LAUNCH_ENV_NAMES,
+    RECORD_DIR,
+    REFUSED_FILE,
+    ensure_record_dir,
+    entered_line,
+    launch_environ,
+    record_path,
+    write_refusal,
+)
 from sessiontools.start.secrets import (
     is_private,
     report_inherited,
@@ -39,13 +49,103 @@ from sessiontools.start.secrets import (
 from sessiontools.start.vendor import render_argv_token
 
 
+def generator_failure_line(result: ContextResult) -> str:
+    """The one line a failed, non-required generator gets on stderr."""
+    return f"{PROG}: context generator failed ({result.source}): {result.error}"
+
+
 def report_generator_failures(plan: LaunchPlan) -> None:
     """A failed generator's absence from the injected block must be visible
     before the session starts - on a dry run too."""
     for result in plan.injected.results:
         if not result.ok:
-            print(f"{PROG}: context generator failed ({result.source}): "
-                  f"{result.error}", file=sys.stderr)
+            print(generator_failure_line(result), file=sys.stderr)
+
+
+# ---------- a refused seat (ST-307) ------------------------------------------
+
+def _stream_lines(label: str, text: str, partial: bool = False) -> list[str]:
+    """One stream of a refused generator, IN FULL: a truncated wake is the
+    failure that started ST-307, so nothing is cut. `(none)` when empty."""
+    if not text:
+        return [f"  {label + ':':<8} (none)"]
+    size = len(text.encode("utf-8"))
+    tail = "; partial: timed out" if partial else ""
+    lines = [f"  {label + ':':<8} ({size} bytes{tail})"]
+    lines += ["    " + line for line in text.rstrip("\n").split("\n")]
+    return lines
+
+
+def timed_out(result: ContextResult) -> bool:
+    return (result.error or "").startswith("timed out")
+
+
+def render_refusal(refused: ContextRefused, record: str | None = None) -> str:
+    """The refusal, said on stderr: every earlier non-required failure in
+    today's line, then the REFUSED line, the list and place of the entry,
+    its stdout (partial on a timeout) and its stderr in full, the record
+    line, and that no vendor started. ONE renderer for a live launch and a
+    dry run alike - only RECORD differs (`record_refusal` says what it is);
+    without one, the line is left out, which is the text the record file
+    itself holds."""
+    result = refused.result
+    index, count = refused.position
+    lines = [generator_failure_line(earlier) for earlier in refused.earlier]
+    lines.append(f"{PROG}: REFUSED: required context generator `{result.source}` "
+                 f"{result.error}")
+    lines.append(f"  {'list:':<8} {refused.door}, entry {index} of {count} "
+                 "(nothing after it ran)")
+    lines += _stream_lines("output", result.output, partial=timed_out(result))
+    lines += _stream_lines("stderr", result.stderr)
+    if record is not None:
+        lines.append(f"  {'record:':<8} {record}")
+    lines.append("  the vendor was not started.")
+    return "\n".join(lines) + "\n"
+
+
+def render_refusal_record(refused: ContextRefused, launch: object,
+                          now: datetime.datetime | None = None) -> str:
+    """The `launch/refused` file: `key: value` lines in the `command` file's
+    style (values shell-quoted where they are shell text), a blank line, then
+    the same block `render_refusal` prints, without its record line."""
+    stamp = (now or datetime.datetime.now().astimezone()).isoformat(timespec="seconds")
+    index, count = refused.position
+    lines = ["refused: required context generator failed",
+             f"at: {stamp}",
+             f"door: {refused.door}",
+             f"entry: {index} of {count}",
+             f"run: {shlex.quote(refused.result.source)}",
+             f"reason: {shlex.quote(refused.result.error or '')}",
+             f"start: {shlex.join([sys.executable, *sys.orig_argv[1:]])}"]
+    args = getattr(launch, "args", None)
+    entered = getattr(args, "entered_argv", None)
+    if entered is not None:
+        lines.append(f"launch_command: {entered_line(entered)}")
+    work_dir = getattr(launch, "work_dir", None)
+    if work_dir:
+        lines.append(f"cwd: {shlex.quote(work_dir)}")
+    return "\n".join(lines) + "\n\n" + render_refusal(refused)
+
+
+def record_refusal(refused: ContextRefused, identity: SessionIdentity | None,
+                   launch: object) -> str:
+    """Write the refusal's record on a LIVE launch whose session dir was
+    minted, keyed or not, and return the line that says where it went. A
+    dry run (nothing minted) writes nothing and says so; no session dir
+    says that. A record must never cost the verdict: a failed write is
+    said in the line, and the refusal stands."""
+    if identity is None:
+        return "(none: this launch has no session directory)"
+    path = os.path.join(record_path(identity.session_dir), REFUSED_FILE)
+    if not identity.minted:
+        return f"{path} (dry run: not written)"
+    try:
+        written = write_refusal(identity.session_dir,
+                                render_refusal_record(refused, launch),
+                                getattr(launch, "environ", None))
+    except Exception as error:  # noqa: BLE001 - a record never costs the verdict
+        return f"{path} (NOT WRITTEN: {type(error).__name__}: {error})"
+    return written if written is not None else f"{path} (not written: see above)"
 
 
 def write_files(plan: LaunchPlan) -> list:
@@ -173,7 +273,7 @@ def execute(plan: LaunchPlan) -> None:
         sys.stdout.flush()
         sys.stderr.flush()
         try:
-            os.execvpe("bash", ["bash", "-c", plan.script], host_environ())
+            os.execvpe("bash", ["bash", "-c", plan.script], script_environ(plan))
         except OSError as error:
             raise LaunchError(f"exec failed: {error}") from error
         # A real exec never gets here. A stand-in that returns is a launch
@@ -184,13 +284,22 @@ def execute(plan: LaunchPlan) -> None:
         raise
 
 
+def script_environ(plan: LaunchPlan, environ: Mapping[str, str] | None = None
+                   ) -> dict[str, str]:
+    """The environment the `bash -c` script starts with: `host_environ`,
+    plus the entered line and its directory for the record call
+    (`record.launch_environ`; ruling 7, F2: never in the script's argv).
+    An inherited value of either name is dropped first, so only this
+    launch's own line can be recorded; the script unsets both after the
+    record call."""
+    env = host_environ(environ)
+    for name in LAUNCH_ENV_NAMES:
+        env.pop(name, None)
+    env.update(launch_environ(plan.record))
+    return env
+
+
 # ---------- own-window naming ------------------------------------------------
-
-def default_window_name(agent: Agent, vendor: str) -> str:
-    """The agent's name alone (by design: no prefix or suffix), or the
-    vendor's for a plain session."""
-    return agent.name or vendor
-
 
 def run_tmux(arguments: list[str], environ: Mapping[str, str] | None = None) -> str:
     """One tmux invocation on the ambient server (`sessiontools.tmux.run`),
@@ -239,17 +348,18 @@ def name_own_window(agent: Agent, vendor: str,
 # ---------- the dry-run report -----------------------------------------------
 
 def render_dry_run_report(plan: LaunchPlan, tmux: tuple[str, str] | None = None,
-                          switch: bool = False, holder: str | None = None) -> str:
+                          switch: bool = False, holder: str | None = None,
+                          pane: str | None = None) -> str:
     """The --dry-run output: who, where, the identity it WOULD mint, every
     token of the command with the source that put it there (straight off
     plan.provenance, which IS the argv), the secrets by name, and the launch
-    script in full - for a tmux launch that script IS the trampoline a pane
-    would run. `tmux` is (session, window) for a placement ("" = the
-    caller's current session). `holder` is the front door's line
+    script in full. `tmux` is (session, window) for a placement ("" = the
+    caller's current session), and `pane` the line its window runs: the
+    rest of the report is the in-place plan of that line, which the pane
+    runs as its own launch. `holder` is the front door's line
     (`holders.Door.report_line`), after the mode: a dry run answers what a
     live launch would do about a live holder, and still exits 0. Without
-    one, byte-for-byte the old launcher's report, for both the direct and
-    the tmux path."""
+    one, byte-for-byte the old launcher's report on the direct path."""
     lines = [f"{PROG}: DRY RUN -- nothing is launched, no secret is resolved"]
     if plan.agent.name:
         lines.append(f"agent:    {plan.agent.name}  ({plan.agent.file})")
@@ -267,18 +377,17 @@ def render_dry_run_report(plan: LaunchPlan, tmux: tuple[str, str] | None = None,
         where = f"session {session!r}" if session else "the current session"
         then = ", then switch-client" if switch else ""
         lines.append(f"mode:     tmux window {window!r} in {where}{then}")
+        if pane:
+            lines.append(f"pane:     {pane}")
     else:
         lines.append("mode:     direct (exec in place)")
     if holder:
         lines.append(holder)
-    identity = plan.identity
-    if identity is None:
-        if plan.pane_mint is not None:
-            lines.append("session:  (keyed: minted inside the pane at boot)")
-            lines.append(f"  dir:    {plan.pane_mint.sessions_root}/<id minted in the pane>")
-    else:
-        _identity_lines(lines, identity)
+    if plan.identity is not None:
+        _identity_lines(lines, plan.identity)
     lines.append(f"workdir:  {plan.work_dir}  ({plan.work_dir_source})")
+    for note in plan.notes:
+        lines.append(f"note:     {note}")
     if plan.home is not None:
         place = (f"{plan.home.place}/<id minted in the pane>/home" if plan.home.per_session
                  else plan.home.place)
@@ -288,6 +397,12 @@ def render_dry_run_report(plan: LaunchPlan, tmux: tuple[str, str] | None = None,
         lines.append(f"record:   {record_path(plan.record.shown_dir)}/  (env with secrets "
                      "masked, command, startup-files: written once by the script, "
                      "before the vendor starts)")
+        handed = launch_environ(plan.record)
+        if handed:
+            lines.append("  entered:  (the script's environment, never its argv: "
+                         "the record call reads both, then unsets them)")
+            for name, value in handed.items():
+                lines.append(f"    {name}={shlex.quote(value)}")
     lines.append("command:")
     width = min(max(len(render_argv_token(token)) for token, _ in plan.provenance), 44)
     for token, source in plan.provenance:

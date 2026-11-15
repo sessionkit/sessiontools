@@ -167,7 +167,7 @@ def test_a_resume_says_resumed(fake_pass):
 
 def test_an_unknown_backend_calls_nothing_and_names_the_known_ones(fake_pass):
     [result] = secrets.resolve_secrets([DeclaredSecret("K", "keychain", "x")])
-    assert not result.ok and result.error == "unknown backend 'keychain' (known: pass)"
+    assert not result.ok and result.error == "unknown backend 'keychain' (known: pass, passage)"
     assert fake_pass[1]() == []
 
 

@@ -13,8 +13,9 @@ and where each one lives. One section per part of the `session` command.
 - **Its own folders:** its state, moving from `~/.session/` (sessions,
   seats, agents, the state dir) to `~/.sessionkit/tools/state/`, where a
   fresh host (no `~/.session/`) starts every one of them
-  ([where tools keeps its state][state-folders]), and
-  `~/.sessionkit/tools/accounts/` (`session account`).
+  ([where tools keeps its state][state-folders]),
+  `~/.sessionkit/tools/accounts/` (`session account`), and
+  `~/.sessionkit/tools/services/` ([the service files][service-files]).
 - **Environment variables:** each one belongs to one part, below. None
   is needed: unset, each part uses the default its table names.
 - **The plugin's hooks** are switched by environment variables
@@ -120,27 +121,35 @@ sessionmail's setting, not this tool's.
 
 ## The plugin hooks
 
-The Claude Code plugin's hooks read the session's environment. A
-settings file's `env` block reaches them too ([the plugin][plugin]).
+The Claude Code plugin's switches below are read from the session's
+environment. A settings file's `env` block reaches them too ([the
+plugin][plugin]). The settle alert is not switched here: it reads the
+`session` tool's `settle.*` keys from the settings cascade, live, and is
+off while no layer sets them ([the settle alert][settle]).
 
 | Name | Default | What it does |
 | --- | --- | --- |
-| `SESSION_SETTLE_AT` | unset: silent | The settle alert's threshold in tokens: `250000`, `250k`, `1.5M`. `session context` uses it too. |
-| `SESSION_SETTLE_SAY` | the built-in line | The settle alert's line. `{at}` and `{used}` are filled in. |
-| `SESSIONTOOLS_HOOK_SETTLE` | on | `off` (or `0`, `false`, `no`) switches the settle alert off. |
+| `SESSION_SETTLE_AT` | unset: nothing copied | Not read by the hook. At launch, `session start` copies it once into the session layer, `<session dir>/settings/session.d/50-env.json`, as `settle.soft.at` (tokens: `250000`, `250k`, `1.5M`). So a shell-rc export beats every seat. A session `session start` did not launch gets no copy and no warning. |
+| `SESSION_SETTLE_SAY` | unset: nothing copied | Copied once at launch the same way, as `settle.soft.say`. |
+| `SESSIONTOOLS_HOOK_SETTLE` | retired | Nothing reads it, set or not. `settle: null` in a settings layer turns the settle alert off. |
 | `SESSIONTOOLS_HOOK_BUSY` | on | `off` (or `0`, `false`, `no`) switches the busy sound hook off: the busy sound and the stop sound. |
+| `SESSIONTOOLS_HOOK_SED` | on | `off` (or `0`, `false`, `no`) switches the sed guard off: `sed -i ''` against GNU sed is no longer refused. |
 | `SESSIONTOOLS_HOOK_CLOCK` | off | `on` (or `1`, `true`, `yes`) says the clock line on every tool batch: the time and the context as used/max. |
-| `SESSION_CLOCK_WARN_AT` | unset: no warn line | The clock line's warn mark: tokens (`250k`) or a percent of the window (`80%`). |
+| `SESSION_CLOCK_WARN_AT` | retired | Nothing reads it, set or not. The clock line has no warn line: a session hears one warning, the settle alert's. |
+| `SESSIONTOOLS_HOOK_MD_LINT` | on | `off` (or `0`, `false`, `no`) switches the Markdown lint off: the PostToolUse hook that names wide table lines and `shape` after a `.md` write. On, it speaks only in a session `session start` launched. |
+| `SESSIONTOOLS_HOOK_HIDDEN_FAILURE` | on, for an agent seat | `off` (or `0`, `false`, `no`) switches the hidden-failure note off. It is only ever on where `TASKMASTER_ROLE` or `CLAUDE_CODE_AGENT` is set. |
 | `SESSIONTOOLS_HOOK_TURN` | off | `on` (or `1`, `true`, `yes`) sets the turn-ended mark at Stop. |
 | `SESSIONTOOLS_HOOK_TITLE` | off | `on` (or `1`, `true`, `yes`) sets the session title to the short session id at SessionStart. |
 | `SESSIONTOOLS_HOOK_SESSION_INFO` | off | `on` (or `1`, `true`, `yes`) adds the session-info block to the context at SessionStart. |
 | `SESSIONTOOLS_HOOK_IDENTITY` | on | `off` (or `0`, `false`, `no`) stops the identity block being added to the context at SessionStart. A session with no block is silent either way. |
 | `SESSIONTOOLS_LAUNCH_INFO` | unset | Set by `session start` to the session id its launch-info carries. The session-info block then leaves that id out on startup. |
-| `SESSIONTOOLS_PYTHON` | the `session` command's python | The python the busy sound, settle alert, clock line and session-info hooks run. |
+| `SESSIONTOOLS_PYTHON` | the `session` command's python | The python the busy sound, settle alert, clock line, Markdown lint, hidden-failure note and session-info hooks run. |
 
 - **The settle alert:** [the settle alert][settle].
 - **The clock line:** [the clock line][clock]. It and the settle alert
   are separate hooks with separate switches.
+- **The Markdown lint:** [the Markdown lint][md-lint].
+- **The hidden-failure note:** [the hidden-failure note][hidden-failure].
 - **The busy sound** and **the stop sound** read the `sounds` tool:
   `~/.sessionkit/tools/settings/sounds.json` and every lower layer. Each
   is silent until set ([the busy sound][busy]).
@@ -221,7 +230,7 @@ pane. Its publisher can run as a per-user launchd agent, macOS only
 ## The default model
 
 `session default-model` pins the model every new `claude` starts on. It
-is off until `model.default` is set, and nothing installs its unit for
+is off until `model.default` is set, and nothing turns its agent on for
 you ([the default model][default-model]).
 
 - **Setting:** `model.default`, in
@@ -235,17 +244,49 @@ you ([the default model][default-model]).
   `default-model/log.jsonl` beside them.
 - **A unit carries** `CLAUDE_CONFIG_DIR` and `SESSION_STATE_DIR`, each
   when it is set at `unit`.
-- **The unit's files,** once you install one: the plist
+- **The unit's files,** once `session default-model agent on` writes and
+  loads it (or you save one by hand): the plist
   `~/Library/LaunchAgents/dev.sessionkit.tools.default-model.plist` and
   its log `~/.sessionkit/tools/log/default-model.log` (0.3.1 and before:
   `~/Library/Logs/sessiontools/`, left in place), or the
   systemd user units `sessiontools-default-model.path` and `.service`.
 
+## Service files
+
+Each service tools offers is declared in one JSON file, so `sessionkit
+service list` can find it. The files are tools' word about its jobs, not
+settings.
+
+- **The folder:** `~/.sessionkit/tools/services/`, beside the package's
+  `settings/` folder and never inside it, so `session settings` never reads
+  one.
+- **The four files, and the verb that writes each:**
+  - `pane-state.json`: `session pane-state agent on` (enabled true) and
+    `off` (enabled false).
+  - `sound-engine.json`: `session sound engine on` and `off`; `off
+    --purge` keeps the file.
+  - `default-model.json`: `session default-model agent on` and `off`.
+  - `web.json`: `session web declare`. It installs nothing; the file says
+    `run: session web serve` and `enabled: false`.
+- **Each write replaces the file whole**, through a temp file and one
+  rename, so a reader never sees half a file. `off` keeps the file.
+- **`--dry-run`** on each verb prints the file and writes nothing.
+- **A failed write** prints this line, and the verb exits 1 (4 for
+  `session default-model agent`); run it again. For the three agents it
+  does not undo the launchd act: the job is still loaded (or booted out)
+  as asked. `session web declare` has no launchd act.
+
+  ```text
+  service could not write PATH: REASON; the previous file is unchanged
+  ```
+
 ## `session context` and `session ledger`
 
 - **The band:** `session context` says `ok`, `near` or `over` against
-  `SESSION_SETTLE_AT`. `near` is within `context.near_pct` percent of it,
-  read from all five layers ([the keys][session-keys]).
+  `settle.soft.at`, read from all five layers. With no soft line set
+  there is no band, even when a hard line is set. `near` is within
+  `context.near_pct` percent of it, read from all five layers too ([the
+  keys][session-keys]).
 - **The ledger's token counts** use tiktoken's cache:
   `$TIKTOKEN_CACHE_DIR`, else `~/.cache/tiktoken`.
 
@@ -308,6 +349,8 @@ template, host, agent, seat and session. The most specific layer wins.
 [plugin]: claude-code-plugin.md
 [settle]: settle-alert-hook.md
 [clock]: clock-line-hook.md
+[md-lint]: md-lint-hook.md
+[hidden-failure]: hidden-failure-hook.md
 [busy]: busy-sound-hook.md
 [session-info]: session-info-hook.md
 [identity]: identity-block.md
@@ -317,3 +360,4 @@ template, host, agent, seat and session. The most specific layer wins.
 [default-model]: default-model.md
 [hooks]: #the-plugin-hooks
 [model-section]: #the-default-model
+[service-files]: #service-files

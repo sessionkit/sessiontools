@@ -13,6 +13,19 @@ Claude's settings, and a later full build renders the same file. Every
 other key is said, once, naming the file that set it, and dropped.
 Permissions, hooks, env and profiles are not rendered yet.
 
+COMPACTION: `autoCompactWindow` (WINDOW_MIN to WINDOW_MAX
+tokens) and `idleCompaction` (a boolean) are rendered too, each only when
+a layer sets it: unset, Claude's own default stands. A `false` is a
+value, rendered as given. A top-level `"auto"` is refused with a note:
+Claude Code 2.1.316's settings schema takes `"auto"` only per model
+(`modelSettings`), and silently drops it at the top level (`kc`, an
+integer with `.catch(undefined)`), so it would hand nothing back. The settle hook reads the window back
+from the door the launch wrote (`sessiontools.compact_point`), so the
+point is set in one place and read from the same one. The evidence:
+`idleCompaction` rests on static evidence only (a probe of 12 seats saw
+0 idle compactions, idle-on controls included); the window key and the
+PreCompact veto are live-measured.
+
 `statusLine` is the one object in RENDERED. The cascade merges it
 key by key, like every map, so it arrives as `statusLine.*` leaves; render
 reads it back as ONE value from the resolved map, checks its shape, and
@@ -52,17 +65,22 @@ Standard library only.
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import NamedTuple
 
+from sessiontools import compact_point as _compact
 from sessiontools import settings as _settings
 
 #: The settings tool this module renders.
 TOOL = "claude-code"
+#: Claude's compaction window and idle-compaction switch, spelled once, in
+#: `compact_point`, which also reads the window back for the settle hook.
+AUTO_COMPACT_WINDOW = _compact.AUTO_COMPACT_WINDOW
+IDLE_COMPACTION = _compact.IDLE_COMPACTION
 #: The keys v1 renders, Claude's own names, in file order.
-RENDERED = ("model", "effortLevel", "statusLine", "tui")
+RENDERED = ("model", "effortLevel", "statusLine", AUTO_COMPACT_WINDOW, IDLE_COMPACTION,
+            "tui")
 #: The one RENDERED key that is an object, rendered whole.
 STATUS_LINE = "statusLine"
 #: statusLine's sub-keys beyond `type` and `command`, each with the check
@@ -71,6 +89,13 @@ STATUS_LINE_KEYS = {
     "padding": lambda v: type(v) is int and v >= 0,
     "refreshInterval": lambda v: type(v) is int and v >= 1,
     "hideVimModeIndicator": lambda v: type(v) is bool,
+}
+#: The scalar RENDERED keys whose value is not a non-empty string: each
+#: one's check, and what the note says it needs. `bool` is not an int.
+SCALAR_KEYS = {
+    AUTO_COMPACT_WINDOW: (_compact.is_window,
+                          f"{_compact.WINDOW_MIN} to {_compact.WINDOW_MAX} tokens"),
+    IDLE_COMPACTION: (lambda v: type(v) is bool, "true or false"),
 }
 #: Claude's renderer setting, and the value the launcher sets when nothing
 #: else does: the classic renderer, the one a launched session runs today.
@@ -100,6 +125,19 @@ class Rendered(NamedTuple):
 
 def not_rendered(key: str, origin: str) -> str:
     return f"{TOOL}: {key} (from {origin}) not rendered in v1"
+
+
+def bad_value(key: str, origin: str) -> str:
+    """The note for a SCALAR_KEYS value its check refuses."""
+    return f"{TOOL}: {key} (from {origin}) not rendered: it needs {SCALAR_KEYS[key][1]}"
+
+
+def _renders(key: str, value: object) -> bool:
+    """Does RENDERED key KEY take VALUE: its SCALAR_KEYS check, else a
+    non-empty string?"""
+    if key in SCALAR_KEYS:
+        return SCALAR_KEYS[key][0](value)
+    return isinstance(value, str) and bool(value)
 
 
 def _layer_of(res: _settings.Resolved, origin: str) -> str:
@@ -175,10 +213,12 @@ def _folded_origins(res: _settings.Resolved) -> set[str]:
 
 def render(res: _settings.Resolved, folded: str | None = None) -> Rendered:
     """RES (the resolved `claude-code` tool) as the v1 `--settings` data:
-    `model` and `effortLevel` when each is a non-empty string, and
-    `statusLine` as one checked object (`_status_line`); a `None` (JSON
-    null) leaf is dropped without a word, as unset. Every other leaf, or a
-    RENDERED key that is not a string, is one note naming its origin file.
+    `model`, `effortLevel` and `tui` when each is a non-empty string,
+    `autoCompactWindow` and `idleCompaction` when each passes its
+    SCALAR_KEYS check (else `bad_value`'s note), and `statusLine` as one
+    checked object (`_status_line`); a `None` (JSON null) leaf is dropped
+    without a word, as unset. Every other leaf, or a string RENDERED key
+    that is not a string, is one note naming its origin file.
     A leaf whose origin is a PASSTHROUGH source (`fold`) is exempt by LEAF:
     it renders as given, under its own path, and is never said. FOLDED is
     the CLI value that source came from, carried on for the launch. Empty
@@ -213,9 +253,11 @@ def render(res: _settings.Resolved, folded: str | None = None) -> Rendered:
             path = res.paths.get(key, (key,))
             _nest(path, value, data)
             origins.setdefault(path[0], (PASSTHROUGH, origin))
-        elif key in RENDERED and isinstance(value, str) and value:
+        elif key in RENDERED and _renders(key, value):
             data[key] = value
             origins[key] = (_layer_of(res, origin), origin)
+        elif key in SCALAR_KEYS:
+            notes.append(bad_value(key, origin))
         else:
             notes.append(not_rendered(key, origin))
     ordered = {key: data[key] for key in RENDERED if key in data}
@@ -283,21 +325,10 @@ def provenance(rendered: Rendered, env: Mapping[str, str] | None = None) -> str:
     return line
 
 
-def claude_settings_files(work_dir: str | None,
-                          env: Mapping[str, str] | None = None) -> list[Path]:
-    """Claude Code's own settings files that a claude launched in WORK_DIR
-    reads, and that the door outranks: the user's (`$CLAUDE_CONFIG_DIR/
-    settings.json`, else `~/.claude/settings.json`, `~` the launch's HOME),
-    then the project's and the local one under WORK_DIR."""
-    env = os.environ if env is None else env
-    config_dir = env.get("CLAUDE_CONFIG_DIR")
-    user = (Path(_settings._expand_tilde(config_dir, env)) if config_dir
-            else _settings.home(env) / ".claude")
-    files = [user / "settings.json"]
-    if work_dir:
-        files += [Path(work_dir) / ".claude" / "settings.json",
-                  Path(work_dir) / ".claude" / "settings.local.json"]
-    return files
+#: Claude Code's own settings files below the door (user, project, local).
+#: Defined in `compact_point`, which the settle hook imports without this
+#: package (it pulls PyYAML); the off switch is read from the same files.
+claude_settings_files = _compact.claude_settings_files
 
 
 def claude_sets_tui(work_dir: str | None, env: Mapping[str, str] | None = None) -> str | None:
@@ -392,8 +423,10 @@ def skipped(files: tuple, own: str, env: Mapping[str, str] | None = None) -> str
             "refused")
 
 
-__all__ = ["INLINE", "LAUNCHER_DEFAULT", "PASSTHROUGH", "RENDERED", "STATUS_LINE",
+__all__ = ["AUTO_COMPACT_WINDOW", "IDLE_COMPACTION", "INLINE", "LAUNCHER_DEFAULT",
+           "PASSTHROUGH", "RENDERED", "SCALAR_KEYS", "STATUS_LINE",
            "STATUS_LINE_KEYS", "TOOL", "TUI", "TUI_DEFAULT", "Rendered", "bad_status_line",
+           "bad_value",
            "claude_sets_tui", "claude_settings_files", "fold", "not_rendered",
            "own_settings_value", "own_settings_values", "passthrough_source", "provenance",
            "render", "skipped", "with_tui_default", "without_own_settings"]

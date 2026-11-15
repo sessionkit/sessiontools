@@ -3,15 +3,52 @@
 # the hook's JSON, from this plugin's own src/, and stay SILENT whatever goes
 # wrong. A hook must never be the reason a turn breaks.
 #
-#   SESSIONTOOLS_HOOK_SETTLE=off   exit 0 (also 0/false/no; python re-checks)
-#   SESSION_SETTLE_AT unset/empty  exit 0 - python never starts, costs nothing
+# `settle-hook precompact` is the plugin's PreCompact entry, the compaction
+# guard (sessiontools.settle_guard): python prints a reason and
+# exits 2 to skip an AUTO compaction below the set compaction point; the shim
+# sends that reason to stderr (Claude Code shows a blocking hook's stderr)
+# and exits 2. Every other outcome, a python crash included, exits 0 with no
+# output: on 0 a PreCompact hook's stdout joins the summary's instructions,
+# so a pass says nothing. Only python's own exit 2 skips; it shares the OFF
+# stamp's fast paths below, so with no `settle` set it never starts python.
+# Any other argument exits 0.
+#
 #   no pick-python.sh beside it    exit 0
 #   no python at all               exit 0
 #   python older than 3.11         exit 0 (the -c guard below)
 #   python crashes, or anything    exit 0, stderr to /dev/null
+#   (and the OFF stamp's fast paths, below)
+#
+# Whether to speak is python's: the `session` settings cascade's `settle`
+# block, read live each batch (sessiontools.settle). The shim reads no
+# variable to decide it: SESSION_SETTLE_AT reaches the alert only through
+# the session layer `session start` writes at birth, and
+# SESSIONTOOLS_HOOK_SETTLE is retired (`settle: null` is off).
+#
+# CHEAP WHEN OFF. The shim decides from `stat`s first, as the
+# busy sound's does (hooks/busy-sound, sounds/busy/off), and python starts
+# only when it has to:
+#
+#   no CLAUDE_CODE_SESSION_ID         exit 0 (claude sets it in every hook)
+#     or one that is not a bare name
+#   no session dir                    exit 0 (no identity, nothing to read)
+#   <session dir>/settle/off present  exit 0, unless a path it lists is newer
+#     and no path it lists newer        than it. python writes it when the
+#                                       cascade resolves OFF: one line per
+#                                       layer path it read OR looked for
+#                                       (each layer's file, the agent file, each
+#                                       .d folder and file in it), back-dated
+#                                       1 s because `-nt` compares whole
+#                                       seconds. `session start` writes it at
+#                                       birth; any other session's first
+#                                       batch does. ON removes it.
+#
+# `[ a -nt b ]` is false when `a` is missing, so an absent layer never forces
+# a resolve; a layer made later is newer, and so is a `.d` folder gaining a
+# file. The loop is `read` and `[`: builtins, no fork.
 #
 # The python is the one busy-sound runs: `pick`, from pick-python.sh beside
-# this file, sourced with `.` (no fork) and only once the threshold is set.
+# this file, sourced with `.` (no fork).
 # $SESSIONTOOLS_PYTHON, else the `session` command's shebang python (the tool
 # venv's, which `uv tool install` keeps off PATH), else python3 from PATH. A
 # clean Mac's PATH python3 is Apple's 3.9.6, so PATH alone would leave the
@@ -21,21 +58,56 @@
 # same reason as sessionmail's mail-guard-hook). stdin passes through.
 # The shim's OWN stderr goes to /dev/null too: when python is killed, sh
 # itself reports it ("Killed: 9") on stderr, and a hook's stderr is shown.
-exec 2>/dev/null
-case "${SESSIONTOOLS_HOOK_SETTLE:-}" in
-  [Oo][Ff][Ff] | 0 | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo]) exit 0 ;;
+case "${1:-}" in
+  '') verb='batch' ;;
+  precompact) verb='precompact' ;;
+  *) exit 0 ;;
 esac
-[ -n "${SESSION_SETTLE_AT:-}" ] || exit 0
+# fd 3 keeps the hook's stderr for the guard's one reason line.
+exec 3>&2 2>/dev/null
 # This file's dir, by builtins (no `$(dirname)` fork). A bare `$0` is ".".
 case "$0" in */*) here=${0%/*} ;; *) here=. ;; esac
+# $sid and $dir from session-dir.sh beside this file, sourced with `.` (no
+# fork): the one bash copy of the sessions leaf rule, shared with busy-sound.
+dir=   # session-dir.sh sets it (and $sid)
+[ -r "$here/session-dir.sh" ] || exit 0   # `.` of a missing file exits 1
+# shellcheck disable=SC1091 # linted on its own
+. "$here/session-dir.sh"
+session_dir || exit 0
+off=$dir/settle/off
+if [ -f "$off" ]; then
+  fresh=1
+  # shellcheck disable=SC2094 # only read here; python writes it, by rename
+  while IFS= read -r p || [ -n "$p" ]; do
+    if [ -n "$p" ] && [ "$p" -nt "$off" ]; then fresh=; break; fi
+  done < "$off"
+  [ -n "$fresh" ] && exit 0
+fi
 [ -r "$here/pick-python.sh" ] || exit 0   # `.` of a missing file exits 1
 py=
 # shellcheck disable=SC1091 # linted on its own
 . "$here/pick-python.sh"
 pick || exit 0
-"$py" -I -c 'import sys
+if [ "$verb" = batch ]; then
+  "$py" -I -c 'import sys
 if sys.version_info < (3, 11):
     sys.exit(0)
 sys.path.insert(0, sys.argv[1])
 from sessiontools.settle import main
 sys.exit(main())' "$here/../src" || exit 0
+  exit 0
+fi
+# precompact: python's stdout is the reason, captured. Exit 2 WITH the
+# guard's reason line skips; anything else is 0. The reason is required
+# because a python that rejects its own argv also exits 2 (python 2 on -I,
+# its usage on stderr, stdout empty), and that must never skip.
+reason=$("$py" -I -c 'import sys
+if sys.version_info < (3, 11):
+    sys.exit(0)
+sys.path.insert(0, sys.argv[1])
+from sessiontools.settle_guard import main
+sys.exit(main())' "$here/../src")
+[ $? -eq 2 ] || exit 0
+case "$reason" in 'settle: '*) ;; *) exit 0 ;; esac
+printf '%s\n' "$reason" >&3
+exit 2

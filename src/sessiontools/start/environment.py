@@ -53,9 +53,11 @@ ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # cd, so `./.voicemode.env` means "this project's override".
 RELATIVE_PREFIX = "./"
 
-# The backends a `secrets:` reference may name. Parsing checks the name
-# here; the resolvers live in secrets.py (`BACKENDS`).
-SECRET_BACKENDS = ("pass",)
+# The backends a `secrets:` reference may name, for the authoring error's
+# "known backends". The resolvers live in secrets.py (`BACKENDS`), which
+# imports this module, so the names are kept here and a test pins the two
+# to the same set.
+SECRET_BACKENDS = ("pass", "passage")
 
 # What a dry run names the 0600 secret file (a live launch mints a private
 # random name; a dry run writes nothing and says where it would be).

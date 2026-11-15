@@ -309,6 +309,8 @@ def test_direct_launch_execs_the_stub_vendor_with_identity_env(tmp_path):
     assert (record / "suggestion-env").read_text() == "false"   # SESH-734
     plugin = argv[argv.index("--plugin-dir") + 1]
     assert os.path.isfile(os.path.join(plugin, "agents", "scout.md"))
+    assert argv[argv.index("--add-dir") + 1] == plugin       # one carrier, twice
+    assert os.path.isfile(os.path.join(plugin, ".claude", "agents", "scout.md"))
 
 
 #: The stub vendor, plus one line per SESSION_IDENTITY_VARS name: what the

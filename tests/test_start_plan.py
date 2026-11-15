@@ -240,9 +240,9 @@ def test_generators_resolve_the_new_session_id_never_the_parents(tmp_path):
             assert name not in env, name
 
 
-def test_a_pane_minted_launch_hands_its_generators_no_session_id(tmp_path):
+def test_a_launch_with_no_identity_hands_its_generators_no_session_id(tmp_path):
     launch = _launch_inside_a_seat(tmp_path)
-    env = pl.generator_environ(launch, None)   # the pane mints later
+    env = pl.generator_environ(launch, None)   # an unkeyed resume has no new id
     assert claude_code.session_id(env) is None
     assert not set(SESSION_IDENTITY_VARS) & set(env)
 
@@ -537,7 +537,12 @@ def test_the_schema_install_runs_once_guarded_after_the_prelude_and_before_the_b
     plan = plan_for(tmp_path, "")
     line = _install_line(plan.script)
     assert line.startswith("if command -v pager >/dev/null 2>&1; then ")
-    assert line.endswith(" -- pager settings install </dev/null || :; fi")   # never stops a launch
+    # sessiontools' own schemas either way; mail's command only when it is on PATH
+    then, otherwise = line.split("; else ")
+    assert then.endswith(" -- pager settings install </dev/null || :")   # never stops a launch
+    assert otherwise.endswith(" </dev/null || :; fi") and " -- " not in otherwise
+    own = otherwise.removesuffix(" </dev/null || :; fi")
+    assert then.removesuffix(" -- pager settings install </dev/null || :").endswith("; then " + own)
     script = plan.script
     assert script.index("end declared environment") < script.index("schema_install_main")
     assert script.index("schema_install_main") < script.index("birth_main")

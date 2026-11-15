@@ -9,7 +9,7 @@ below is pinned for its default, its override and each fallback case; then
 every writer is pinned to the place it wrote at 7ef0782 on an old-layout
 HOME, and to the new state folder on a fresh one; then the nesting hazard
 and the fresh-HOME walk; then AGENTS_DIR's split; then the bash copy in
-hooks/busy-sound against python; then the grep.
+hooks/session-dir.sh against python; then the grep.
 """
 
 from __future__ import annotations
@@ -30,6 +30,8 @@ from sessiontools.start import holders
 
 ROOT = Path(__file__).resolve().parents[1]
 SHIM = ROOT / "hooks" / "busy-sound"
+#: The one bash copy of the rule, sourced by busy-sound and settle-hook.
+SESSION_DIR_SH = ROOT / "hooks" / "session-dir.sh"
 SID = "0b1c2d3e-0000-4000-8000-00000000abcd"
 
 #: Each leaf's OLD path under HOME, as 7ef0782 spelled it.
@@ -532,7 +534,7 @@ def test_agents_rung_is_agents_roots_chain_naming_its_rung(tmp_path, rung):
     assert ag.RUNGS == ("AGENTS_DIR", "config", "agents")
 
 
-# --- the bash copy in hooks/busy-sound agrees with python ------------------------------------
+# --- the bash copy in hooks/session-dir.sh agrees with python ------------------------------------
 
 def fresh_word(leaf: str, env: dict) -> str:
     """The hook's third `leaf` word for LEAF on ENV's HOME: python's fresh
@@ -541,10 +543,10 @@ def fresh_word(leaf: str, env: dict) -> str:
 
 
 def bash_fresh(root: Path, state: Path) -> str:
-    """Run hooks/busy-sound's own `fresh` function, cut from the file."""
-    text = SHIM.read_text()
+    """Run the hooks' own `fresh` function, cut from hooks/session-dir.sh."""
+    text = SESSION_DIR_SH.read_text()
     m = re.search(r"^fresh\(\) \{.*?^\}$", text, re.MULTILINE | re.DOTALL)
-    assert m, "hooks/busy-sound has no fresh() function"
+    assert m, "hooks/session-dir.sh has no fresh() function"
     r = subprocess.run(["/bin/sh", "-c",
                         m.group(0) + '\nfresh "$1" "$2"; printf %s "$fw"',
                         "sh", str(root), str(state)],
@@ -553,10 +555,10 @@ def bash_fresh(root: Path, state: Path) -> str:
 
 
 def bash_leaf(old: Path, new: Path, fresh: str) -> str:
-    """Run hooks/busy-sound's own `leaf` function, cut from the file."""
-    text = SHIM.read_text()
+    """Run the hooks' own `leaf` function, cut from hooks/session-dir.sh."""
+    text = SESSION_DIR_SH.read_text()
     m = re.search(r"^leaf\(\) \{.*?^\}$", text, re.MULTILINE | re.DOTALL)
-    assert m, "hooks/busy-sound has no leaf() function"
+    assert m, "hooks/session-dir.sh has no leaf() function"
     r = subprocess.run(["/bin/sh", "-c",
                         m.group(0) + '\nleaf "$1" "$2" "$3"; printf %s "$at"',
                         "sh", str(old), str(new), fresh],
@@ -620,7 +622,7 @@ def test_the_hooks_bash_fresh_is_old_root_real(tmp_path, layout):
 
 
 def test_the_hook_spells_each_leaf_as_settings_does():
-    text = SHIM.read_text()
+    text = SESSION_DIR_SH.read_text() + SHIM.read_text()   # sessions there, sound here
     h = {"HOME": "/H"}
 
     def spell(p: Path) -> str:
@@ -631,7 +633,9 @@ def test_the_hook_spells_each_leaf_as_settings_does():
         assert f'leaf "{old}" "{new}" {words[leaf]}\n' in text, leaf
     assert "sound" in settings.FRESH_NEW and "sessions" not in settings.FRESH_NEW
     root, state = spell(settings.session_root(h)), spell(settings.tools_state_dir(h))
-    assert f'  fresh "{root}" "{state}"\n  leaf "{spell(settings.leaf_old("sessions", h))}"' in text
+    sessions_old = spell(settings.leaf_old("sessions", h))
+    assert re.search(rf'^ *fresh "{re.escape(root)}" "{re.escape(state)}"\n *leaf "{re.escape(sessions_old)}"',
+                     text, re.MULTILINE)
 
 
 @pytest.mark.parametrize("layout", ["fresh", "old-only", "migrated", "new-only", "partial-old"])
@@ -663,7 +667,8 @@ SPELLING = re.compile(r"\.session/|\"\.session\"|'\.session'|\.local/share")
 ALLOWED = {
     "src/sessiontools/settings.py": "the ONE resolver",
     "src/sessiontools/cli.py": "the user's bash-completion folder, not a tools path",
-    "hooks/busy-sound": "the one guarded bash copy of the rule (no python on the hot path)",
+    "hooks/busy-sound": "the sound leaf's call of the bash rule (no python on the hot path)",
+    "hooks/session-dir.sh": "the one guarded bash copy of the rule, sourced by the hooks",
     "src/sessiontools/sound/engine.swift": "the compat default for a pre-0.3.2 plist; the "
                                           "plist passes --sessions (service.engine_sessions)",
 }

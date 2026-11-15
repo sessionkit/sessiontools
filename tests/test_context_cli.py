@@ -57,6 +57,18 @@ def _place(projects: Path, fixture: Path, sid: str = SID) -> Path:
     return dest
 
 
+def _settle_at(at) -> Path:
+    """The settle threshold the band reads (ST-78 do-007): `settle.soft.at`
+    in the `session` tool's HOST layer, under this test's HOME, so a session
+    with no settings dir has one too. The environment is not a layer."""
+    from sessiontools import settings
+    folder = settings.host_dir("session")[0]
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "session.json"
+    path.write_text(json.dumps({"settle": {"soft": {"at": at}}}), encoding="utf-8")
+    return path
+
+
 def _run(argv, capsys):
     code = cli.main(["context", *argv])
     out = capsys.readouterr()
@@ -81,7 +93,7 @@ def test_the_bare_one_liner_is_unchanged(projects, capsys):
 def test_the_bare_one_liner_never_imports_the_views(projects, argv, settle_at):
     """Design section 5's amendment: the default pays nothing. A fresh
     interpreter, so no other test's import hides it. ST-155: the bare --json
-    too, with SESSION_SETTLE_AT set, so `band` is computed, not skipped."""
+    too, with a settle threshold set, so `band` is computed, not skipped."""
     _place(projects, TOOLS)
     code = ("import sys; from sessiontools import cli, listing; "
             "listing.rows = lambda *a, **k: []; "
@@ -91,7 +103,7 @@ def test_the_bare_one_liner_never_imports_the_views(projects, argv, settle_at):
     env = {**os.environ, "CLAUDE_PROJECTS_DIR": str(projects)}
     env.pop("SESSION_SETTLE_AT", None)
     if settle_at is not None:
-        env["SESSION_SETTLE_AT"] = settle_at
+        _settle_at(settle_at)
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                           env=env, timeout=60, check=False)
     assert done.returncode == 0, done.stderr
@@ -212,18 +224,46 @@ def test_band_is_null_without_a_settle_threshold(projects, capsys):
     assert json.loads(out)["band"] is None
 
 
+def test_the_environment_alone_gives_no_band(projects, capsys, monkeypatch):
+    """ST-78 do-007: the band reads settle.soft.at from the cascade, as the
+    alert does; SESSION_SETTLE_AT in the environment is no layer."""
+    _place(projects, TOOLS)
+    monkeypatch.setenv("SESSION_SETTLE_AT", "1k")
+    for argv in (["--json"], ["--parts", "--json"]):
+        code, out, err = _run([SID[:8], *argv], capsys)
+        assert (code, err) == (0, ""), argv
+        assert json.loads(out)["band"] is None, argv
+
+
+def test_band_follows_a_seat_layers_soft_line(projects, capsys):
+    """The seat the session's record names sets the threshold."""
+    _place(projects, TOOLS)
+    used = json.loads(_run([SID[:8], "--json"], capsys)[1])["used"]
+    session = Path(os.environ["SESSIONS_DIR"]) / SID / "settings"
+    (session / "session.d").mkdir(parents=True)
+    (session / "session.d" / "00-birth.json").write_text(json.dumps({"seat": "st-78-w"}))
+    seat = Path(os.environ["HOME"]) / ".session" / "seats" / "st-78-w" / "settings"
+    seat.mkdir(parents=True)
+    (seat / "session.json").write_text(json.dumps({"settle": {"soft": {"at": used}}}))
+    code, out, err = _run([SID[:8], "--json"], capsys)
+    assert (code, err) == (0, "")
+    assert json.loads(out)["band"] == band_mod.OVER
+    (seat / "session.json").write_text(json.dumps({"settle": {"soft": {"at": used * 100}}}))
+    assert json.loads(_run([SID[:8], "--json"], capsys)[1])["band"] == band_mod.OK
+
+
 def test_band_with_a_threshold_and_a_note_when_the_session_has_no_settings_dir(
         projects, capsys, monkeypatch):
     """The do-006 review's N3: a session with no settings dir reads the
     near cut from the host and template layers only, and stderr says so."""
     _place(projects, TOOLS)
     used = json.loads(_run([SID[:8], "--parts", "--json"], capsys)[1])["used"]
-    monkeypatch.setenv("SESSION_SETTLE_AT", str(used))
+    _settle_at(str(used))
     code, out, err = _run([SID[:8], "--parts", "--json"], capsys)
     assert code == 0 and json.loads(out)["band"] == band_mod.OVER
     assert err.startswith("session context: band: no session directory for " + SID)
     assert f"the near cut is {band_mod.DEFAULT_NEAR_PCT}% of the settle threshold" in err
-    monkeypatch.setenv("SESSION_SETTLE_AT", str(used * 100))
+    _settle_at(str(used * 100))
     assert json.loads(_run([SID[:8], "--parts", "--json"], capsys)[1])["band"] == band_mod.OK
 
 
@@ -233,7 +273,7 @@ def test_band_reads_the_sessions_own_near_cut_without_a_note(projects, capsys, m
     settings_dir = Path(os.environ["SESSIONS_DIR"]) / SID / "settings"
     settings_dir.mkdir(parents=True)
     (settings_dir / "session.json").write_text(json.dumps({"context": {"near_pct": 50}}))
-    monkeypatch.setenv("SESSION_SETTLE_AT", str(int(used / 0.6)))   # used is 60% of it
+    _settle_at(str(int(used / 0.6)))   # used is 60% of it
     code, out, err = _run([SID[:8], "--parts", "--json"], capsys)
     assert (code, err) == (0, "")
     assert json.loads(out)["band"] == band_mod.NEAR                  # 20% says OK; 50% says near
@@ -274,7 +314,7 @@ def test_the_bare_json_band_agrees_with_parts_json(projects, capsys, monkeypatch
     assert used == json.loads(_run([SID[:8], "--parts", "--json"], capsys)[1])["used"]
     at = THRESHOLDS[want](used)
     if at is not None:
-        monkeypatch.setenv("SESSION_SETTLE_AT", str(at))
+        _settle_at(str(at))
     code, out, bare_err = _run([SID[:8], "--json"], capsys)
     assert code == 0
     bare = json.loads(out)["band"]
@@ -291,7 +331,7 @@ def test_the_bare_json_band_reads_the_sessions_own_near_cut(projects, capsys, mo
     settings_dir = Path(os.environ["SESSIONS_DIR"]) / SID / "settings"
     settings_dir.mkdir(parents=True)
     (settings_dir / "session.json").write_text(json.dumps({"context": {"near_pct": 50}}))
-    monkeypatch.setenv("SESSION_SETTLE_AT", str(int(used / 0.6)))   # used is 60% of it
+    _settle_at(str(int(used / 0.6)))   # used is 60% of it
     code, out, err = _run([SID[:8], "--json"], capsys)
     assert (code, err) == (0, "")
     assert json.loads(out)["band"] == band_mod.NEAR                  # 20% says OK; 50% says near
@@ -302,7 +342,7 @@ def test_the_bare_json_band_is_of_the_lines_own_used_the_peak_with_peak(
     path = _place(projects, TOOLS)
     u = window.scan(path)
     assert u.peak > u.used * 2                                       # the fixture's compaction
-    monkeypatch.setenv("SESSION_SETTLE_AT", str(u.used * 2))         # under the peak, over used
+    _settle_at(str(u.used * 2))         # under the peak, over used
     assert json.loads(_run([SID[:8], "--json"], capsys)[1])["band"] == band_mod.OK
     doc = json.loads(_run([SID[:8], "--json", "--peak"], capsys)[1])
     assert (doc["used"], doc["band"]) == (u.peak, band_mod.OVER)
@@ -319,7 +359,7 @@ def test_a_synthetic_zero_tail_has_no_band_even_with_a_threshold(projects, capsy
             "content": [{"type": "text", "text": "x"}],
             "usage": {"input_tokens": 0, "output_tokens": 0,
                       "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}) + "\n")
-    monkeypatch.setenv("SESSION_SETTLE_AT", "1k")
+    _settle_at("1k")
     code, out, err = _run([SID[:8], "--json"], capsys)
     assert (code, err) == (0, "")
     doc = json.loads(out)

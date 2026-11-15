@@ -9,10 +9,196 @@ stamps this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-15
+
+### Added
+
+- **A cache-true idle clock: `last_request_at` and `cache_age_s`**
+  (ST-326). `session list --json` rows and `session get` now carry the
+  timestamp of the seat's last API usage row (ISO-8601 UTC, ending `Z`)
+  and the whole seconds since it. That is the clock the prompt cache
+  keeps; the sidecar's `idle_s` is not. The timestamp is the response's
+  END while the cache TTL (1 h, measured) runs from the REQUEST, so keep
+  a margin. A reading only: nothing acts on it, `reap` included. The
+  table view is unchanged, and `session pane-state --help` now says a
+  seat in a backgrounded wait reads BUSY yet is cache-idle.
+- **The hidden-failure note** (ST-319). On an agent seat
+  (`TASKMASTER_ROLE` or `CLAUDE_CODE_AGENT` set), `hooks/hidden-failure`
+  says one line when a gate (pytest, make, `message send`, `git commit`,
+  `git push`) piped into `head` or `tail` exits 0 with failure text in
+  its output (PostToolUse), and before a gate piped into `head` runs
+  (PreToolUse). It never blocks, never rewrites a command and changes no
+  exit code; it quotes nothing but the gate's name. A person's own
+  session is untouched, and `SESSIONTOOLS_HOOK_HIDDEN_FAILURE=off`
+  switches it off on a seat. See `docs/hidden-failure-hook.md`.
+- **The Markdown lint: a PostToolUse hook on Write, Edit and MultiEdit
+  of a `.md` file** (ST-304). `hooks/md-lint` names each table line of
+  76 or more display columns (`line 14 is 134 columns; a table line
+  stays under 76 columns, wider lines wrap`) and each whole-word `shape`
+  or `shapes` in prose (`line 9 says 'shape': use the precise term`).
+  Front matter, fenced code and HTML comments are skipped, and for
+  `shape` also code spans, links, URLs, quoted text and blockquotes. A
+  Write reports the whole file; an Edit reports only the lines it wrote.
+  At most 10 lines, then `... and N more`. It answers and never blocks.
+  On by default, only in a session `session start` launched;
+  `SESSIONTOOLS_HOOK_MD_LINT=off` turns it off before python starts, and
+  any failure exits 0 with no output. See `docs/md-lint-hook.md`.
+- **The sed guard** (ST-303), `hooks/sed-guard`, a PreToolUse hook on
+  Bash. Where GNU sed is first on PATH, `sed -i '' 's/a/b/' f` (BSD
+  sed's form) edits nothing and exits 2; the guard refuses it and names
+  the GNU form, cut from the command as written. It parses the command,
+  so a quoted string, a heredoc body or a comment that mentions the form
+  passes, and it asks the sed the call names, so a BSD sed is never
+  refused. On by default; `SESSIONTOOLS_HOOK_SED=off` turns it off. See
+  `docs/sed-guard-hook.md`.
+- **`session start` carries the user's CLAUDE.md** (ST-302). When a
+  fresh claude launch's `--setting-sources` leaves out `user` (`''`, or
+  `project,local` as `tm kick` passes), the launcher reads
+  `$CLAUDE_CONFIG_DIR/CLAUDE.md`, else `~/.claude/CLAUDE.md`, and puts it
+  first in the system-prompt file, under a header that says where it came
+  from. The sources flag is never changed, so the user `settings.json`
+  stays out. No file means no change. It yields to an operator's own
+  `--append-system-prompt-file` when nothing else writes that file, with
+  one stderr line. `@` imports are named, not expanded. See
+  `docs/session-start-launcher.md`, "The user's CLAUDE.md".
+- **`session start` reads `passage:` secrets.** `NAME: passage:ENTRY` in
+  an agent file now resolves at launch, through the same age backend the
+  account registry uses. Until now a launch knew only `pass:`, so a seat
+  whose secret had moved to passage was refused and did not start. A
+  missing entry fails before anything decrypts, and the launch says on
+  stderr, before it waits, that age may ask for Touch ID or a key touch.
+- **The settle keys and the `session` schema** (ST-78). `settle.soft.*`
+  and `settle.hard.*` are read through every layer of the cascade;
+  `settle: null` is off and a host `_locked` pins it. `session start`
+  now installs the `session` schema, so `SESSION_SETTLE_AT` and
+  `SESSION_SETTLE_SAY` at launch are copied once into the session layer,
+  as `settle.soft.at` and `settle.soft.say`. Every key name and default
+  line lives in `sessiontools.settle_settings`. See `docs/settings.md`.
+- **The `claude-code` tool passes on `autoCompactWindow` and
+  `idleCompaction`** (ST-78), Claude Code's own names, into `session
+  start`'s `--settings`, each only when a layer sets it.
+  `sessiontools.compact_point` reads the compaction point back from
+  what the launch set (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, then
+  `--autocompact`, then that `--settings` file), or says it is unknown.
+  See `docs/settings.md`.
+- **The settle alert speaks a soft line and a hard line, read live**
+  (ST-78). `hooks/settle-hook` reads the `settle.*` keys through every
+  layer on each tool batch, so an edited file is heard at the next batch.
+  The soft line speaks once per crossing of `soft.at + k × soft.every`;
+  the hard line, "now", from the lower of `hard.at` and the set
+  compaction point less `hard.before_compact`. One line per batch, and
+  the hard line wins. `{left}` and `{compact_at}` come only from the
+  point the launch set, and read `?` when it is unknown. With no
+  `settle` set, an OFF stamp (`<session dir>/settle/off`) keeps python
+  from starting. See `docs/settle-alert-hook.md`.
+- **A `PreCompact` guard** (ST-78), `hooks/settle-hook precompact`. While
+  settle is on and the compaction point the launch set is known, it skips
+  an auto compaction below that point when the count is the whole
+  context, as on an idle seat. A manual `/compact` always passes. The
+  veto is measured live on the threshold path only; the idle path is
+  static reading. See `docs/settle-alert-hook.md`.
+- **`session commands` and `session list --past`** (ST-320). `session
+  commands [TARGET]` lists the Bash calls of a seat's sessions, or of one
+  session, each cut down to the programs it ran: the settings in front,
+  here-documents and redirections are gone, and `bash -c`, `uv run` and
+  `ssh HOST` are followed. `--count` tallies programs and verbs, `--raw`
+  shows each command as written, `--json` is one record per program run;
+  `--since`, `--until` and `--grep` narrow it. `session list --past SEAT`
+  lists every session recorded as SEAT on this host, oldest first, with
+  its start, last write and turns. Standard library only; see
+  `docs/session.md`.
+
+### Security
+
+- **`session park` no longer lets any sender hide unread mail.** Before,
+  any mail with a `Supersedes:` header hid the message it named, whoever
+  sent it. A message from an unrelated sender could turn `1 unread` into
+  `session box: 0 unread`. Now a supersede counts only under sessionmail's
+  rule: the carrier has one From address, and every copy of the target in
+  the box has that same address (any case, the display name ignored). A
+  refused supersede leaves the target counted, and the mail check names the
+  carrier: after the unread ids, or as unknown when nothing is unread. On
+  this point park is stricter than `message list --unread`, which still
+  hides any target a `Supersedes:` names. This stops the wrong sender, not
+  a forger: a message that copies the target's From still passes.
+
+### Fixed
+
+- **The PyPI page's README links work** (ST-312). `make publish` uploaded a
+  plain build of the checkout, so the README's relative links (`docs/...`)
+  404'd on PyPI. It now depends on a new `make pypi-dist`, which builds
+  from the release tag, pins the README's links to that tag on GitHub
+  with sessionkit's `scripts/pypi_readme.py`, and checks both the wheel
+  and the sdist. It refuses unless the tag is on the public repo, and
+  when the kit's script is not under `KIT_DIR` (default `../sessionkit`).
+- **`make pypi-dist` refuses a local tag that is not the public one**
+  (ST-323). It checked only that `vX.Y.Z` existed on the public repo, so
+  a tag moved here after the push built a dist from one commit whose
+  README links named another. It now runs the kit's `pypi_readme.py
+  tag-check` (SK-289), which refuses unless the local and the public tag
+  are the same commit, and names both shas. It needs a kit with
+  `tag-check`.
+
+- **A named agent's add-dir copy keeps the seat as it was.** The copy at
+  `.claude/agents/NAME.md` leaves out `hooks`, `mcpServers` and
+  `permissionMode`, which the plugin copy never honoured, so only the
+  name changes.
+- **With the `project` setting source off** (`--setting-sources ""`), a
+  named agent keeps its scoped `session-agent-NAME:NAME` name; the
+  shipped status line's strip still shows it plain.
+- **Fable 5.2 shows its context.**
+  The window map had `claude-fable-5-1` but no `claude-fable-5-2`, so a
+  5.2 seat's CONTEXT read `?`. `claude-fable-5-2` and `claude-mythos-5-2`
+  are mapped at 1M (the model catalog as cached 2026-11-03).
+
+### Changed
+
+- **An unknown model still shows its usage.** `session list` shows
+  `NN%?` against an assumed 1M, and `session context` prints
+  `Context: 370K / 1.00M? (37%?) - no known window for MODEL, so 1M is
+  assumed`. The next model works on day one. The JSON is unchanged:
+  `context_window` and `context_pct` stay null until the map has a row.
+  A known model over its mapped window still shows a bare `?`.
+- **The settle alert is birth-only** (ST-78). It speaks only in a session
+  `session start` launched, which has a session dir. A `claude` started
+  by hand, which any `SESSION_SETTLE_AT` used to reach, now gets no
+  warning, even when a host layer sets `settle`.
+- **`SESSION_SETTLE_AT` and `SESSION_SETTLE_SAY` are launch inputs only**
+  (ST-78). The hook no longer reads them; `session start` copies them
+  once into the session layer, so a shell-rc export beats every seat. A
+  launched seat that exports only `SESSION_SETTLE_AT` still hears one
+  line, every batch, from its mark.
+- **The settle line names the count too:** `You're past 250K (262K
+  used). ...` (ST-78).
+- **`session context`'s `band` reads the settle threshold from the
+  cascade** (ST-78): `settle.soft.at`, the soft line's mark, through
+  every layer, the same reading the settle alert uses. `SESSION_SETTLE_AT`
+  in the environment no longer sets it; `session start` copies it into the
+  session layer at birth, so a seat it launched keeps its band.
+
+### Removed
+
+- **`SESSIONTOOLS_HOOK_SETTLE`** (ST-78). Nothing reads it; `settle:
+  null` in a settings layer turns the settle alert off.
+- **The clock line's warn line and `SESSION_CLOCK_WARN_AT`** (ST-78). A
+  session hears one warning, the settle alert's; the clock line keeps its
+  figure and never reads the variable.
+
 ## [0.3.3] - 2026-11-08
 
 ### Changed
 
+- **A tmux window runs the line you typed** (ST-285). `session start
+  --in-tmux` and `--tmux-target` no longer write a `launch.sh` for the
+  window: the window runs `session start` again without the placement
+  flags, so `tmux respawn-pane -k` starts a fresh session. Message words
+  go to a 0600 file, never the window's command line. The placing command
+  takes no claim; the launch in the window does. A window whose launch
+  fails stays open with its reason. See `docs/session-start-launcher.md`.
+- **The typed line stays out of `ps` in the launch record too** (ST-285).
+  The launch script's record call reads the line and its folder from its
+  environment, not its command line; the record keeps the line exactly as
+  typed.
 - **sessiontools asks sessionmail for every box; it never spells the mail
   root** (sessionmail 0.3.3, the mail root move). `SESSION_MAIL_ROOT` is
   read by nothing here, and `sessiontools.operator.DEFAULT_MAIL_ROOT` and
@@ -44,6 +230,28 @@ stamps this file.
 
 ### Added
 
+- **`session respawn [SID] [--go]`** (ST-30). Restarts a seat in its own
+  tmux pane with the `session start` line it was launched with, replayed
+  from the launch record (`launch_command`, ST-285), never tmux's
+  `pane_start_command`. With no `--go` it prints the plan and changes
+  nothing. `--go` acts on the pane you run it in and no other: a SID
+  naming another seat's pane is planned, and `--go` there is refused. The
+  SID is positional, a session id or a prefix of 8+ characters, never a
+  name; an ambiguous prefix is refused and listed. Only a seat started by
+  `session start` has a line to replay (a pre-change seat or a keyed
+  resume's fork is refused). A model that has drifted from the line is
+  shown in the plan, not refused. Before the kill it writes a line to
+  `~/.sessionkit/tools/log/respawn.log`, and refuses if it cannot. See
+  `docs/session-respawn.md`.
+- **A tmux placement warns when your environment differs from tmux's**
+  (ST-285). A placed window resolves in tmux's environment. When your
+  `AGENTS_DIR`, `SESSION_STATE_DIR` or `SESSIONS_DIR` differs from it, the
+  placing command prints one warning line per variable and still launches.
+- **`session get launch_command` and `session get launch_dir`** (ST-285).
+  They print the `session start` line as it was entered and the directory
+  it was entered from, read from the seat's launch record. A seat launched
+  before the record held them exits 2; it never falls back to the
+  evaluated argv. See `docs/session.md`.
 - **`session path agent NAME` prints an agent's home, and `--config` its
   folder** (ST-291). The home is `home/NAME` in the agent leaf, printed
   whether or not it exists. `session path agent --config` prints the
@@ -72,6 +280,16 @@ stamps this file.
   (ST-259). It stays read-only, shows each value's file and lock, and also
   lists any other tool with an installed schema, marked as one sessiontools
   does not read. See `docs/session.md`.
+- **tools declares its services for `sessionkit service`.** Each service
+  has one file in `~/.sessionkit/tools/services/`, beside `settings/`:
+  `pane-state.json` (`session pane-state agent on|off`),
+  `sound-engine.json` (`session sound engine on|off`),
+  `default-model.json` (the new `session default-model agent
+  on|off|status`, which writes and loads the enforcer's launchd agent;
+  opt-in) and `web.json` (the new `session web declare`, which installs
+  nothing). `on` writes `enabled: true`, `off` writes `enabled: false` and
+  keeps the file; each write replaces the file whole, and `--dry-run`
+  prints it and writes nothing. See `docs/configuration.md`.
 
 ### Fixed
 

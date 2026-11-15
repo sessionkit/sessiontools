@@ -308,37 +308,193 @@ def test_the_lock_serialises_the_check_and_the_claim(tmp_path, macos, work, monk
     assert launch.agent.name == "" and f"held by session {SID}" in line
 
 
+#: The seat vendor stub. The holder stays alive until the test touches
+#: `release`, never for a fixed span: the order below has every other launch
+#: check while the holder lives, by construction. The 600 s loop is an
+#: orphan bound only, so a stub cannot outlive a crashed run.
 SEAT_STUB = """#!/usr/bin/env bash
 printf '%%s\\0' "$@" > "%(dir)s/argv.$$"
 printf '%%s' "$CLAUDE_SESSION_ID" > "%(dir)s/sid.$$"
 case " $* " in
-  *" --agents "*) for _ in $(seq 300); do [ -e "%(dir)s/release" ] && exit 0; sleep 0.1; done ;;
+  *" --agents "*) for _ in $(seq 6000); do [ -e "%(dir)s/release" ] && exit 0; sleep 0.1; done ;;
 esac
 """
 
+#: A `sitecustomize` the race test writes into its own tmp dir and puts on
+#: the launches' PYTHONPATH. It acts only in a `python -m sessiontools.cli`
+#: process whose environment names SINGLETON_ORDER_DIR, which only that test
+#: sets. It makes the four launches take the seat's lock in an order the
+#: test chooses, instead of the scheduler's, by waiting on marker files the
+#: other launches write (`<name>.<pid>` in that dir). Every wait is bounded
+#: (60 s); a wait that runs out leaves a `timeout-<name>.<pid>` marker the
+#: test fails on, so a broken order fails, it never hangs.
+#:
+#: - The first launch to reach the lock is ELECTED (an O_EXCL file). It
+#:   takes the lock first and holds it until the others are really
+#:   contending: three refused `flock` tries (`blocked`) in the id-unknown
+#:   case. In the id-known case it waits for the other three to arrive.
+#: - id-unknown: the holder writes its claim (no session id yet, by design)
+#:   and lets the lock go. Then it waits, before it takes the lock again to
+#:   write the id (`_record_id`), until the three others have checked. Each
+#:   of them reads the claim while it has no id.
+#: - id-known: the three others wait, BEFORE they try the lock, until the
+#:   holder has written the id (`recorded`). Then they contend three ways:
+#:   the first of them to get the lock holds it until the other two are
+#:   refused. A launch never waits for `recorded` while it holds the lock:
+#:   the holder needs that lock to record, so that would deadlock.
+#: - The two budgets this test does not test are lifted, in these launches
+#:   only: the seat lock's wait (SEAT_LOCK_WAIT_S) and the box check's
+#:   timeout (BOX_CHECK_TIMEOUT_S). Each has its own in-process test
+#:   (test_busy_seat_lock_starts_plain, test_box_check_timeout_is_unboxed).
+ORDER_SHIM = '''\
+import os
+import sys
+
+DIR = os.environ.get("SINGLETON_ORDER_DIR")
+if DIR and list(getattr(sys, "orig_argv", ())[1:3]) == ["-m", "sessiontools.cli"]:
+    import contextlib
+    import errno
+    import fcntl
+    import time
+    from pathlib import Path
+
+    from sessiontools import start as _start
+    from sessiontools.start import default_seat as _seat
+    from sessiontools.start import holders as _holders
+
+    D = Path(DIR)
+    CASE = os.environ["SINGLETON_ORDER_CASE"]
+    PID = os.getpid()
+    BOUND = 60.0
+    _seat.SEAT_LOCK_WAIT_S = 300.0
+    _seat.BOX_CHECK_TIMEOUT_S = 300.0
+
+    def mark(name):
+        (D / f"{name}.{PID}").write_text("")
+
+    def await_marks(name, count):
+        deadline = time.monotonic() + BOUND
+        while len(list(D.glob(f"{name}.*"))) < count:
+            if time.monotonic() > deadline:
+                mark(f"timeout-{name}")
+                return
+            time.sleep(0.01)
+
+    def first_to(name):
+        try:
+            os.close(os.open(D / name, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except FileExistsError:
+            return False
+        return True
+
+    class _Fcntl:
+        """`holders`' view of fcntl: a refused lock try is marked."""
+
+        def __getattr__(self, name):
+            return getattr(fcntl, name)
+
+        def flock(self, fd, operation):
+            try:
+                return fcntl.flock(fd, operation)
+            except OSError as error:
+                if error.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                    mark("blocked")
+                raise
+
+    _holders.fcntl = _Fcntl()
+    real_locked = _holders.locked
+    state = {"first": True}
+
+    @contextlib.contextmanager
+    def locked(agent, environ=None, wait=_holders.LOCK_WAIT_S):
+        first, state["first"] = state["first"], False
+        elected = first and first_to("elected")
+        if first:
+            mark("arrived")
+            if not elected:
+                await_marks("recorded" if CASE == "id-known" else "holding", 1)
+        with real_locked(agent, environ, wait) as lock:
+            if first and lock.ok:
+                if elected:
+                    mark("holding")
+                    if CASE == "id-unknown":
+                        await_marks("blocked", 3)
+                    else:
+                        await_marks("arrived", 4)
+                elif CASE == "id-known" and first_to("second"):
+                    await_marks("blocked", 2)
+            yield lock
+
+    _holders.locked = locked
+    real_check = _seat.check
+
+    def check(seat, environ=None, **kwargs):
+        found = real_check(seat, environ, **kwargs)
+        if found.holder is not None:
+            mark("checked")
+        elif found.unmeasured:
+            mark("unsure")
+        return found
+
+    _seat.check = check
+    real_record = _start._record_id
+
+    def record_id(*args, **kwargs):
+        if CASE == "id-unknown":
+            await_marks("checked", 3)
+        try:
+            return real_record(*args, **kwargs)
+        finally:
+            mark("recorded")
+
+    _start._record_id = record_id
+'''
+
+
+def marked(order: Path, name: str) -> set[str]:
+    """The pids that wrote `<name>.<pid>` in the race test's order dir."""
+    return {path.name.split(".", 1)[1] for path in order.glob(f"{name}.*")}
+
 
 @on_macos
-def test_simultaneous_bare_starts_give_one_holder(tmp_path):
-    """Four real launches released on one barrier file: exactly one execs
-    the seat (and stays alive until released), three start plain naming it."""
+@pytest.mark.parametrize("case", ["id-unknown", "id-known"])
+def test_simultaneous_bare_starts_give_one_holder(tmp_path, case):
+    """Four real launches contend for the seat at once: exactly one execs
+    the seat (and stays alive until released), and three start plain naming
+    it. The interleaving is forced (ORDER_SHIM), never left to the
+    scheduler, so each case asserts ONE wording:
+
+    - id-unknown: the three check while the holder's claim has no session
+      id yet, the worst case the claim exists for. Each still reads HELD,
+      naming the holder's pid; afterwards the claim names the holder's id.
+    - id-known: the three check after the holder has written its id, and
+      each names it.
+
+    RESIDUAL, named: a waiter's check reads the process table with one `ps`
+    call, bounded at 5 s inside `procs.table`. If that call runs out, the
+    table is empty and that launch starts plain with UNSURE instead of
+    naming the holder. That needs one `ps` to stall for 5 s."""
     record = tmp_path / "record"
     record.mkdir()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "claude").write_text(SEAT_STUB % {"dir": record})
     (bin_dir / "claude").chmod(0o755)
+    order = tmp_path / "order"
+    order.mkdir()
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "sitecustomize.py").write_text(ORDER_SHIM)
     env = clean_env(**seat_env(tmp_path, path=f"{tmp_path / 'stubs'}{os.pathsep}{bin_dir}"
-                               f"{os.pathsep}{os.environ['PATH']}"))
+                               f"{os.pathsep}{os.environ['PATH']}",
+                               SINGLETON_ORDER_DIR=str(order), SINGLETON_ORDER_CASE=case))
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(shim), env.get("PYTHONPATH")]))
     (tmp_path / "work").mkdir()
-    barrier = tmp_path / "go"
-    command = " ".join(f"'{part}'" for part in at_a_terminal())
-    script = f'while [ ! -e "{barrier}" ]; do sleep 0.01; done; exec {command}'
-    runs = [subprocess.Popen(["sh", "-c", script], cwd=tmp_path / "work", env=env,
+    runs = [subprocess.Popen(at_a_terminal(), cwd=tmp_path / "work", env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             for _ in range(4)]
-    time.sleep(0.5)
-    barrier.touch()
     try:
+        # A hang bound only: the order above decides what happens, not this.
         deadline = time.monotonic() + 120
         while sum(run.poll() is not None for run in runs) < 3 and time.monotonic() < deadline:
             time.sleep(0.1)
@@ -346,14 +502,29 @@ def test_simultaneous_bare_starts_give_one_holder(tmp_path):
         (record / "release").touch()
     results = [(run.wait(timeout=60), *run.communicate()) for run in runs]
     assert [code for code, _out, _err in results] == [0, 0, 0, 0], results
+    assert not list(order.glob("timeout-*")), sorted(path.name for path in order.iterdir())
     argvs = {path.name.split(".")[1]: path.read_text().split("\0")[:-1]
              for path in record.glob("argv.*")}
     seats = [pid for pid, argv in argvs.items() if "--agent" in argv]
     assert len(seats) == 1, argvs
-    holder_sid = (record / f"sid.{seats[0]}").read_text()
-    held = [err for _code, _out, err in results if "is held by session" in err]
-    assert len(held) == 3
-    assert all(f"held by session {holder_sid} (pid {seats[0]}" in err for err in held)
+    holder = seats[0]
+    holder_sid = (record / f"sid.{holder}").read_text()
+    waiters = set(argvs) - {holder}
+    assert len(waiters) == 3 and marked(order, "holding") == {holder}, argvs
+    assert marked(order, "checked") == waiters                   # each read HELD
+    assert not marked(order, "unsure")
+    held = [err for _code, _out, err in results if "is held by " in err]
+    assert len(held) == 3, results
+    if case == "id-unknown":
+        assert waiters <= marked(order, "blocked")       # all three contended the lock
+        assert all(f"is held by a session (id not known yet) (pid {holder}" in err
+                   for err in held), held
+        claim = json.loads(holders.claim_paths(SEAT, env)[1].read_text())
+        assert claim["pid"] == int(holder) and claim["sessionId"] == holder_sid
+    else:
+        assert len(waiters & marked(order, "blocked")) >= 2     # they contended three ways
+        assert all(f"is held by session {holder_sid} (pid {holder}" in err
+                   for err in held), held
 
 
 # ---------- the gates --------------------------------------------------------------

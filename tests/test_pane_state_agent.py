@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from sessiontools import cli, pane_state
+from sessiontools import cli, pane_state, service_file, settings
 from sessiontools import pane_state_agent as agent
 
 REPO = Path(__file__).resolve().parent.parent
@@ -248,6 +248,7 @@ def test_the_program_falls_back_to_session_on_path_resolved(tmp_path, monkeypatc
 def assert_nothing_changed(fence):
     assert not agent.plist_path().exists()
     assert not set(verbs(fence["calls"])) & CHANGING
+    assert not settings.services_dir().exists()            # no service file, no folder
 
 
 def test_on_refuses_off_macos(fence, capsys, monkeypatch):
@@ -437,6 +438,143 @@ def test_off_dry_run_removes_nothing(fence, capsys):
     assert rc == 0 and "would remove" in out and "(loaded)" in out
     assert agent.plist_path().exists()
     assert not set(verbs(fence["calls"])) & CHANGING
+
+
+# --- the service file (ST-289) ------------------------------------------------------
+
+SERVICE_KEYS = ["service", "name", "label", "enabled", "install", "uninstall", "description",
+                "note"]
+
+
+def service_json() -> Path:
+    return settings.services_dir() / "pane-state.json"
+
+
+def test_the_service_record_carries_every_designed_key():
+    r = agent.service_record(True)
+    assert list(r) == SERVICE_KEYS
+    assert r == {"service": 1, "name": "pane-state", "label": "dev.sessionkit.tools.pane-state",
+                 "enabled": True, "install": "session pane-state agent on",
+                 "uninstall": "session pane-state agent off",
+                 "description": "each seat's BUSY / FREE / UNKNOWN, on its tmux pane",
+                 "note": "runs only in a logged-in GUI session (LimitLoadToSessionType Aqua)"}
+    assert agent.service_record(False)["enabled"] is False
+    assert service_file.check(r) == []
+
+
+def test_the_service_facts_derive_from_the_job():
+    """name from the label (prefix stripped), install from PROG, the note from
+    the plist's own session type, the description from the VERBS line."""
+    r = agent.service_record(True)
+    assert r["name"] == agent.LABEL.removeprefix("dev.sessionkit.tools.") == agent.SERVICE
+    assert r["install"] == f"{agent.PROG} on" and r["uninstall"] == f"{agent.PROG} off"
+    data = agent.plist(Path("/x/bin/session"), Path("/x/bin/tmux"))
+    assert data["LimitLoadToSessionType"] == agent.SESSION_TYPE == "Aqua"
+    assert dict(cli.VERBS)["pane-state"].startswith(r["description"])
+
+
+def test_on_then_off_leaves_one_file_enabled_true_then_false(fence, capsys):
+    rc, out, err = run(["on"], capsys)
+    assert rc == 0, out + err
+    assert f"service {service_json()} (enabled: true)" in out
+    assert sorted(settings.services_dir().iterdir()) == [service_json()]
+    on = json.loads(service_json().read_text())
+    assert list(on) == SERVICE_KEYS and on["enabled"] is True
+    assert service_json().read_text() == service_file.render(agent.service_record(True))
+    rc, out, err = run(["off"], capsys)
+    assert rc == 0, out + err
+    assert f"service {service_json()} (enabled: false)" in out
+    assert sorted(settings.services_dir().iterdir()) == [service_json()]     # kept
+    off = json.loads(service_json().read_text())
+    assert off == {**on, "enabled": False}
+
+
+def test_the_service_file_is_written_beside_the_plist_before_the_load(fence, capsys):
+    """design 2.1: the file goes with the plist, before bootout/bootstrap."""
+    seen = {}
+    fence["state"]["on_bootstrap"] = lambda data: (seen.update(file=service_json().exists()),
+                                                   fence["take_lock"]())
+    assert run(["on"], capsys)[0] == 0
+    assert seen == {"file": True}
+
+
+def test_the_service_file_never_lands_under_settings(fence, capsys):
+    assert run(["on"], capsys)[0] == 0
+    assert not settings.package_dir(settings.PACKAGES["session"]).exists()
+    assert settings.services_dir().parent == settings.kit_root() / "tools"
+
+
+def test_off_with_no_file_writes_one_disabled(fence, capsys):
+    assert not service_json().exists()
+    rc, out, _ = run(["off"], capsys)
+    assert rc == 0 and "was not loaded" in out
+    assert json.loads(service_json().read_text())["enabled"] is False
+
+
+def test_a_failed_on_bootstrap_leaves_the_file_enabled(fence, capsys):
+    fence["state"]["bootstrap_fail"] = 2
+    assert run(["on"], capsys)[0] == 1
+    assert json.loads(service_json().read_text())["enabled"] is True
+
+
+@pytest.mark.parametrize("verb", ["on", "off"])
+def test_a_dry_run_prints_the_file_and_writes_none(fence, capsys, verb):
+    rc, out, err = run([verb, "--dry-run"], capsys)
+    assert rc == 0, out + err
+    rec = agent.service_record(verb == "on")
+    block = f"service would write {service_json()}:\n{service_file.render(rec)}"
+    assert block in out + "\n"
+    assert not settings.services_dir().exists()
+    assert not set(verbs(fence["calls"])) & CHANGING
+
+
+def test_off_dry_run_says_nothing_was_removed_or_written(fence, capsys):
+    rc, out, _ = run(["off", "--dry-run"], capsys)
+    assert rc == 0
+    assert out.rstrip().splitlines()[-1] == ("dry run: nothing was removed or written, and no "
+                                             "launchctl verb that changes anything ran")
+
+
+def unwritable_services(fence):
+    """A file where the services folder goes: every write fails, for real."""
+    settings.services_dir().parent.mkdir(parents=True, exist_ok=True)
+    settings.services_dir().write_text("not a folder\n")
+
+
+def test_a_failed_service_write_on_still_loads_the_job_and_exits_1(fence, capsys):
+    unwritable_services(fence)
+    rc, out, err = run(["on"], capsys)
+    assert rc == 1, out + err
+    line = next(x for x in out.splitlines() if x.startswith("service could not write "))
+    assert line.startswith(f"service could not write {service_json()}: ")
+    assert line.endswith("; the previous file is unchanged")
+    assert agent.LABEL in fence["loaded"]                               # the act is done
+    assert [c[0] for c in fence["calls"] if c[0] in CHANGING] == ["bootout", "bootstrap"]
+    assert f"on     {agent.LABEL}: pid 4242" in out
+    assert agent.plist_path().exists()
+
+
+def test_a_failed_service_write_on_off_still_boots_out_and_exits_1(fence, capsys):
+    assert run(["on"], capsys)[0] == 0
+    before = service_json().read_bytes()
+    os.chmod(settings.services_dir(), 0o500)
+    try:
+        rc, out, _ = run(["off"], capsys)
+    finally:
+        os.chmod(settings.services_dir(), 0o755)
+    assert rc == 1
+    assert "service could not write " in out and "the previous file is unchanged" in out
+    assert agent.LABEL not in fence["loaded"] and not agent.plist_path().exists()
+    assert service_json().read_bytes() == before                         # enabled true, whole
+
+
+def test_the_help_and_the_page_name_the_file_and_quote_the_failure_line():
+    line = service_file.COULD_NOT_WRITE.format(path="PATH", reason="REASON")
+    page = (REPO / "docs" / "pane-state-signal.md").read_text()
+    for text in (agent.EPILOG, page):
+        assert "~/.sessionkit/tools/services/pane-state.json" in text
+        assert line in text
+    assert "or the service file" in agent.EPILOG
 
 
 # --- status ----------------------------------------------------------------------

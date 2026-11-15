@@ -799,37 +799,14 @@ def test_the_agent_anchors_resolve():
         assert "session path agent" in text or "agent NAME" in text
 
 
-def _newest_changelog_entries(text: str) -> str:
-    """The newest section of CHANGELOG.md that holds entries: [Unreleased]
-    while it has any, else the release just below it. The release stamp
-    (scripts/release.py) puts a fresh, empty [Unreleased] above the stamped
-    section, so a release tip carries the entries one section down."""
-    sections = text.split("\n## [")[1:]
-    assert sections and sections[0].startswith("Unreleased]"), "no [Unreleased] on top"
-    for section in sections:
-        body = section.partition("\n")[2]
-        if body.strip():
-            return body
-    return ""
-
-
-def test_the_changelog_names_it_in_its_newest_entries():
-    newest = _newest_changelog_entries((ROOT / "CHANGELOG.md").read_text())
-    assert "`session path agent NAME`" in newest
-    assert "paths.agent_report" in newest
-
-
-def test_the_newest_entries_survive_the_release_stamp():
-    """A stamped CHANGELOG (empty [Unreleased], then [x.y.z]) and an
-    unstamped one give the same entries; an empty [Unreleased] never wins."""
-    head = "# Changelog\n\nPreamble.\n\n## [Unreleased]\n\n"
-    entries = "### Added\n\n- `session path agent NAME`\n"
-    older = "\n## [0.0.1] - 2030-06-09\n\n- older\n"
-    unstamped = head + entries + older
-    stamped = head + "## [0.0.2] - 2030-12-08\n\n" + entries + older
-    assert _newest_changelog_entries(unstamped).strip() == entries.strip()
-    assert _newest_changelog_entries(stamped).strip() == entries.strip()
-    assert "older" not in _newest_changelog_entries(stamped)
+def test_the_changelog_names_it():
+    """CHANGELOG.md names the agent path and its report somewhere, in any
+    section, released or not. A release stamp, a later [Unreleased] entry
+    or a second release moves the entries down the file but never drops
+    them, so none of those turns this red."""
+    text = (ROOT / "CHANGELOG.md").read_text()
+    assert "`session path agent NAME`" in text
+    assert "paths.agent_report" in text
 
 
 def test_completion_offers_the_leaves():

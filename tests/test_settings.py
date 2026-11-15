@@ -658,9 +658,10 @@ def test_every_tool_this_package_reads_is_in_the_list():
     """Each module constant that names a settings tool, and each schema the
     repo ships under settings/, is in settings.TOOLS: a new tool here cannot
     miss the help again."""
-    from sessiontools import busy, operator, snapshot
+    from sessiontools import busy, operator, settle_settings, snapshot
     from sessiontools.start import claude_settings
-    own = {busy.TOOL, snapshot.TOOL, operator.OPERATOR_SETTINGS_TOOL, claude_settings.TOOL}
+    own = {busy.TOOL, snapshot.TOOL, operator.OPERATOR_SETTINGS_TOOL, claude_settings.TOOL,
+           settle_settings.TOOL, *settings.OWN_SCHEMAS}
     shipped = {p.name.removesuffix(".schema.json")
                for p in (ROOT / "settings").glob("*.schema.json")}
     assert shipped, "no schema found under settings/: the pin would prove nothing"

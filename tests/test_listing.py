@@ -57,7 +57,8 @@ def test_json_carries_every_key_callers_read_and_nulls_what_is_not_ported(fleet)
     assert list(row) == ["session_id", "short", "pid", "name", "seat", "agent", "status", "state",
                          "repo", "project", "cwd", "version", "tmux_pane", "tmux_socket",
                          "runtime_s", "idle_s", "recap", "context_used", "context_peak",
-                         "context_window", "context_pct", "context_model"]
+                         "context_window", "context_pct", "context_model",
+                         "last_request_at", "cache_age_s"]          # ST-326: appended
     assert (row["agent"], row["status"], row["pid"], row["tmux_pane"]) == ("bob", "busy", 100, "%11")
     assert (row["runtime_s"], row["idle_s"]) == (3600, 600)
     assert row["repo"] == row["project"] == REPO
@@ -74,7 +75,8 @@ def test_the_table_parses_the_way_seat_hearing_reads_it(fleet):
 def test_context_keys_are_null_until_asked_for(fleet):
     row = json.loads(listing.render_json(listing.rows(), now=NOW))[0]
     assert all(row[k] is None for k in ("context_used", "context_peak", "context_window",
-                                        "context_pct", "context_model"))
+                                        "context_pct", "context_model",
+                                        "last_request_at", "cache_age_s"))
 
 
 def test_with_context_fills_the_keys_and_the_column(fleet, monkeypatch):
@@ -152,11 +154,14 @@ def test_sonnet_5_5_has_a_window_in_context_and_in_list(fleet, monkeypatch, caps
     assert code == 0 and [ln.split()[-1] for ln in out.splitlines()[2:]] == ["7%", "-"]
 
 
-def test_session_context_never_guesses_a_window(fleet, monkeypatch, capsys):
+def test_session_context_marks_an_assumed_window_and_never_stores_one(fleet, monkeypatch, capsys):
+    """An unknown model shows its usage against 1M, marked `?` (the
+    maintainer's ruling); the JSON still carries no window and no pct."""
     _transcript(fleet, monkeypatch, "dead-1234", "/gone",
                 {"model": "claude-unmapped", "usage": {"input_tokens": 5000}})
     code, out, _ = _run(["context", "dead-12"], capsys)        # not live: an id prefix
-    assert code == 0 and out.startswith("Context: 5K / ? - no known window for claude-unmapped")
+    assert code == 0 and out.startswith(
+        "Context: 5K / 1.00M? (0%?) - no known window for claude-unmapped, so 1M is assumed")
     assert _run(["context", "dead-12", "--max", "10000"], capsys)[1].startswith(
         "Context: 5K / 10K (50%)")                            # asserted, not guessed
     assert json.loads(_run(["context", "dead-12", "--json"], capsys)[1])["pct"] is None
@@ -370,3 +375,216 @@ def test_get_a_property_with_no_value_is_exit_2(fleet):
     with pytest.raises(get_mod.GetError) as e:
         get_mod.get(rows, "pane", "bob", False)
     assert e.value.code == 2 and "no pane known" in str(e.value)
+
+
+# --- ST-285 do-002: launch_command and launch_dir, read from the launch record
+
+THREE_KEYS = "vendor: claude --session-id 73f2f616-aaaa\nstart: session start bob\ncwd: /w\n"
+
+
+def _record(fleet, monkeypatch, text, sid="73f2f616-aaaa"):
+    monkeypatch.setenv("SESSIONS_DIR", str(fleet / "sessions"))
+    launch = fleet / "sessions" / sid / "launch"
+    launch.mkdir(parents=True)
+    (launch / "command").write_text(text)
+
+
+def test_get_launch_command_and_dir_print_the_recorded_keys(fleet, monkeypatch):
+    _record(fleet, monkeypatch, THREE_KEYS
+            + "launch_command: session start bob --directory '/a b' 'hello there'\n"
+            + "launch_dir: '/home/me/my dir'\n")
+    rows = listing.rows()
+    assert get_mod.get(rows, "launch_command", "bob", False) == (
+        "session start bob --directory '/a b' 'hello there'")
+    assert "--session-id" not in get_mod.get(rows, "launch_command", "bob", False)
+    assert get_mod.get(rows, "launch_dir", "bob", False) == "/home/me/my dir"   # un-quoted
+    assert get_mod.get(rows, "cwd", "bob", False) == CWD                        # cwd is still NOW's
+    assert json.loads(get_mod.get(rows, "launch_dir", "bob", True)) == {
+        "session_id": "73f2f616-aaaa", "name": "bob-f1", "launch_dir": "/home/me/my dir"}
+    assert json.loads(get_mod.get(rows, "launch_command", "bob", True))["launch_command"] \
+        == "session start bob --directory '/a b' 'hello there'"
+
+
+@pytest.mark.parametrize("prop", ["launch_command", "launch_dir"])
+def test_get_launch_props_of_a_pre_change_record_are_exit_2_with_no_fallback(
+        fleet, monkeypatch, prop):
+    _record(fleet, monkeypatch, THREE_KEYS)       # the 3-key command of an older seat
+    with pytest.raises(get_mod.GetError) as e:
+        get_mod.get(listing.rows(), prop, "bob", False)
+    assert e.value.code == 2
+    assert str(e.value) == (f"session get: no {prop} recorded for bob-f1 "
+                            "(launched before it was recorded)")
+    assert "--session-id" not in str(e.value) and "claude" not in str(e.value)
+    with pytest.raises(get_mod.GetError) as e:     # --json refuses the same way
+        get_mod.get(listing.rows(), prop, "bob", True)
+    assert e.value.code == 2
+
+
+@pytest.mark.parametrize("prop", ["launch_command", "launch_dir"])
+def test_get_launch_props_with_no_launch_dir_are_exit_2(fleet, monkeypatch, prop):
+    monkeypatch.setenv("SESSIONS_DIR", str(fleet / "sessions"))     # nothing under it
+    with pytest.raises(get_mod.GetError) as e:
+        get_mod.get(listing.rows(), prop, "alice", False)
+    assert e.value.code == 2 and f"no {prop} recorded for alice-c5" in str(e.value)
+    # a launch/ dir holding no command file is the same
+    (fleet / "sessions" / "a907dd33-bbbb" / "launch").mkdir(parents=True)
+    with pytest.raises(get_mod.GetError) as e:
+        get_mod.get(listing.rows(), prop, "alice", False)
+    assert e.value.code == 2
+
+
+def test_get_launch_props_read_the_seats_own_session_dir(fleet, monkeypatch):
+    _record(fleet, monkeypatch, THREE_KEYS + "launch_command: session start alice\n"
+            "launch_dir: /x\n", sid="a907dd33-bbbb")
+    with pytest.raises(get_mod.GetError):          # bob has no record of his own
+        get_mod.get(listing.rows(), "launch_command", "bob", False)
+    assert get_mod.get(listing.rows(), "launch_command", "alice", False) == "session start alice"
+
+
+def test_get_table_pads_the_prop_column_to_the_longest_name():
+    lines = get_mod.table().splitlines()
+    width = max(len(p) for p, _ in get_mod.PROPS)
+    assert width >= len("launch_command")
+    assert lines[0].startswith(f"{'PROP':{width}} SETTABLE")
+    for line, (prop, src) in zip(lines[1:], get_mod.PROPS):
+        assert line == f"{prop:{width}} {'no':9} {src}"
+    assert any(l.startswith("launch_command ") for l in lines)
+    assert any(l.startswith("launch_dir ") for l in lines)
+
+
+def test_get_help_states_the_resume_rule():
+    doc = get_mod.__doc__
+    assert "RESUMED seat reports its ORIGINAL" in doc and "never a fallback" in doc
+
+
+# --- ST-326: the cache clock, last_request_at and cache_age_s -------------------------
+# Synthetic transcripts: a timestamp and token counts, nothing else.
+
+#: Every `session list --json` key before ST-326, in order: the additive pin.
+PRE_ST326_KEYS = ["session_id", "short", "pid", "name", "seat", "agent", "status", "state",
+                  "repo", "project", "cwd", "version", "tmux_pane", "tmux_socket",
+                  "runtime_s", "idle_s", "recap", "context_used", "context_peak",
+                  "context_window", "context_pct", "context_model"]
+
+
+def _iso(epoch: float) -> str:
+    from datetime import UTC, datetime
+    return datetime.fromtimestamp(epoch, UTC).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z")
+
+
+def _timed_transcript(fleet, monkeypatch, sid, *rows):
+    """ROWS are (used, epoch seconds or None) usage rows, then a user line."""
+    projects = fleet / "projects"
+    monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(projects))
+    d = projects / window.encode_dir(CWD)
+    d.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for used, t in rows:
+        obj = {"type": "assistant",
+               "message": {"model": "claude-opus-5-5", "usage": {"input_tokens": used}}}
+        if t is not None:
+            obj["timestamp"] = _iso(t)
+        lines.append(json.dumps(obj))
+    lines.append(json.dumps({"type": "user", "timestamp": _iso(NOW), "message": {"content": "x"}}))
+    (d / f"{sid}.jsonl").write_text("\n".join(lines) + "\n")
+
+
+def test_list_json_is_additive_every_old_key_present_and_unchanged(fleet, monkeypatch):
+    """The old keys keep their order and their values; the two new ones
+    come after them. Computed both ways from one fleet: the old key set is
+    a subset of the new one, value for value."""
+    _timed_transcript(fleet, monkeypatch, "73f2f616-aaaa", (250_000, NOW - 4000))
+    rows = listing.with_context(listing.rows())
+    bob, alice = json.loads(listing.render_json(rows, now=NOW))
+    assert list(bob)[:len(PRE_ST326_KEYS)] == PRE_ST326_KEYS
+    assert set(PRE_ST326_KEYS) < set(bob)
+    assert (bob["context_used"], bob["context_pct"], bob["idle_s"]) == (250_000, 25, 600)
+    assert (bob["last_request_at"], bob["cache_age_s"]) == (_iso(NOW - 4000), 4000)
+    assert (alice["last_request_at"], alice["cache_age_s"]) == (None, None)   # no transcript
+
+
+@pytest.mark.parametrize("gap_s", [3540, 3599, 3600, 3601, 3660])
+def test_list_json_cache_age_reads_the_last_request_either_side_of_the_hour(
+        fleet, monkeypatch, gap_s):
+    """Not the sidecar's updatedAt (idle_s is 600 here for every gap): the
+    last usage row's timestamp, which a trailing user line does not move."""
+    _timed_transcript(fleet, monkeypatch, "73f2f616-aaaa",
+                      (100_000, NOW - gap_s - 900), (120_000, NOW - gap_s))
+    bob = json.loads(listing.render_json(listing.with_context(listing.rows()), now=NOW))[0]
+    assert (bob["cache_age_s"], bob["idle_s"]) == (gap_s, 600)
+
+
+def test_list_json_cache_age_is_null_when_the_last_row_has_no_timestamp(fleet, monkeypatch):
+    _timed_transcript(fleet, monkeypatch, "73f2f616-aaaa", (100_000, NOW - 60), (120_000, None))
+    bob = json.loads(listing.render_json(listing.with_context(listing.rows()), now=NOW))[0]
+    assert (bob["context_used"], bob["last_request_at"], bob["cache_age_s"]) == (120_000, None, None)
+
+
+def test_the_table_is_unchanged_by_the_clock(fleet, monkeypatch):
+    """R5: JSON only. The header and every row read as they did."""
+    _timed_transcript(fleet, monkeypatch, "73f2f616-aaaa", (250_000, NOW - 4000))
+    out = listing.render_table(listing.with_context(listing.rows()), now=NOW).splitlines()
+    assert out[0].split() == ["SHORT", "NAME", "SEAT", "STATUS", "STATE", "REPO", "PANE",
+                              "RUNTIME", "IDLE", "CONTEXT"]
+    assert "4000" not in "\n".join(out) and "Z" not in out[2]
+
+
+def test_session_list_json_carries_the_clock_end_to_end(fleet, monkeypatch, capsys):
+    _timed_transcript(fleet, monkeypatch, "73f2f616-aaaa", (250_000, NOW - 4000))
+    monkeypatch.setattr(listing.time, "time", lambda: NOW)
+    code, out, _ = _run(["list", "--json", "--fresh"], capsys)
+    assert code == 0 and json.loads(out)[0]["cache_age_s"] == 4000
+    code, out, _ = _run(["list", "--json", "--fresh", "--no-context"], capsys)
+    assert code == 0 and json.loads(out)[0]["cache_age_s"] is None
+
+
+def test_get_reads_last_request_at_and_cache_age_s_from_the_transcript(fleet, monkeypatch):
+    _timed_transcript(fleet, monkeypatch, "73f2f616-aaaa", (250_000, NOW - 4000))
+    monkeypatch.setattr(get_mod.time, "time", lambda: NOW)
+    rows = listing.rows()                                  # no CONTEXT: get reads on ask
+    assert all(r.fullness is None for r in rows)
+    assert get_mod.get(rows, "last_request_at", "bob", False) == _iso(NOW - 4000)
+    assert get_mod.get(rows, "cache_age_s", "bob", False) == "4000"
+    assert json.loads(get_mod.get(rows, "cache_age_s", "bob", True)) == {
+        "session_id": "73f2f616-aaaa", "name": "bob-f1", "cache_age_s": 4000}
+    assert json.loads(get_mod.get(rows, "last_request_at", "bob", True))["last_request_at"] \
+        == _iso(NOW - 4000)
+
+
+def test_get_a_fresh_request_is_age_zero_not_no_value(fleet, monkeypatch):
+    _timed_transcript(fleet, monkeypatch, "73f2f616-aaaa", (250_000, NOW))
+    monkeypatch.setattr(get_mod.time, "time", lambda: NOW)
+    assert get_mod.get(listing.rows(), "cache_age_s", "bob", False) == "0"
+
+
+@pytest.mark.parametrize("prop", ["last_request_at", "cache_age_s"])
+def test_get_cache_props_with_no_clock_are_exit_2(fleet, monkeypatch, prop):
+    _timed_transcript(fleet, monkeypatch, "73f2f616-aaaa", (250_000, None))
+    with pytest.raises(get_mod.GetError) as e:
+        get_mod.get(listing.rows(), prop, "bob", False)
+    assert e.value.code == 2
+    with pytest.raises(get_mod.GetError) as e:            # alice: no transcript at all
+        get_mod.get(listing.rows(), prop, "alice", False)
+    assert e.value.code == 2
+
+
+def test_get_lists_the_cache_props_after_the_old_ones():
+    props = [p for p, _ in get_mod.PROPS]
+    assert props[-2:] == ["last_request_at", "cache_age_s"]
+    assert props[:-2] == ["id", "short", "pid", "name", "agent", "cwd", "status", "state",
+                          "idle", "version", "pane", "model", "launch_command", "launch_dir"]
+    assert all(src.startswith("the transcript:") for p, src in get_mod.PROPS
+               if p in get_mod.CACHE_PROPS)
+
+
+@pytest.mark.parametrize("argv", [["list", "--help"], ["get", "--help"]])
+def test_help_names_the_new_keys_and_the_margin(argv, capsys):
+    from sessiontools import cli
+    with pytest.raises(SystemExit):
+        cli.main(argv)
+    out = " ".join(capsys.readouterr().out.split())
+    for words in ("last_request_at", "cache_age_s", "ISO-8601 UTC", "response's END",
+                  "runs from the REQUEST", "keep a margin", "1 h, measured on ms2",
+                  "nothing acts on it"):
+        assert words in out, (argv, words)

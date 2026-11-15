@@ -17,6 +17,8 @@ switch, closing idle seats and saying a seat has settled).
 - `context`: how full a seat's context window is, and what filled it
 - `ledger`: every file a session read and every command it ran, with the
   tokens each put in the window
+- `commands`: the Bash commands a seat's sessions ran, cut down to the
+  programs
 - `start`: launch a session from an agent file; see [session start][start]
 - `identity`: who a launched session is, as at launch; see
   [the identity block][identity]
@@ -39,6 +41,9 @@ switch, closing idle seats and saying a seat has settled).
   [closing idle seats][reap]
 - `park`: say this seat has settled, or read that back; see
   [saying a seat has settled][park]
+- `respawn`: restart a seat in its own pane with the `session start` line
+  it was launched with; a plan unless `--go`, which acts on your own pane
+  only; see [restarting a seat][respawn]
 - `path`: where tools keeps each leaf of its state, for scripts and
   peers; see [where tools keeps its state][state-paths]
 - `completion`: a completion script for bash or zsh; see
@@ -49,7 +54,9 @@ switch, closing idle seats and saying a seat has settled).
 ## Each verb's form and one example
 
 - `session list [--json] [--no-context] [--pane NAME] [--fresh]
-  [--no-recap]`: the live sessions, one row each.
+  [--no-recap] [--past SEAT]`: the live sessions, one row each. `--past
+  SEAT` lists instead every session recorded as SEAT on this host, oldest
+  first: id, start, last write, turns.
 
   ```sh
   session list --no-context
@@ -77,6 +84,20 @@ switch, closing idle seats and saying a seat has settled).
 
   ```sh
   session ledger --short
+  ```
+
+- `session commands [TARGET] [--count|--raw|--json] [--since WHEN]
+  [--until WHEN] [--grep RE] [--width N]`: TARGET is a seat (every
+  session recorded as it) or a session id; the default view is one line
+  per Bash call, its programs without their `VAR=value` settings.
+  `--count` is how often each program ran; `--raw` is each command as it
+  was written; `--json` is one record per program run. `--since` and
+  `--until` take a WHEN (`7d`, `48h`, a date). `--grep RE` keeps the calls
+  with a program that matches. `--width N` cuts the default line (110;
+  `0` is whole).
+
+  ```sh
+  session commands doctor --since 7d --count
   ```
 
 - `session start [AGENT] ...`: launch a session from an agent file. With
@@ -187,6 +208,19 @@ switch, closing idle seats and saying a seat has settled).
   session park --check
   ```
 
+- `session respawn [SID] [--go]`: with no SID, the seat in this tmux
+  pane; a SID is a session id or a prefix of at least 8 characters, never
+  a name. It prints the plan and touches nothing unless `--go`, which acts
+  on the pane you run it in and no other (a SID naming another seat's pane
+  is refused). Only a seat started with `session start` has a line to
+  replay; anything else is refused. It replays the recorded
+  `launch_command`, never `pane_start_command`, and logs to `respawn.log`
+  before the kill. A model that has drifted is shown, not refused.
+
+  ```sh
+  session respawn
+  ```
+
 - `session path [LEAF [NAME]] [--json] [--config]`: one absolute path,
   the folder tools uses for LEAF on this host (`state`, `sessions`,
   `seats`, `agent`, `backups`, `sound` or `log`); NAME joins a session id
@@ -249,6 +283,15 @@ switch, closing idle seats and saying a seat has settled).
 
   ```sh
   session web serve
+  ```
+
+- `session web declare [--dry-run]`: writes the front door's service file,
+  `~/.sessionkit/tools/services/web.json`, so `sessionkit service list`
+  shows it. It installs nothing and starts nothing: it only declares
+  ([the service file][web-declare]).
+
+  ```sh
+  session web declare
   ```
 
 ## Gone on purpose
@@ -423,6 +466,26 @@ More: the claim, every line word for word, tmux and the dry run are in
   `idle`. STATUS and `status` keep the harness's own word.
 - `--no-context` skips CONTEXT (a transcript read per seat): `-` cells,
   null keys.
+- The same transcript read gives two JSON keys, the cache clock, and no
+  table column:
+  - `last_request_at`: the `timestamp` of the seat's LAST usage row with a
+    real model id, as ISO-8601 UTC ending `Z`, such as
+    `2030-06-09T02:45:11.553Z`. A `<synthetic>` row is Claude Code's own
+    message, not an API request, so it never moves this clock (it would
+    make the cache look younger than it is).
+  - `cache_age_s`: the whole seconds from `last_request_at` to now,
+    never negative.
+
+  Both are null with `--no-context`, or when the last real-model usage row
+  has no readable timestamp (or there is none). `cache_age_s` is measured
+  when the list prints, so a row served from [the list cache][cache] never
+  carries a stale age.
+- **Keep a margin.** That timestamp is the response's END, but the prompt
+  cache's TTL runs from the REQUEST, so the cache is older than
+  `cache_age_s` says. The prompt cache measured on ms2 is 1 h. This is
+  the clock the cache keeps; `idle_s` (the sidecar's) is not. Both keys
+  are readings only: nothing in sessiontools acts on them (not `reap`),
+  and [pane-state][pane-state]'s BUSY says nothing about cache warmth.
 - `--pane NAME` prints the pane id of the session matching NAME, or
   exits 1 when none does.
 - `--fresh` computes now instead of reading the shared snapshot.
@@ -433,9 +496,21 @@ More: the claim, every line word for word, tmux and the dry run are in
 ## `session get`
 
 - Bare `session get` lists the properties: `id`, `short`, `pid`,
-  `name`, `agent`, `cwd`, `status`, `state`, `idle`, `version`, `pane`
-  and `model`.
-- `model` reads the transcript (the last real model id). The rest come
+  `name`, `agent`, `cwd`, `status`, `state`, `idle`, `version`, `pane`,
+  `model`, `launch_command`, `launch_dir`, `last_request_at` and
+  `cache_age_s`.
+- `last_request_at` and `cache_age_s` read the transcript, only when asked
+  for, like `model`: the [cache clock](#session-list), with the same
+  margin. No real-model usage row with a readable timestamp is exit 2.
+- `model` reads the transcript (the last real model id). `launch_command`
+  and `launch_dir` read the seat's launch record
+  (`<session dir>/launch/command`): the `session start` line as it was
+  ENTERED, and the directory it was entered from. `cwd` stays where the
+  agent is now. A seat launched before they were recorded, or with no
+  `launch/` dir, has no value: exit 2, and it never falls back to the
+  evaluated `start:` or `vendor:` line. A RESUMED seat reports its
+  ORIGINAL `launch_command`, or none; the resume line is never recorded,
+  so respawning one starts a fresh seat of the same agent. The rest come
   from the live listing, read fresh each call, never from the cache.
 - No SEAT means this session, from the environment.
 - Exit 0 found; 1 unknown PROP; 2 no such seat, or no value for PROP.
@@ -471,7 +546,8 @@ More: the claim, every line word for word, tmux and the dry run are in
   figure; `?` is unknown, never a guess.
 - `--json` with a view prints that view as one JSON document, each row
   with `exact` and `fitted`; `--parts --json` carries `band` (`ok`,
-  `near`, `over`, or null with no settle threshold).
+  `near`, `over`, or null with no settle threshold: no layer sets
+  `settle.soft.at`).
 - The bare `--json` carries `band` too, without the `--parts` fold.
 - `--peak` belongs to the one-liner and `--max` to the one-liner and
   `--parts`; with another view either is refused (exit 2).
@@ -562,7 +638,46 @@ each time. Every room behind the door gets the same login.
 - **Where they are kept:** `~/.sessionkit/tools/web/passkeys.json` (0600):
   each passkey's public key, never a secret.
 
+## `session web declare`: the front door's service file
+
+PROPOSED. `sessionkit service list` finds each tools service by its file
+in `~/.sessionkit/tools/services/`. The front door has no launchd job, so
+nothing would write its file; `declare` does.
+
+- **What it writes:** `~/.sessionkit/tools/services/web.json`, and nothing
+  else. It never creates or touches `~/.sessionkit/tools/web/`.
+
+  ```sh
+  session web declare
+  ```
+
+- **What the file says:** `run: ["session", "web", "serve"]` (a program you
+  run in the foreground, so no `label`), `enabled: false` always, `install:
+  "session web declare"`, the port `serve` listens on (8750) and its bind
+  address (`127.0.0.1`). There is no `uninstall`: there is nothing to
+  remove.
+- **Why `install` is not `serve`:** the kit's `install` runs the owner's
+  command. `serve` would start the front door in the foreground and block,
+  and the kit never starts a `run` service. `declare` returns at once, and
+  running it is all that installing a `run` service means.
+- **Run it again** and it writes the same bytes. A hand-edited file is
+  replaced whole.
+- **To see the file first,** without writing anything:
+
+  ```sh
+  session web declare --dry-run
+  ```
+
+- **If the write fails,** it prints this line and exits 1:
+
+  ```text
+  service could not write PATH: REASON; the previous file is unchanged
+  ```
+
+- **To run the front door,** `serve` (above). `declare` starts nothing.
+
 [owner]: #whose-command-this-is
+[web-declare]: #session-web-declare-the-front-doors-service-file
 [settings]: settings.md
 [web-settings]: #session-web-the-settings-page
 [web-passkeys]: #session-web-a-passkey-on-the-front-door
@@ -578,6 +693,7 @@ each time. Every room behind the door gets the same login.
 [cache]: list-snapshot-cache.md
 [park]: session-park.md
 [reap]: session-reap.md
+[respawn]: session-respawn.md
 [completion]: shell-completion.md
 [state-paths]: tools-state-paths.md
 [state-migrate]: tools-state-migrate.md

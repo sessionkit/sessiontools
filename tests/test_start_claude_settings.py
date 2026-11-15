@@ -311,3 +311,95 @@ def test_a_live_launch_writes_the_file_and_never_the_user_file(tmp_path):
                                             **TUI}
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not (home / ".claude").exists()
+
+
+# --- compaction: autoCompactWindow and idleCompaction (ST-78 do-003) -------------
+
+def test_both_compaction_keys_render_when_set(tree):
+    """Both keys reach the door under Claude's own names, `false` included:
+    a false is a value, not an unset."""
+    w(kit(tree) / "claude-code.json", {"autoCompactWindow": 400000, "idleCompaction": False})
+    rendered = cs.render(settings.resolve(TOOL, None))
+    assert rendered.data == {"autoCompactWindow": 400000, "idleCompaction": False}
+    assert rendered.notes == []
+    origin = str(kit(tree) / "claude-code.json")
+    assert rendered.origins["idleCompaction"] == ("host", origin)
+
+
+def test_both_compaction_keys_are_omitted_when_unset(tree):
+    """Unset (no key, or a null) is not rendered: Claude's own default stands."""
+    w(kit(tree) / "claude-code.json",
+      {"model": "fake-m", "autoCompactWindow": None, "idleCompaction": None})
+    rendered = cs.render(settings.resolve(TOOL, None))
+    assert rendered.data == {"model": "fake-m"}
+    assert "autoCompactWindow" not in rendered.data and "idleCompaction" not in rendered.data
+    assert rendered.notes == []
+
+
+def test_a_top_level_auto_is_refused_as_claude_drops_it(tree):
+    """Claude Code 2.1.316 takes "auto" only per model (`modelSettings`);
+    its top-level `autoCompactWindow` is an integer that drops anything
+    else (`kc`, `.catch(undefined)`). So "auto" is one note, not rendered:
+    in the door it would hand nothing back to Claude."""
+    w(kit(tree) / "claude-code.json", {"autoCompactWindow": "auto", "idleCompaction": True})
+    rendered = cs.render(settings.resolve(TOOL, None))
+    assert rendered.data == {"idleCompaction": True}
+    (note,) = rendered.notes
+    assert note.endswith("not rendered: it needs 100000 to 1000000 tokens")
+
+
+@pytest.mark.parametrize("key, value", [
+    ("autoCompactWindow", 99_999), ("autoCompactWindow", 1_000_001),
+    ("autoCompactWindow", True), ("autoCompactWindow", "400k"),
+    ("autoCompactWindow", "auto"),
+    ("autoCompactWindow", {"default": 400000}),
+    ("idleCompaction", "false"), ("idleCompaction", 0),
+])
+def test_a_compaction_value_claude_would_refuse_is_one_note(tree, key, value):
+    """Out of Claude's range, or the wrong type: not rendered, one note that
+    names the file and what the key needs. Nothing is refused."""
+    w(kit(tree) / "claude-code.json", {"model": "fake-m", key: value})
+    rendered = cs.render(settings.resolve(TOOL, None))
+    assert rendered.data == {"model": "fake-m"}
+    (note,) = rendered.notes
+    assert note.startswith(f"claude-code: {key}")
+    assert str(kit(tree) / "claude-code.json") in note
+
+
+def test_the_rendered_door_carries_idle_compaction_false(tmp_path, scratch):
+    """The super's condition (2), 19:23: the --settings file a live launch
+    writes carries `"idleCompaction": false`, and the window beside it."""
+    w(kit(scratch) / "claude-code.json",
+      {"model": "fake-host", "autoCompactWindow": 400000, "idleCompaction": False})
+    p = plan(tmp_path, scratch, dry_run=False)
+    item = next(f for f in p.files if isinstance(f, PlannedFile)
+                and f.path == settings_door(p.argv))
+    door = json.loads(item.text)
+    assert door["idleCompaction"] is False
+    assert '"idleCompaction": false' in item.text
+    assert door == {"autoCompactWindow": 400000, "idleCompaction": False,
+                    "model": "fake-host", **TUI}
+    (source,) = [s for t, s in p.provenance if t == "--settings"]
+    assert f"autoCompactWindow from host {kit_short()}" in source
+    assert f"idleCompaction from host {kit_short()}" in source
+
+
+def test_an_agent_and_a_seat_set_the_compaction_keys(tmp_path, scratch):
+    """Any layer sets them: the agent file's `settings:`, a seat over it."""
+    w(scratch / ".session" / "seats" / "s1" / "settings" / "claude-code.json",
+      {"autoCompactWindow": 500000})
+    fm = ("claude:\n  effort: high\nsettings:\n  claude-code.idleCompaction: false\n"
+          "  claude-code.autoCompactWindow: 300000\n")
+    p = plan(tmp_path, scratch, front_matter=fm, flags=("--seat", "s1"), dry_run=False)
+    item = next(f for f in p.files if isinstance(f, PlannedFile)
+                and f.path == settings_door(p.argv))
+    door = json.loads(item.text)
+    assert door["idleCompaction"] is False and door["autoCompactWindow"] == 500000
+
+
+def test_with_no_compaction_key_the_door_is_todays(tmp_path, scratch):
+    w(kit(scratch) / "claude-code.json", {"model": "fake-host"})
+    p = plan(tmp_path, scratch, dry_run=False)
+    item = next(f for f in p.files if isinstance(f, PlannedFile)
+                and f.path == settings_door(p.argv))
+    assert json.loads(item.text) == {"model": "fake-host", **TUI}

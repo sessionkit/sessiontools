@@ -55,7 +55,7 @@ it is FAIL.
 | `tree` | no unsaved work where the seat sits | a task seat: the task's `worktree/` and its store at the task dir, read as `session reap` reads a tail ([closing idle seats][reap]). No task: the cwd itself |
 | `work` | nothing running but a listener or the idle timer | the processes under the seat, sorted as the [pane signal][pane-state] sorts them; a background agent with no completion seen; a turn that ended with children still running |
 | `claim` | no claim held in the cwd's task | the task's `harness/.claim/*.json` and its slate, as plain JSON |
-| `mail` | no unread mail in the seat's session box | the box `message path <session id>` names (no box: nothing was ever delivered; no answer: unknown), by the rule `message list --unread` keeps: a `read` mark in the seat's own marks file, drafts not counted, superseded mail hidden |
+| `mail` | no unread mail in the seat's session box | the box `message path <session id>` names (no box: nothing was ever delivered; no answer: unknown), by the rule `message list --unread` keeps: a `read` mark in the seat's own marks file, drafts not counted, superseded mail hidden. One difference: a supersede hides mail only when it comes from the target's own sender (the address, any case, the display name ignored). Any other supersede is refused: the target still counts, and the refused message is named |
 | `promises` | the park declared none, or handed them on | the park's own flags: nothing on disk records a promise, so this one measures nothing and says so |
 
 - **`work`: a listener** is a command on the pane signal's listener list

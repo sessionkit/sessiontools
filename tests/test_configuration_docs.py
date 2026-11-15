@@ -23,6 +23,7 @@ from sessiontools import (
     band,
     busy,
     default_model,
+    default_model_agent,
     default_model_watch,
     migrate,
     operator,
@@ -311,6 +312,7 @@ TEST_FENCES = frozenset({
     pane_state_agent.FENCE_ENV,                # SESSIONTOOLS_PANE_STATE_NO_LAUNCHCTL
     sound_service.FENCE_ENV,                   # SESSIONTOOLS_SOUND_NO_LAUNCHCTL
     migrate.FENCE_ENV,                         # SESSIONTOOLS_MIGRATE_NO_PROBE
+    default_model_agent.FENCE_ENV,             # SESSIONTOOLS_DEFAULT_MODEL_NO_LAUNCHCTL
     "SESSIONTOOLS_SOUND_NO_DEVICE",            # engine.swift
 })
 

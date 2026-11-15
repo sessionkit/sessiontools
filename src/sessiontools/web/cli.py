@@ -9,11 +9,16 @@
     session web passkeys --remove ID...   remove the passkeys whose id starts with ID
     session web serve [--host H] [--port N] [--name NAME]...
                                 the front door (127.0.0.1 by default)
+    session web declare [--dry-run]
+                                write web.json, so `sessionkit service list`
+                                shows the front door; installs nothing
 
 `serve` checks the address before any socket opens: 127.0.0.1, ::1 or a
 literal tailnet address only. A `--name` (or SESSION_WEB_NAMES) is a host
 name the front door is ALSO reached by, over https through a TLS proxy; it
-binds nothing. Stdlib only.
+binds nothing. `declare` writes the front door's service file,
+~/.sessionkit/tools/services/web.json (`service_file`), and nothing else: it
+installs nothing, and it never creates web/. Stdlib only.
 """
 
 from __future__ import annotations
@@ -24,11 +29,24 @@ import re
 import sys
 import time
 
+from sessiontools import service_file
+
 #: Names the front door is also reached by, beside --name: comma- or
 #: space-separated. Merged with every --name.
 NAMES_ENV = "SESSION_WEB_NAMES"
 
-WEB_EPILOG = """the files, in ~/.sessionkit/tools/web/ (0700; each file 0600):
+#: The service file's name, and the verb that runs the front door. `run`,
+#: not a label: nothing installs `serve`, it runs in the foreground.
+SERVICE = "web"
+RUN = ["session", "web", "serve"]
+#: The `install` string is the declaring verb itself, never `serve`: the
+#: kit's `install` runs it, and `serve` would block in the foreground.
+DECLARE = "session web declare"
+DESCRIPTION = "the kit's web front door (PROPOSED)"
+#: `serve --host`'s default, the address `run` listens on.
+DEFAULT_HOST = "127.0.0.1"
+
+WEB_EPILOG = f"""the files, in ~/.sessionkit/tools/web/ (0700; each file 0600):
   pair            the pending code's SHA-256, its expiry and wrong tries
   sessions.json   the SHA-256 of each live session token: created, seen, expires
   rooms.json      the rooms the last rescan found (no secret)
@@ -36,6 +54,14 @@ WEB_EPILOG = """the files, in ~/.sessionkit/tools/web/ (0700; each file 0600):
 No code or token is stored in clear. A session's id is a prefix of its hash.
 A passkey needs the passkey extra (sessiontools[passkey]) and a --name; it
 is added from the menu, within 10 minutes of a pairing-code login.
+
+`declare` installs nothing and starts nothing: it only declares the front
+door to `sessionkit service list`, by writing {service_file.shown(SERVICE)}
+(enabled false, run: {' '.join(RUN)}; install: {DECLARE}), and never
+touches web/. Run it again and it writes the same bytes. --dry-run prints
+the file and writes nothing. If the write fails it prints
+  {service_file.COULD_NOT_WRITE.format(path="PATH", reason="REASON")}
+and exits 1.
 
 examples:
   session web pair
@@ -48,7 +74,8 @@ examples:
   session web serve               # http://127.0.0.1:8750/
   session web serve --name host.example.net
                                   # and https://host.example.net/, behind a TLS
-                                  # proxy that forwards to http://127.0.0.1:8750"""
+                                  # proxy that forwards to http://127.0.0.1:8750
+  session web declare             # write web.json; installs nothing"""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
                                 description="The kit's web front door: one address, one "
                                             "login, one menu (PROPOSED, a spike).")
     from sessiontools.web import server
-    sub = p.add_subparsers(dest="verb", metavar="pair|logout|rescan|passkeys|serve")
+    sub = p.add_subparsers(dest="verb", metavar="pair|logout|rescan|passkeys|declare|serve")
     sub.add_parser("pair", help="print a one-time code for /login",
                    description=f"Print a one-time pairing code: {auth.CODE_TTL // 60} "
                                f"minutes, single use, burned by {auth.MAX_TRIES} wrong "
@@ -84,6 +111,16 @@ def build_parser() -> argparse.ArgumentParser:
                                     "Removing one ends no session: `session web logout` does.")
     kp.add_argument("--remove", nargs="+", default=[], metavar="ID",
                     help="remove the passkeys whose id starts with each ID")
+    dp = sub.add_parser("declare",
+                        help="write web.json, so `sessionkit service list` shows the "
+                             "front door (installs nothing)",
+                        description=f"Declare the front door to `sessionkit service`: write "
+                                    f"{service_file.shown(SERVICE)} (enabled false; run: "
+                                    f"{' '.join(RUN)}). It installs nothing and starts "
+                                    "nothing; it only declares. `session web serve` runs "
+                                    "the front door. Running it again writes the same bytes.")
+    dp.add_argument("--dry-run", action="store_true",
+                    help="print the file it would write; write nothing")
     sp = sub.add_parser("serve", help="run the front door until SIGINT or SIGTERM",
                         description="Run the front door: the login, the menu, Settings "
                                     "(read-only) and the rooms. The address is checked before "
@@ -91,8 +128,8 @@ def build_parser() -> argparse.ArgumentParser:
                                     "tailnet address; 0.0.0.0, :: and host names are refused "
                                     "there. A host name goes in --name: reached by it over "
                                     "https, through a TLS proxy.")
-    sp.add_argument("--host", default="127.0.0.1", metavar="H",
-                    help="the address to listen on (default 127.0.0.1)")
+    sp.add_argument("--host", default=DEFAULT_HOST, metavar="H",
+                    help=f"the address to listen on (default {DEFAULT_HOST})")
     sp.add_argument("--port", type=int, default=server.DEFAULT_PORT, metavar="N",
                     help=f"the port (default {server.DEFAULT_PORT})")
     sp.add_argument("--name", action="append", default=[], metavar="NAME",
@@ -101,6 +138,26 @@ def build_parser() -> argparse.ArgumentParser:
                          f"{NAMES_ENV} adds more (comma- or space-separated). A name "
                          "binds nothing; localhost and addresses are refused")
     return p
+
+
+def service_record() -> dict:
+    """web.json, as `declare` writes it (the services design 1.2): a `run`
+    service, never enabled (nothing installs it), and no label or
+    uninstall."""
+    from sessiontools.web import server
+    return service_file.record(name=SERVICE, run=RUN, enabled=False, install=DECLARE,
+                               description=DESCRIPTION, port=server.DEFAULT_PORT,
+                               bind=DEFAULT_HOST)
+
+
+def _declare(dry_run: bool, env: dict[str, str] | None) -> int:
+    """`session web declare`: web.json and nothing else. Exit 0, or 1 when
+    the write failed (the line says so)."""
+    lines, ok = service_file.declare(service_record(), dry_run=dry_run, env=env)
+    if dry_run:
+        lines = [*lines, "dry run: nothing was written"]
+    print("\n".join(lines))                  # stdout, as the other three verbs print it
+    return 0 if ok else 1
 
 
 def _clock(t: int) -> str:
@@ -115,6 +172,8 @@ def main(argv: list[str], env: dict[str, str] | None = None) -> int:
     if a.verb is None:
         p.print_help(sys.stderr)
         return 2
+    if a.verb == "declare":                  # before auth.Store: web/ is never created
+        return _declare(a.dry_run, env)
     if a.verb == "serve":
         from sessiontools.web import bind, server, unixhttp
         if not 0 < a.port < 65536:

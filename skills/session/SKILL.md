@@ -14,9 +14,10 @@ description: >-
 
 Several agents in one seat? See the sessionkit skill's card, "Several agents in one seat".
 
-- `list`: live sessions, their panes, STATE and CONTEXT; `--pane NAME` for one pane id.
+- `list`: live sessions, panes, STATE and CONTEXT; `--pane NAME`: one pane id.
 - `get PROP [SEAT]`: one property. The props are id, short, pid, name,
-  agent, cwd, status, state, idle, version, pane and model. Bare `get` lists them.
+  agent, cwd, status, state, idle, version, pane, model, launch_command,
+  launch_dir, last_request_at and cache_age_s.
 - `context [SEAT]`: how full a window is; never guess yours, run this.
   [What filled it](references/context.md).
 - `start [FLAGS] [AGENT] [WORDS...]`: launch an agent by name,

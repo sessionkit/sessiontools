@@ -1772,7 +1772,10 @@ def test_hooks_json_wires_every_event_and_keeps_settle():
         return [h["command"] for e in hooks[event] for h in e["hooks"]]
 
     shim = '"${CLAUDE_PLUGIN_ROOT}/hooks/busy-sound"'
-    assert commands("PreToolUse") == [f"{shim} arm"]
+    # sed-guard (ST-303) is its own Bash-only entry after busy-sound's.
+    # PreToolUse's third entry is the hidden-failure note (matcher Bash, ST-319)
+    assert commands("PreToolUse") == [f"{shim} arm", '"${CLAUDE_PLUGIN_ROOT}/hooks/sed-guard"',
+                                      '"${CLAUDE_PLUGIN_ROOT}/hooks/hidden-failure" pre']
     assert hooks["PreToolUse"][0]["matcher"] == "*"
     assert commands("PostToolBatch") == ['"${CLAUDE_PLUGIN_ROOT}/hooks/settle-hook"',
                                          f"{shim} end",

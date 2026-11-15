@@ -19,7 +19,8 @@ from sessiontools.start.identity import SessionIdentity
 from sessiontools.start.plan import build_annotated_argv, build_vendor_argv
 
 CONFIG_VENDOR = {   # the old codex row's shape: a config door and no other
-    "cmd": "acme", "identity_door": None, "agent_plugin_dir_arg": None, "agents_door": None,
+    "cmd": "acme", "identity_door": None, "agent_plugin_dir_arg": None,
+    "agent_add_dir_arg": None, "agents_door": None,
     "system_prompt_door": None, "system_prompt_file_door": None,
     "session_id_flag": None, "prompt_separator": None, "config_door": "-c",
     "settings_door": None, "env": {}}
@@ -36,12 +37,14 @@ def acme(monkeypatch):
 # ---------- the table stays data ----------------------------------------------
 
 def test_vendor_table_is_data_with_one_schema():
-    fields = {"cmd", "identity_door", "agent_plugin_dir_arg", "agents_door",
+    fields = {"cmd", "identity_door", "agent_plugin_dir_arg", "agent_add_dir_arg",
+              "agents_door",
               "system_prompt_door",
               "system_prompt_file_door", "session_id_flag", "prompt_separator",
               "config_door", "settings_door", "env"}
+    optional = {"user_memory"}   # ST-302: a row without it carries none
     for vendor, table in v.VENDORS.items():
-        assert set(table) == fields, vendor
+        assert fields <= set(table) <= fields | optional, vendor
         assert isinstance(table["cmd"], str) and table["cmd"]
         assert isinstance(table["env"], dict)
 
@@ -59,6 +62,13 @@ def test_the_agent_plugin_arg_is_not_a_door():
     """--plugin-dir is REPEATABLE; a door name would make the guard refuse
     every agent that declares its own plugin-dir - which both live ones do."""
     assert "--plugin-dir" not in v.vendor_doors("claude")
+
+
+def test_the_agent_add_dir_arg_is_not_a_door():
+    """--add-dir is REPEATABLE too, and an agent file may declare its own
+    (`claude: add-dir:`): the guard must not refuse it."""
+    assert v.VENDORS["claude"]["agent_add_dir_arg"] == "--add-dir"
+    assert "--add-dir" not in v.vendor_doors("claude")
 
 
 # ---------- the one rendering rule -------------------------------------------
@@ -363,3 +373,13 @@ def test_first_message_file_over_default_is_very_large_and_inline(tmp_path):
     text = "w" * 20000
     assert build_vendor_argv("claude", {}, initial_message=text,
                              directory=str(tmp_path))[-1] == text
+
+
+def test_the_system_prompt_escapes_no_longer_promise_an_empty_injection():
+    """ST-302: under --idle the user's CLAUDE.md can still ride the file
+    door (it yields to the operator's own file), so the escape advice must
+    not say the launcher injects nothing."""
+    from sessiontools.start.vendor import DOOR_ESCAPES
+    for field in ("system_prompt_door", "system_prompt_file_door"):
+        assert "injects nothing" not in DOOR_ESCAPES[field]
+    assert "CLAUDE.md yields" in DOOR_ESCAPES["system_prompt_file_door"]

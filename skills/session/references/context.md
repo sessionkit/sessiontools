@@ -53,13 +53,14 @@ bare `session context --json` has no rows. An unknown window is `null`,
 never a guess.
 
 The one-liner's JSON and `--parts --json` carry `band`: how close the
-window is to the seat's settle threshold (`SESSION_SETTLE_AT`).
+window is to the seat's settle threshold: `settle.soft.at`, the soft
+line's mark, read through the settings cascade (no soft line, no band).
 
 - `over`: at or past the threshold.
 - `near`: inside the near band, which starts `context.near_pct` percent
   (default 20) below the threshold.
 - `ok`: below the near band.
-- `null`: no threshold is set, or the count is unknown.
+- `null`: no soft line is set, or the count is unknown.
 
 So with a threshold of 250K and the default 20, `near` starts at 200K.
 `context.near_pct` is a setting of the `session` tool, read down the

@@ -12,11 +12,9 @@ path of its own.
 
 WHO WRITES IT: the launch script, by running this module on the line after
 the launch record and before the vendor (`render_identity_call`). In the
-pane every fact is real: the id (a keyed pane mint's `$CLAUDE_SESSION_ID`
-included), `$TMUX_PANE`, the seat's claim and the live sidecars. On the tmux
-path the default seat's claim still names the launcher until the launcher
-moves it to the new pane, so the writer waits for that move, briefly and
-bounded, before it reads who holds the seat.
+pane every fact is real: the id, `$TMUX_PANE`, the seat's claim and the live
+sidecars. A placed pane runs `session start` itself and claims the seat for
+itself, so there is nothing to wait for.
 
 NEVER A GUESS. Each line says what it does not know, and why. The facts that
 change after launch (call holder, seat-mates) are labelled "at launch", and
@@ -38,7 +36,6 @@ import os
 import shlex
 import sys
 import tempfile
-import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple
@@ -46,7 +43,7 @@ from typing import NamedTuple
 from sessiontools import claude_code, identity_block
 from sessiontools import procs as _procs
 from sessiontools.start import default_seat, holders
-from sessiontools.start.vendor import ShellExpr, ShellVar, render_argv_token
+from sessiontools.start.vendor import render_argv_token
 
 PROG = "session start: identity block"
 MODULE = "sessiontools.start.boot_identity"
@@ -74,11 +71,6 @@ NOT_APPLICABLE = "n/a (no seat)"
 ADDRESS_ENV = "TM_AGENT_ADDRESS"
 
 SHORT = 8
-
-#: How long the writer waits for the launcher to move the seat's claim to
-#: this pane, and how often it looks.
-REPOINT_WAIT_S = 3.0
-REPOINT_POLL_S = 0.05
 
 #: The most lines the block may have (mail prints it verbatim).
 MAX_LINES = 20
@@ -180,8 +172,10 @@ def address_of(session_dir: Path) -> str | None:
 
 def seat_of(session_id: str, environ: Mapping[str, str] | None = None) -> str | None:
     """The seat another session took, by the rule this block's own Seat line
-    uses: its birth record's seat, else the default seat word when it was born
-    as that agent, else the address its launch handed down. None for none."""
+    uses: its birth record's seat, else its agent's when that agent's claim
+    names this session (the front-door claim `session list` reads), else the
+    default seat word when it was born as that agent, else the address its
+    launch handed down. None for none."""
     from sessiontools import settings as _settings
     try:
         agent, seat = _settings.identity(session_id, environ)
@@ -189,9 +183,24 @@ def seat_of(session_id: str, environ: Mapping[str, str] | None = None) -> str | 
         agent = seat = None
     if seat:
         return seat
+    if agent and _claim_names(agent, session_id, environ):
+        return agent
     if agent and agent == default_seat.word():
         return agent
     return address_of(_settings.session_dir(session_id, environ))
+
+
+def _claim_names(agent: str, session_id: str,
+                 environ: Mapping[str, str] | None = None) -> bool:
+    """Whether AGENT's claim records SESSION_ID as its session. Reads the one
+    claim file; a claim that is missing, unreadable or names another session
+    (or none yet) says no. The caller lists live sessions only, and a claim
+    names its session's own pid, so no liveness read is needed here."""
+    try:
+        claim = holders.read_claim(agent, environ)
+    except (OSError, ValueError):       # ClaimUnreadable, or a name no claim may have
+        return False
+    return bool(claim) and claim.get("sessionId") == session_id
 
 
 def seat_mates(seat: str, session_id: str, procs: Mapping,
@@ -211,46 +220,13 @@ def seat_mates(seat: str, session_id: str, procs: Mapping,
     return [Mate(s.id, holders.pane_of(s.tmux)) for s in found]
 
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def wait_for_repoint(seat: str, launcher_pid: int, environ: Mapping[str, str] | None = None,
-                     wait: float = REPOINT_WAIT_S,
-                     sleep: Callable[[float], None] = time.sleep,
-                     clock: Callable[[], float] = time.monotonic) -> str:
-    """On the tmux path, wait while the seat's claim still names the launcher
-    (LAUNCHER_PID, alive): the launcher moves it to this pane right after the
-    window opens. Returns "" once it has moved (or the launcher is gone, or
-    there is no claim), else why the holder cannot be said yet."""
-    deadline = clock() + wait
-    while True:
-        try:
-            claim = holders.read_claim(seat, environ)
-        except holders.ClaimUnreadable as error:
-            return str(error)
-        if not claim or claim.get("pid") != launcher_pid or not _pid_alive(launcher_pid):
-            return ""
-        if clock() >= deadline:
-            return (f"the seat's claim had not moved from the launcher to this pane "
-                    f"after {wait:g}s")
-        sleep(REPOINT_POLL_S)
-
-
 def gather(session_id: str, seat: str | None, nickname: str | None, *, keyed: bool,
-           self_pids: Iterable[int] = (), launcher_pid: int | None = None,
+           self_pids: Iterable[int] = (),
            environ: Mapping[str, str] | None = None,
-           table: Callable[[], dict] = _procs.table,
-           sleep: Callable[[float], None] = time.sleep,
-           clock: Callable[[], float] = time.monotonic) -> Facts:
+           table: Callable[[], dict] = _procs.table) -> Facts:
     """The facts, measured where the script runs. SEAT is the launcher's
-    (`--seat`, or the default seat word), else the address handed down in
+    (`--seat`, the seat whose claim the launch wrote, or the default seat
+    word: `plan.launch_seat`), else the address handed down in
     ENVIRON; the pane is ENVIRON's `$TMUX_PANE`. SELF_PIDS are this
     session's own processes (the script's shell, and on the tmux path its
     parent): a claim naming one of them is this session's. One process-table
@@ -261,12 +237,6 @@ def gather(session_id: str, seat: str | None, nickname: str | None, *, keyed: bo
     if not seat:
         return Facts(session_id, None, nickname, pane, holder_value(None, None, mine=False),
                      mates_value(None, ()), keyed)
-    waited = ""
-    if launcher_pid is not None:
-        try:
-            waited = wait_for_repoint(seat, launcher_pid, environ, sleep=sleep, clock=clock)
-        except ValueError as error:      # a seat that cannot name a claim file
-            waited = str(error)
     try:
         procs = table()
     except Exception as error:   # noqa: BLE001 - say why, never raise past a launch
@@ -275,16 +245,13 @@ def gather(session_id: str, seat: str | None, nickname: str | None, *, keyed: bo
         why = "" if procs else "the process table came back empty (`ps` failed?)"
     if why:
         return Facts(session_id, seat, nickname, pane, unknown(why), unknown(why), keyed)
-    if waited:
-        holder = holder_value(seat, None, mine=False, unmeasured=waited)
-    else:
-        try:
-            found = default_seat.check(seat, environ, direct=False, table=lambda: procs)
-        except ValueError as error:
-            found = default_seat.Check(None, str(error))
-        mine = found.holder is not None and (
-            found.holder.pid in set(self_pids) or found.holder.session_id == session_id)
-        holder = holder_value(seat, found.holder, mine=mine, unmeasured=found.unmeasured)
+    try:
+        found = default_seat.check(seat, environ, direct=False, table=lambda: procs)
+    except ValueError as error:
+        found = default_seat.Check(None, str(error))
+    mine = found.holder is not None and (
+        found.holder.pid in set(self_pids) or found.holder.session_id == session_id)
+    holder = holder_value(seat, found.holder, mine=mine, unmeasured=found.unmeasured)
     try:
         mates = mates_value(seat, seat_mates(seat, session_id, procs, environ))
     except OSError as error:
@@ -322,49 +289,39 @@ def write_block(session_dir: str | os.PathLike, text: str) -> Path:
 
 def name_token(argv: Sequence[object]):
     """The value of the vendor's `-n`/`--name` in ARGV, in any spelling
-    (`-n X`, `-nX`, `--name X`, `--name=X`), as the argv holds it: a str, or
-    the ShellExpr a pane mint's `{shortsid}` became. None when there is none.
+    (`-n X`, `-nX`, `--name X`, `--name=X`), as the argv holds it: a str.
+    None when there is none.
     The scan stops at `--`: what follows is the first message."""
     tokens = list(argv)
     for i, token in enumerate(tokens):
-        text = token.text if isinstance(token, ShellExpr) else token
-        if not isinstance(text, str):
+        if not isinstance(token, str):
             continue
-        if text == "--":
+        if token == "--":
             return None
-        if text in holders.NAME_FLAGS:
+        if token in holders.NAME_FLAGS:
             return tokens[i + 1] if i + 1 < len(tokens) else None
         for prefix in ("--name=", "-n"):
-            if text.startswith(prefix) and not (prefix == "-n" and text.startswith("--")):
-                rest = text[len(prefix):]
-                return ShellExpr(rest) if isinstance(token, ShellExpr) else rest
+            if token.startswith(prefix) and not (prefix == "-n" and token.startswith("--")):
+                return token[len(prefix):]
     return None
 
 
 def render_identity_call(session_dir: str, argv: Sequence[object], *, seat: str | None,
-                         keyed: bool, in_pane: bool, launcher_pid: int | None = None,
-                         python: str | None = None) -> str:
+                         keyed: bool, python: str | None = None) -> str:
     """The script lines that write the identity block: this interpreter,
-    isolated (`-I`), `--dir` exactly as the launch record's (a pane mint's
-    `$CLAUDE_SESSION_ID` expands in both), the name as the vendor gets it
-    (bash fills a pane mint's `{shortsid}` here as it does there), and the
-    script's own pid (`$$`; on the tmux path its parent too, the pane's
-    process when the pane's shell did not exec). `|| :` - a block never
+    isolated (`-I`), `--dir` exactly as the launch record's, the name as the
+    vendor gets it, and the script's own pid (`$$`). `|| :` - a block never
     stops a launch."""
     python = python or sys.executable
     parts = [shlex.quote(python), "-I", "-c", shlex.quote(ENTRY), "--dir", session_dir]
     if seat:
         parts += ["--seat", shlex.quote(seat)]
     token = name_token(argv)
-    if isinstance(token, (str, ShellExpr, ShellVar)):
+    if isinstance(token, str):
         parts.append("--name=" + render_argv_token(token))
     if keyed:
         parts.append("--keyed")
     parts += ["--self-pid", '"$$"']
-    if in_pane:
-        parts += ["--self-pid", '"$PPID"']
-    if launcher_pid is not None:
-        parts += ["--launcher-pid", str(launcher_pid)]
     return "\n".join([
         (f"# identity block: who this session is, at launch -> <session dir>/{IDENTITY_FILE} "
          "(0600, never argv)"),
@@ -381,7 +338,6 @@ def parse_identity_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--name", default=None)
     parser.add_argument("--keyed", action="store_true")
     parser.add_argument("--self-pid", type=int, action="append", default=[])
-    parser.add_argument("--launcher-pid", type=int, default=None)
     return parser.parse_args(argv)
 
 
@@ -394,8 +350,7 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
         session_id = environ.get("CLAUDE_SESSION_ID") or os.path.basename(
             os.path.normpath(args.dir))
         facts = gather(session_id, args.seat, args.name or None, keyed=args.keyed,
-                       self_pids=args.self_pid, launcher_pid=args.launcher_pid,
-                       environ=environ)
+                       self_pids=args.self_pid, environ=environ)
         write_block(args.dir, render(facts))
     except SystemExit:
         print(f"{PROG}: bad arguments; not written", file=sys.stderr)
@@ -418,7 +373,6 @@ __all__ = [
     "render_identity_call",
     "seat_mates",
     "seat_of",
-    "wait_for_repoint",
     "write_block",
 ]
 

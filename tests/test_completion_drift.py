@@ -94,7 +94,8 @@ def _accepted(parser: argparse.ArgumentParser, path: tuple[str, ...]):
         if isinstance(a, argparse._SubParsersAction):
             subs |= set(a.choices)
             nested += [((*path, s), sp) for s, sp in a.choices.items()]
-        longs |= {o for o in a.option_strings if o.startswith("--")}
+        if a.help is not argparse.SUPPRESS:      # hidden from --help: not offered
+            longs |= {o for o in a.option_strings if o.startswith("--")}
     yield path, subs, longs
     for p, sp in nested:
         yield from _accepted(sp, p)
@@ -270,7 +271,8 @@ def test_parsers_and_handlers_hold_the_same_verbs():
     (("sound", "engine"), ["build", "on", "off", "status"]),
     (("account",), ["list", "status", "use"]),
     (("pane-state",), ["show", "watch", "agent"]),
-    (("default-model",), ["show", "list", "enforce", "watch", "unit"]),
+    (("default-model",), ["show", "list", "enforce", "watch", "unit", "agent"]),
+    (("default-model", "agent"), ["on", "off", "status"]),
     (("agent",), ["default"]),
 ])
 def test_the_named_sub_verbs(script, path, subs):
@@ -289,7 +291,7 @@ def _mutated(script: Path, tmp_path: Path, old: str, new: str) -> Path:
 
 
 def test_a_dropped_verb_is_caught(script, tmp_path):
-    p = _mutated(script, tmp_path, " park path completion web'", " path completion web'")
+    p = _mutated(script, tmp_path, " park respawn path completion web'", " respawn path completion web'")
     assert missing_verbs(p) == {"park"}
 
 
@@ -301,7 +303,7 @@ def test_a_dropped_sub_verb_is_caught(script, tmp_path):
 
 
 def test_an_offered_verb_the_dispatcher_refuses_is_caught(script, tmp_path, no_side_effects):
-    p = _mutated(script, tmp_path, " park path completion web'", " park path completion web mail'")
+    p = _mutated(script, tmp_path, " park respawn path completion web'", " park respawn path completion web mail'")
     assert unknown_verbs(p) == {"mail"}
     assert refused(p) == ["session mail --help does not exit 0", "session mail --help exits 2"]
 

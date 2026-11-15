@@ -113,6 +113,8 @@ def _walled_off_from_the_live_sessions(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("SESSIONTOOLS_SOUND_NO_LAUNCHCTL", "1")
     # The same fence for `session pane-state agent` (ST-166).
     monkeypatch.setenv("SESSIONTOOLS_PANE_STATE_NO_LAUNCHCTL", "1")
+    # And for `session default-model agent` (ST-289).
+    monkeypatch.setenv("SESSIONTOOLS_DEFAULT_MODEL_NO_LAUNCHCTL", "1")
     # And for `session path migrate`'s agent probe (ST-266 do-004).
     monkeypatch.setenv("SESSIONTOOLS_MIGRATE_NO_PROBE", "1")
     # `session list`'s snapshot (ST-111) lands in a fresh state dir per test,

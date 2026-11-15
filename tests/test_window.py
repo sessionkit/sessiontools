@@ -5,6 +5,7 @@ behaviour of the session repo's `session-context` / `session-list`
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -151,7 +152,8 @@ def test_unknowable_is_five_nones_never_zero(projects, tmp_path):
     assert c.of("no-rows", "/w", env) == c.UNKNOWN
     assert c.of("dir-1", "/w", env) == c.UNKNOWN        # unreadable: never raises
     assert c.UNKNOWN.fields() == dict.fromkeys(
-        ["context_used", "context_peak", "context_window", "context_pct", "context_model"])
+        ["context_used", "context_peak", "context_window", "context_pct", "context_model",
+         "last_request_at", "cache_age_s"])                   # ST-326: additive
 
 
 # ---------- long cwds: Claude Code's 200-character cap (ST-125) -------------
@@ -319,7 +321,245 @@ def test_a_set_but_empty_projects_dir_stays_isolated(monkeypatch):
     (c.Fullness(used=370_000, peak=370_000, window=1_000_000, pct=37, model=OPUS), "37%"),
     (c.Fullness(used=0, peak=0, window=1_000_000, pct=0, model=OPUS), "0%"),       # a reading
     (c.Fullness(used=0, peak=277_000, window=1_000_000, pct=0, model=OPUS), "?"),  # synthetic tail
-    (c.Fullness(used=10, peak=10, window=None, pct=None, model="claude-new"), "?"),
+    (c.Fullness(used=10, peak=10, window=None, pct=None, model="claude-new"), "0%?"),
+    # an unknown model shows its usage against the assumed 1M, marked
+    (c.Fullness(used=370_000, peak=370_000, window=None, pct=None, model="claude-fable-5-3"), "37%?"),
+    # ...but never over the assumed window
+    (c.Fullness(used=1_200_000, peak=1_200_000, window=None, pct=None, model="claude-new"), "?"),
+    # a KNOWN model with no window (over its map) keeps a bare ?: its None is real
+    (c.Fullness(used=250_000, peak=250_000, window=None, pct=None, model="claude-haiku-4-5"), "?"),
 ])
 def test_the_cell_is_percent_or_a_placeholder(ctx, text):
     assert c.cell(ctx) == text
+
+
+def test_fable_and_mythos_5_2_have_a_window():
+    """Fable 5.2 showed `?` while 5.1 showed a percent; the map had
+    no 5.2 row."""
+    assert c.resolve_window("claude-fable-5-2", 10, env={}) == 1_000_000
+    assert c.resolve_window("claude-mythos-5-2", 10, env={}) == 1_000_000
+
+
+def test_the_assumed_window_is_display_only():
+    """The JSON stays honest: an unknown model's window and pct are None."""
+    assert c.resolve_window("claude-fable-5-3", 10, env={}) is None
+    f = c.Fullness(used=370_000, peak=370_000, window=None, pct=None, model="claude-fable-5-3")
+    assert f.fields()["context_pct"] is None
+    assert c.cell(f) == "37%?"
+
+
+# ---------- the cache clock: last_request_at / cache_age_s (ST-326) ---------
+#
+# Synthetic transcripts only: timestamps and token counts, never a real
+# transcript's text (they hold secrets).
+
+NOW = datetime(2030, 6, 9, 3, 0, 0, tzinfo=UTC)
+NOW_S = NOW.timestamp()
+#: Midnight on 0001-01-01 at +01:00, the stamp of an instant before UTC's
+#: year 1. Built, not written, so no clock sits apart from a 2030 date.
+BEFORE_YEAR_ONE = datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1))).isoformat()
+
+
+def at(used=None, ts=None, model=OPUS, **usage):
+    """A row like `row()`, with a top-level `timestamp` when TS is given."""
+    obj = json.loads(row(used, model=model, **usage))
+    if ts is not None:
+        obj["timestamp"] = ts
+    return json.dumps(obj)
+
+
+def test_scan_records_the_last_usage_rows_timestamp(tmp_path):
+    p = transcript(tmp_path, at(100, "2030-06-09T01:00:00.000Z"),
+                   at(500, "2030-06-09T02:45:11.553Z"))
+    u = c.scan(p)
+    assert u.last_request_at == "2030-06-09T02:45:11.553Z"
+    assert (u.used, u.peak, u.usage_rows) == (500, 500, 2)
+
+
+def test_last_request_at_is_the_row_that_sets_used(tmp_path):
+    """Not the largest, not the first: the LAST counted usage row's, the
+    same row `used` comes from."""
+    p = transcript(tmp_path, at(900, "2030-06-09T02:00:00Z"), at(10, "2030-06-09T02:30:00Z"))
+    u = c.scan(p)
+    assert (u.used, u.peak, u.last_request_at) == (10, 900, "2030-06-09T02:30:00.000Z")
+
+
+@pytest.mark.parametrize("raw, want", [
+    ("2030-06-09T02:45:11.553Z", "2030-06-09T02:45:11.553Z"),
+    ("2030-06-09T02:45:11Z", "2030-06-09T02:45:11.000Z"),
+    ("2030-06-09T02:45:11.553+00:00", "2030-06-09T02:45:11.553Z"),
+    ("2030-06-09T13:45:11.553+11:00", "2030-06-09T02:45:11.553Z"),     # +11:00 -> UTC
+    ("2030-06-09T02:45:11.553999Z", "2030-06-09T02:45:11.553Z"),      # micro -> milli
+])
+def test_iso_utc_writes_utc_ending_z(raw, want):
+    assert c.iso_utc(raw) == want
+
+
+@pytest.mark.parametrize("raw", [
+    None, "", "   ", 1907203511, 1907203511.5, ["2030-06-09T02:45:11Z"], {"t": 1},
+    "yesterday", "2030-06-09T99:00:00Z",
+    "2030-06-09T02:45:11",        # naive: no zone, so no guess at one
+    "2030-06-09",                 # a date alone
+    BEFORE_YEAR_ONE,              # no UTC instant exists for it
+])
+def test_iso_utc_is_none_for_anything_not_a_zoned_instant(raw):
+    assert c.iso_utc(raw) is None
+
+
+@pytest.mark.parametrize("bad", [
+    None, "not a time", 1907203511, "2030-06-09T02:45:11", BEFORE_YEAR_ONE])
+def test_a_bad_timestamp_gives_none_and_never_costs_the_row(tmp_path, bad):
+    """The last usage row's timestamp is missing or unreadable: None, never
+    an earlier row's (that would be a guess), and used/peak/rows/model are
+    exactly what they are without any timestamp at all."""
+    p = transcript(tmp_path, at(100, "2030-06-09T01:00:00Z"), at(700, bad))
+    u = c.scan(p)
+    assert u.last_request_at is None
+    assert u == c.Usage(used=700, peak=700, model=OPUS, usage_rows=2)
+
+
+def test_a_later_good_timestamp_recovers_the_clock(tmp_path):
+    p = transcript(tmp_path, at(100, "garbage"), at(200, "2030-06-09T02:00:00Z"))
+    assert c.scan(p).last_request_at == "2030-06-09T02:00:00.000Z"
+
+
+def test_a_trailing_line_that_is_not_a_usage_row_does_not_move_it(tmp_path):
+    """User turns, tool results, a model-only line, an empty usage and a
+    line the fold cannot read all carry or sit after a later timestamp;
+    none of them is a counted usage row, so none moves the clock."""
+    later = "2030-06-09T02:59:00Z"
+    p = transcript(
+        tmp_path,
+        at(400, "2030-06-09T02:10:00Z"),
+        json.dumps({"type": "user", "timestamp": later, "message": {"content": "hi"}}),
+        json.dumps({"type": "assistant", "timestamp": later, "message": {"model": OPUS}}),
+        json.dumps({"timestamp": later, "message": {"model": OPUS, "usage": {}}}),
+        json.dumps({"timestamp": later, "message": {"usage": {"input_tokens": "x", "cache_read_input_tokens": 1}}}),
+        '{"timestamp": "' + later + '", "message": {"usage": {"input_tokens": 9',
+    )
+    u = c.scan(p)
+    assert (u.last_request_at, u.used, u.usage_rows) == ("2030-06-09T02:10:00.000Z", 400, 1)
+
+
+def test_no_usage_row_is_no_clock(tmp_path):
+    p = transcript(tmp_path, json.dumps({"type": "user", "timestamp": "2030-06-09T02:00:00Z",
+                                         "message": {"content": "hi"}}))
+    assert c.scan(p).last_request_at is None
+
+
+@pytest.mark.parametrize("last, now, age", [
+    ("2030-06-09T02:00:00.000Z", NOW_S, 3600),
+    ("2030-06-09T02:59:59.400Z", NOW_S, 0),             # 0.6 s: whole seconds, floored
+    ("2030-06-09T02:58:59.999Z", NOW_S, 60),
+    ("2030-06-09T03:00:05.000Z", NOW_S, 0),             # ahead of the clock: 0, never negative
+    ("2030-06-09T13:00:00.000+11:00", NOW_S, 3600),     # any offset reads the same instant
+    (None, NOW_S, None),
+    ("unreadable", NOW_S, None),
+])
+def test_cache_age_s_is_whole_seconds_since_floored_at_zero(last, now, age):
+    assert c.cache_age_s(last, now) == age
+    assert c.Fullness(last_request_at=last).cache_age_s(now) == age
+
+
+def test_cache_age_s_with_no_now_reads_the_clock(monkeypatch):
+    monkeypatch.setattr(c.time, "time", lambda: NOW_S + 90)
+    assert c.cache_age_s("2030-06-09T03:00:00Z") == 90
+    assert c.Fullness(last_request_at="2030-06-09T03:00:00Z").fields()["cache_age_s"] == 90
+
+
+PRE_ST326_KEYS = ["context_used", "context_peak", "context_window", "context_pct",
+                  "context_model"]
+
+
+def test_fields_is_additive_the_old_keys_first_and_unchanged():
+    f = c.Fullness(used=1, peak=2, window=3, pct=4, model=OPUS,
+                   last_request_at="2030-06-09T02:00:00.000Z")
+    got = f.fields(NOW_S)
+    assert list(got)[:len(PRE_ST326_KEYS)] == PRE_ST326_KEYS
+    assert [got[k] for k in PRE_ST326_KEYS] == [1, 2, 3, 4, OPUS]
+    assert list(got)[len(PRE_ST326_KEYS):] == ["last_request_at", "cache_age_s"]
+    assert (got["last_request_at"], got["cache_age_s"]) == ("2030-06-09T02:00:00.000Z", 3600)
+    assert c.UNKNOWN.fields(NOW_S) == dict.fromkeys(PRE_ST326_KEYS + ["last_request_at",
+                                                                      "cache_age_s"])
+
+
+def test_of_carries_the_clock_and_fields_measures_it_against_now(projects):
+    root, env = projects
+    put(root, "/w", "abc-9", at(125_000, "2030-06-09T02:30:00.000Z"))
+    f = c.of("abc-9", "/w", env)
+    assert f == c.Fullness(used=125_000, peak=125_000, window=1_000_000, pct=12, model=OPUS,
+                           last_request_at="2030-06-09T02:30:00.000Z")
+    assert f.fields(NOW_S)["cache_age_s"] == 1800
+    assert f.fields(NOW_S + 1800)["cache_age_s"] == 3600     # the same reading, later
+
+
+# The shape of SM-1047's 156 measured wake gaps (wake-origin-7d.tsv: gap_min
+# from 60.0 to 381.9, the cache going cold between 60.1 and 60.8). Built here
+# from numbers alone, nothing copied from the file, and widened to cross the
+# hour from BELOW too: the clock must read true either side of 60 min.
+SM1047_EDGE_MIN = (59.0, 59.5, 59.9, 59.99, 60.0, 60.0, 60.05, 60.1, 60.1, 60.8, 61.4, 63.0)
+
+
+def sm1047_shaped_gaps() -> list[float]:
+    rest = 156 - len(SM1047_EDGE_MIN)
+    spread = [round(61.0 * (381.9 / 61.0) ** (i / (rest - 1)), 2) for i in range(rest)]
+    return [*SM1047_EDGE_MIN, *spread]
+
+
+def test_the_sm1047_shaped_gaps_read_true_either_side_of_the_hour(tmp_path):
+    gaps = sm1047_shaped_gaps()
+    assert len(gaps) == 156 and min(gaps) < 60 < max(gaps) and max(gaps) == 381.9
+    for i, gap_min in enumerate(gaps):
+        last = NOW - timedelta(minutes=gap_min)
+        earlier = last - timedelta(minutes=5)
+        p = transcript(
+            tmp_path,
+            at(1000, earlier.isoformat().replace("+00:00", "Z")),
+            at(2000, last.isoformat().replace("+00:00", "Z")),
+            json.dumps({"type": "user", "timestamp": NOW.isoformat(),   # the wake itself
+                        "message": {"content": "page"}}),
+            name=f"gap-{i}.jsonl")
+        u = c.scan(p)
+        age = c.Fullness(used=u.used, last_request_at=u.last_request_at).cache_age_s(NOW_S)
+        want = int((timedelta(minutes=gap_min) // timedelta(milliseconds=1)) // 1000)
+        assert age == want, (gap_min, u.last_request_at)
+        assert (age >= 3600) == (gap_min >= 60.0), gap_min       # the hour, read true
+
+
+# ---------- a <synthetic> row never moves the clock (ST-326 ruling 14:11) ----
+
+def test_a_synthetic_tail_after_a_real_row_keeps_the_real_rows_timestamp(tmp_path):
+    """A `<synthetic>` usage row is Claude Code's own message, not an API
+    request: it still sets used (to 0, as today) and counts a row, but the
+    clock stays on the last REAL row. Moving it would understate the cache's
+    age, the failure SM-1047 found."""
+    p = transcript(tmp_path, at(900, "2030-06-09T02:00:00Z"),
+                   at(0, "2030-06-09T02:50:00Z", model=c.SYNTHETIC_MODEL))
+    u = c.scan(p)
+    assert u.last_request_at == "2030-06-09T02:00:00.000Z"
+    assert (u.used, u.peak, u.usage_rows, u.model) == (0, 900, 2, OPUS)   # today's fold
+    assert c.cache_age_s(u.last_request_at, NOW_S) == 3600
+
+
+@pytest.mark.parametrize("model", [c.SYNTHETIC_MODEL, " <synthetic> ", None, "", 7])
+def test_only_a_real_model_usage_row_sets_the_clock(tmp_path, model):
+    """No real row at all: no clock, though used/rows count the row."""
+    p = transcript(tmp_path, at(5, "2030-06-09T02:50:00Z", model=model))
+    u = c.scan(p)
+    assert u.last_request_at is None
+    assert (u.used, u.usage_rows) == (5, 1)
+
+
+def test_a_real_row_after_a_synthetic_one_moves_the_clock(tmp_path):
+    p = transcript(tmp_path, at(900, "2030-06-09T01:00:00Z"),
+                   at(0, "2030-06-09T01:30:00Z", model=c.SYNTHETIC_MODEL),
+                   at(950, "2030-06-09T02:10:00Z"))
+    assert c.scan(p).last_request_at == "2030-06-09T02:10:00.000Z"
+
+
+def test_a_bad_timestamp_on_the_last_real_row_is_none_past_a_synthetic_tail(tmp_path):
+    """The rule for a bad timestamp is unchanged: the last REAL row's is
+    unreadable, so None, and a synthetic tail does not paper over it."""
+    p = transcript(tmp_path, at(100, "2030-06-09T01:00:00Z"), at(700, "garbage"),
+                   at(0, "2030-06-09T02:50:00Z", model=c.SYNTHETIC_MODEL))
+    assert c.scan(p).last_request_at is None
